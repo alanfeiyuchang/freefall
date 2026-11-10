@@ -622,11 +622,32 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
         float3 surface = oceanShade(N, rd, sunDir, dot(sunVis, float3(0.3333f)), 0.006f + residual, waterAlbedo, A, skySeaLUT);
         if (land + surf > 0.0f) {
             // 沙洲和白浪：漫反射（沙滩、椰林、浪花）
-            float3 E = A.sunAtSea.rgb * sunVis * saturate(dot(sphereN, sunDir)) + A.skyIrradianceSea.rgb;
             // 沙滩近看有细纹（风吹出来的沙纹），水边一圈湿沙颜色深
             float ripple = waveNoise.sample(linearRepeat, float3(g.x / 2.5f, 0.53f, g.y / 2.5f), level(0)).r;
             float wet = sandbar * smoothstep(-6.0f, 0.0f, sandEdge);
-            float3 sand = float3(0.66f, 0.6f, 0.48f) * (0.9f + 0.2f * ripple) * (1.0f - 0.35f * wet);
+            // 落地前一两百米：沙面的起伏（差分出法线，斜阳下一道道沙纹有明暗）、沙粒、零星的贝壳和碎珊瑚、
+            // 涨潮留下的一道海草线。之前沙洲按一个平面打光，近看是一整片没有细节的米白色
+            float3 Ns = sphereN;
+            float grain = 0.0f, debris = 0.0f;
+            float near = saturate(2.5f / (footprint * 9.0f) - 1.0f) * sandbar;
+            if (near > 0.0f) {
+                float rx = waveNoise.sample(linearRepeat, float3(g.x / 2.5f + 0.08f, 0.53f, g.y / 2.5f), level(0)).r;
+                float rz = waveNoise.sample(linearRepeat, float3(g.x / 2.5f, 0.53f, g.y / 2.5f + 0.08f), level(0)).r;
+                const float2 wind = float2(0.94f, 0.34f);
+                float lines = sin(dot(g, wind) * 7.0f + ripple * 9.0f);
+                Ns = normalize(sphereN + (float3(ripple - rx, 0.0f, ripple - rz) * 1.1f
+                                          + float3(wind.x, 0.0f, wind.y) * (lines * 0.07f)) * near);
+                float2 q = float2(g.x * 0.8f + g.y * 0.6f, -g.x * 0.6f + g.y * 0.8f) / 0.45f;
+                float4 fine = waveNoise.sample(linearRepeat, float3(q.x, 0.83f, q.y), level(0));
+                float close = saturate(0.45f / (footprint * 9.0f) - 1.0f);
+                grain = (fine.r - 0.55f) * close;
+                debris = smoothstep(0.94f, 0.97f, fine.a) * close * step(0.6f, ripple);
+            }
+            float wrack = sandbar * exp(-pow((sandEdge + 9.0f + 3.0f * (ripple - 0.5f)) / 0.7f, 2.0f)) * step(0.5f, detail);
+            float3 E = A.sunAtSea.rgb * sunVis * saturate(dot(Ns, sunDir)) + cloudySkyFill(A.skyIrradianceSea.rgb);
+            float3 sand = float3(0.55f, 0.50f, 0.40f) * (0.9f + 0.2f * ripple + 0.35f * grain) * (1.0f - 0.35f * wet);
+            sand = mix(sand, float3(0.62f, 0.58f, 0.52f), debris * 0.8f);
+            sand = mix(sand, float3(0.09f, 0.075f, 0.04f), wrack * 0.55f);
             // 椰林一团一团深浅不一（树冠之间有阴影）
             float3 forest = float3(0.07f, 0.15f, 0.045f) * (0.6f + 0.8f * saturate(vegetation - 0.25f));
             float3 landAlbedo = mix(sand, forest, saturate(vegetation * 1.3f));
@@ -635,8 +656,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
             float ring = fract(r / 4.0f);
             float aa = max(fwidth(r) / 4.0f, 1e-4f);
             float stripe = smoothstep(0.5f - aa, 0.5f + aa, ring);
-            float3 targetColor = mix(float3(0.62f, 0.06f, 0.045f), float3(0.78f), stripe);
-            targetColor = mix(float3(0.85f, 0.65f, 0.06f), targetColor, smoothstep(TARGET_BULLSEYE - aa * 4.0f, TARGET_BULLSEYE + aa * 4.0f, r));
+            float3 targetColor = mix(TARGET_RED, TARGET_WHITE, stripe) * (1.0f + 0.07f * grain);
+            targetColor = mix(TARGET_YELLOW, targetColor, smoothstep(TARGET_BULLSEYE - aa * 4.0f, TARGET_BULLSEYE + aa * 4.0f, r));
             float onTarget = smoothstep(TARGET_RADIUS + aa * 4.0f, TARGET_RADIUS - aa * 4.0f, r) * sandbar;
             landAlbedo = mix(landAlbedo, targetColor, onTarget);
             surface = mix(surface, landAlbedo * E / PI, land);

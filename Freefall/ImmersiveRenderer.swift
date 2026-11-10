@@ -54,8 +54,6 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var grabsHeard = 0
     private var dingSent = false
     private var bodyYaw = BodyYaw()
-    /// 袖子用的身体朝向：伞下也不锁（人在椅子上转了，肩膀得跟着转，不然袖子会横过脸前）
-    private var armYaw = BodyYaw()
     private var tapsHeard = 0
     private var revealSent = false
     private var deploySent = false
@@ -244,8 +242,6 @@ final class ImmersiveRenderer: @unchecked Sendable {
         let neck = SIMD3<Float>(head.x, eyeHeight, head.z) - flatForward * 0.09
         let bodyForward = SIMD3<Float>(-sin(yaw), 0, -cos(yaw))
         let layout = BodyLayout(anchor: neck + bodyForward * 0.09, yaw: yaw)
-        let armsYaw = armYaw.update(head: head, headForward: headForward, hands: hands, dt: Float(dt), locked: false)
-        let armsLayout = BodyLayout(anchor: neck + SIMD3(-sin(armsYaw), 0, -cos(armsYaw)) * 0.09, yaw: armsYaw)
         // 等对齐好头部朝向再开始（第一帧之前时间不走）
         if stageFromOrigin != nil {
             let (began, touches) = pinches.withLock { s -> (Int, [PinchState.Touch]) in
@@ -271,7 +267,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
         uniforms.placeAltimeter(feet: timeline.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand,
                                 alarm: timeline.alarmLevel, gloved: gloves)
         if handsEnabled && watchHand == nil { uniforms.hudUp.w = 0 }
-        let objects = session.objects(layout: layout, armsLayout: armsLayout, hands: hands, watchOnLeft: watchOnLeft,
+        let objects = session.objects(layout: layout, hands: hands, watchOnLeft: watchOnLeft,
                                       gloves: gloves, head: head)
         let hudState = session.hudState
         let hudPanels = helmet.update(hudState, head: stageFromDevice)

@@ -51,10 +51,11 @@ final class HelmetHUD: @unchecked Sendable {
     private static let distance: Float = 1.2
     /// 画图用的坐标（逻辑像素）和在 1.2 米外的大小（米）；贴图按 scale 倍画，比头显的像素密一些，按 mip 采样
     private static let sideSize = (width: 512, height: 600, meters: SIMD2<Float>(0.27, 0.316))
-    private static let hintSize = (width: 1200, height: 150, meters: SIMD2<Float>(0.66, 0.0825))
+    private static let hintSize = (width: 1200, height: 150, meters: SIMD2<Float>(0.76, 0.095))
     private static let scale = 2
     /// 两块读数的位置（度）：左右偏多少、往下多少；提示在正前方往下多少
-    private static let sideYaw: Float = 17, sidePitch: Float = -8, hintPitch: Float = -15
+    /// 两侧的读数开着时，提示往下让 2.5°：提示条比两块读数之间的空当宽，不让的话它的两头被读数的下沿挡住
+    private static let sideYaw: Float = 17, sidePitch: Float = -6, hintPitch: Float = -15, hintPitchWithSides: Float = -17.5
     /// 开场握扶杆的提示（右边画一串往右跳的箭头，指向扶杆）
     static let barPrompt = "伸出右手，握住右边的黄色扶杆"
 
@@ -70,6 +71,8 @@ final class HelmetHUD: @unchecked Sendable {
     private let lock = NSLock()
     private var drawing = false
     private var finished: (slot: Int, sides: Bool, hint: Bool)?
+    /// 每一组贴图里画没画过东西（刚建的贴图内容不确定；这一组没画提示就别把上一次的旧提示显示出来）
+    private var sidesValid = [false, false, false], hintValid = [false, false, false]
 
     init(device: MTLDevice) {
         self.device = device
@@ -98,6 +101,8 @@ final class HelmetHUD: @unchecked Sendable {
         lock.unlock()
         if let done {
             slot = done.slot
+            sidesValid[slot] = done.sides
+            hintValid[slot] = done.hint
             if done.sides { dirty += [leftTextures[slot], rightTextures[slot]] }
             if done.hint { dirty.append(hintTextures[slot]) }
         }
@@ -126,15 +131,17 @@ final class HelmetHUD: @unchecked Sendable {
             }
         }
         var panels: [Panel] = []
-        if sides {
+        if sides, sidesValid[slot] {
             let boot = min(s.boot, 1)
             panels.append(Panel(texture: leftTextures[slot], uniforms: place(head, yaw: -Self.sideYaw, pitch: Self.sidePitch,
                                                                               size: Self.sideSize.meters, boot: boot)))
             panels.append(Panel(texture: rightTextures[slot], uniforms: place(head, yaw: Self.sideYaw, pitch: Self.sidePitch,
                                                                                size: Self.sideSize.meters, boot: boot)))
         }
-        if hint {
-            panels.append(Panel(texture: hintTextures[slot], uniforms: place(head, yaw: 0, pitch: Self.hintPitch,
+        if hint, hintValid[slot] {
+            let down = min(max(s.boot, 0), 1)
+            let pitch = Self.hintPitch + (Self.hintPitchWithSides - Self.hintPitch) * down * down * (3 - 2 * down)
+            panels.append(Panel(texture: hintTextures[slot], uniforms: place(head, yaw: 0, pitch: pitch,
                                                                               size: Self.hintSize.meters,
                                                                               boot: min(s.hintBoot, 1))))
         }
@@ -423,21 +430,26 @@ final class HelmetHUD: @unchecked Sendable {
             let lines = s.hint.split(separator: "\n").map(String.init)
             guard !lines.isEmpty else { return }
             // 两端一对括号，中间一行字（两行时上下排），背后垫一层暗底
-            let size: CGFloat = lines.count > 1 ? 42 : 50
-            let font = CTFontCreateUIFontForLanguage(.emphasizedSystem, size, "zh-Hans" as CFString)!
-            var built: [(CTLine, CGFloat)] = []
-            for (i, l) in lines.prefix(2).enumerated() {
-                let attributes: [NSAttributedString.Key: Any] = [
-                    NSAttributedString.Key(kCTFontAttributeName as String): font,
-                    NSAttributedString.Key(kCTForegroundColorAttributeName as String): i == 0 ? Self.white : Self.cyan,
-                ]
-                let line = CTLineCreateWithAttributedString(NSAttributedString(string: l, attributes: attributes))
-                built.append((line, CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))))
-            }
-            let half = (built.map(\.1).max() ?? 0) / 2 + 40
-            let c = CGFloat(w) / 2
             let prompt = s.hint == Self.barPrompt
             let extra: CGFloat = prompt ? 120 : 0
+            func build(_ size: CGFloat) -> [(CTLine, CGFloat)] {
+                let font = CTFontCreateUIFontForLanguage(.emphasizedSystem, size, "zh-Hans" as CFString)!
+                return lines.prefix(2).enumerated().map { i, l in
+                    let attributes: [NSAttributedString.Key: Any] = [
+                        NSAttributedString.Key(kCTFontAttributeName as String): font,
+                        NSAttributedString.Key(kCTForegroundColorAttributeName as String): i == 0 ? Self.white : Self.cyan,
+                    ]
+                    let line = CTLineCreateWithAttributedString(NSAttributedString(string: l, attributes: attributes))
+                    return (line, CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil)))
+                }
+            }
+            // 长的提示（伞下那句操作说明）按面板宽度缩字号，不然两头被裁掉
+            let size: CGFloat = lines.count > 1 ? 42 : 50
+            var built = build(size)
+            let room = CGFloat(w) - 150 - extra * 2
+            if let widest = built.map(\.1).max(), widest > room { built = build(size * room / widest) }
+            let half = (built.map(\.1).max() ?? 0) / 2 + 40
+            let c = CGFloat(w) / 2
             plate(ctx, CGRect(x: c - half - 30, y: 10, width: 2 * half + 60 + extra, height: CGFloat(h) - 20), h: h)
             for (i, (line, width)) in built.enumerated() {
                 let y = lines.count > 1 ? (i == 0 ? 68 : 124) : 94

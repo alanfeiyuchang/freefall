@@ -128,10 +128,16 @@ static inline float3 targetColor(float2 p, float3 under, thread float &onTarget)
     float ring = fract(r / 4.0f);
     float aa = max(fwidth(r) / 4.0f, 1e-4f);
     float stripe = smoothstep(0.5f - aa, 0.5f + aa, ring);
-    float3 c = mix(float3(0.62f, 0.06f, 0.045f), float3(0.78f), stripe);
-    c = mix(float3(0.85f, 0.65f, 0.06f), c, smoothstep(3.0f - aa * 4.0f, 3.0f + aa * 4.0f, r));
+    float3 c = mix(TARGET_RED, TARGET_WHITE, stripe);
+    c = mix(TARGET_YELLOW, c, smoothstep(3.0f - aa * 4.0f, 3.0f + aa * 4.0f, r));
     onTarget = smoothstep(20.0f + aa * 4.0f, 20.0f - aa * 4.0f, r);
     return mix(under, c, onTarget);
+}
+
+/// 细节噪声取哪一级 mip：一个像素盖 footprint 米，贴图一圈 tile 米（128 个纹素）。
+/// 稍微取细半级（清楚一点）；中远处不再一个像素跨十几个纹素地跳着采
+static inline float noiseLod(float footprint, float tile) {
+    return max(log2(footprint * 128.0f / tile) - 0.5f, 0.0f);
 }
 
 /// 细节噪声（3D 噪声纹理的一层当 2D 用），越远越淡，免得闪
@@ -174,6 +180,9 @@ kernel void generateSurfaceMap(texture2d<float, access::write> out [[texture(0)]
     } else if (scene == SCENE_VOLCANO) {
         v.a = encodeEdge(min(lavaFlowDistance(p) - 14.0f, length(p - CONE_CENTER) - (CRATER_RADIUS - 20.0f)));
         v.b = tSmooth(0.0f, 0.12f, tFbm(p / 380.0f + float2(9.0f, 1.0f), 4));            // 老的熔岩流
+        // 火山这一关没有河和树林，r、g 两个通道另作他用：r 风吹出来的一道道浅色细灰，g 氧化成铁锈红的地方
+        v.r = tSmooth(0.05f, 0.3f, tFbm(float2(dot(p, float2(0.8f, 0.6f)) / 900.0f, dot(p, float2(-0.6f, 0.8f)) / 90.0f) + 3.0f, 3));
+        v.g = tSmooth(0.12f, 0.3f, tFbm(p / 310.0f + float2(4.0f, 8.0f), 4));
     }
     out.write(v, gid);
 }
@@ -183,9 +192,10 @@ static inline float4 surfaceMapAt(texture2d<float> map, float2 p) {
     return map.sample(linearClamp, p / SURFACE_MAP_SIZE + 0.5f, level(0));
 }
 
-/// n1、n2：37 米、6 米尺度的细节噪声（0..1，远了是 0.5），和细节起伏共用一次采样；sm：地面类型图
+/// n1、n2：37 米、6 米尺度的细节噪声（0..1，远了是 0.5），和细节起伏共用一次采样；sm：地面类型图；
+/// crown：x 树冠的高度场（0..1，远了是 0.5），y 看得清一棵棵树的程度（0 远、1 近）
 static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, float footprint, float n1, float n2,
-                                     float4 sm, texture3d<float> noise) {
+                                     float4 sm, float2 crown, texture3d<float> noise) {
     Surface s;
     s.roughness = 0.3f;
     s.specular = 0.0f;
@@ -193,13 +203,18 @@ static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, flo
     float flatness = N.y;                         // 1 平地，cos 35° ≈ 0.82，cos 45° ≈ 0.71
     float vary = (n1 - 0.5f) * 0.6f + (n2 - 0.5f) * 0.45f;
     // 水的边：河和溪流只有十几米宽，比地面类型图的一格还窄，插值出来会断成虚线，现算（几次正弦，不贵）
-    float waterEdge = decodeEdge(sm.r);
+    float waterEdge = scene == SCENE_VOLCANO ? 1.0f : decodeEdge(sm.r);
     if (scene == SCENE_GRASSLAND) {
         waterEdge = min(riverDistance(p) - RIVER_HALF_WIDTH, length(p - POND_CENTER) - POND_RADIUS);
     } else if (scene == SCENE_ALPINE) {
         waterEdge = alpineStreamDistance(valleyCoords(p)) - 5.0f;
     }
-    float forestV = sm.g;
+    // 树林的边：近处按树冠的高度场进退，边上是一棵棵的树，而不是地面类型图插值出来的一条光滑的线；
+    // 林子外面稀稀拉拉还有几棵（落地判定按 CPU 的精确函数，这里最多差一棵树的宽度）
+    float crownN = saturate((crown.x - 0.42f) / 0.5f);
+    float forestG = scene == SCENE_VOLCANO ? 0.0f : sm.g;
+    float forestV = forestG + (crownN - 0.5f) * 0.34f * crown.y * tSmooth(0.04f, 0.2f, forestG);
+    float forestEdge = mix(0.15f, 0.07f, crown.y);
 
     // 通用：岩石、碎石、草、雪
     float3 rock = float3(0.20f, 0.185f, 0.17f) * (1.0f + vary * 0.35f);
@@ -207,13 +222,17 @@ static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, flo
     // 草：橄榄绿，一片片深浅不一，夹着发黄的地方
     float3 grass = mix(float3(0.085f, 0.13f, 0.045f), float3(0.15f, 0.15f, 0.07f), saturate(n1 * 1.4f - 0.3f))
                  * (1.0f + vary * 0.8f);
-    float3 snow = float3(0.86f, 0.88f, 0.92f) * (1.0f + vary * 0.08f);
+    float3 snow = float3(0.80f, 0.83f, 0.88f) * (1.0f + vary * 0.10f);
+    // 树林：树冠顶上亮、树和树之间的缝暗；一片片树种不一样（发黄的阔叶、发蓝的针叶）
     float3 forest = float3(0.035f, 0.065f, 0.028f) * (0.5f + 1.1f * n2);
+    forest *= mix(1.0f, 0.38f + 1.25f * crownN * crownN, crown.y);
+    forest *= mix(float3(0.82f, 0.95f, 1.08f), float3(1.3f, 1.12f, 0.72f), saturate(n1 * 2.2f - 0.75f));
     s.material = MAT_ROCK;
 
     if (scene == SCENE_GRASSLAND) {
         // 农田：200 米左右一块，每块种的东西和垄的方向不一样
-        float2 cellP = p / 190.0f + 0.7f * float2(tNoise(p / 420.0f), tNoise(p / 420.0f + 7.0f)) + (n1 - 0.5f) * 0.5f;
+        // （田块的边之前还按细节噪声抖：细节噪声远了会淡掉，田边就跟着距离变形，近看是一圈锯齿）
+        float2 cellP = p / 190.0f + 0.7f * float2(tNoise(p / 420.0f), tNoise(p / 420.0f + 7.0f));
         float2 cid = floor(cellP);
         float pick = tHash(int2(cid)) * 0.5f + 0.5f;
         float angle = tHash(int2(cid) + int2(17, 3)) * 3.14159f;
@@ -225,6 +244,15 @@ static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, flo
                     : pick < 0.62f ? float3(0.16f, 0.11f, 0.07f)        // 翻过的地
                     : float3(0.10f, 0.17f, 0.05f);                       // 草场
         crop *= 1.0f + (rows - 0.5f) * 0.35f * rowFade + vary * 0.6f;
+        // 田和田之间：一条土路 / 草埂，隔几块田有一道树篱（一棵棵树冠连成的线）
+        float2 fc = abs(fract(cellP) - 0.5f);
+        float edgeD = (0.5f - max(fc.x, fc.y)) * 190.0f;
+        float track = tSmooth(3.2f, 1.6f, edgeD) * saturate(2.0f - footprint * 0.35f);
+        crop = mix(crop, float3(0.19f, 0.16f, 0.10f) * (1.0f + vary * 0.5f), track * 0.75f);
+        float hedged = step(0.15f, tHash(int2(cid) + int2(5, 11)));
+        float hedge = tSmooth(7.5f, 4.0f, edgeD + (0.5f - crownN) * 5.0f * crown.y) * hedged
+                    * saturate(2.0f - footprint * 0.25f);
+        crop = mix(crop, forest * 1.15f, hedge);
         s.albedo = mix(grass * float3(1.1f, 1.15f, 1.0f), crop, sm.b);
         // 着陆区旁边一条修剪过的草跑道
         float2 sl = valleyCoords(p);
@@ -232,7 +260,7 @@ static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, flo
         s.albedo = mix(s.albedo, float3(0.13f, 0.21f, 0.06f) * (0.92f + 0.16f * step(0.5f, fract(sl.x / 25.0f))), runway);
         // 河滩：沙石
         s.albedo = mix(float3(0.30f, 0.27f, 0.21f) * (1.0f + vary), s.albedo, tSmooth(0.0f, 6.0f, waterEdge));
-        s.albedo = mix(s.albedo, forest, tSmooth(0.35f, 0.65f, forestV));
+        s.albedo = mix(s.albedo, forest, tSmooth(0.5f - forestEdge, 0.5f + forestEdge, forestV));
         s.material = forestV > 0.5f ? MAT_FOREST : MAT_GRASS;
     } else if (scene == SCENE_ALPINE) {
         float2 sl = valleyCoords(p);
@@ -244,7 +272,7 @@ static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, flo
         float snowCover = tSmooth(snowLine - 120.0f, snowLine + 120.0f, h) * tSmooth(0.62f, 0.75f, flatness);
         s.albedo = mix(ground, snow, snowCover);
         float f = forestV * tSmooth(0.72f, 0.80f, flatness);     // 悬崖上不长树
-        s.albedo = mix(s.albedo, forest, tSmooth(0.35f, 0.65f, f));
+        s.albedo = mix(s.albedo, forest * float3(0.85f, 0.95f, 1.0f), tSmooth(0.5f - forestEdge, 0.5f + forestEdge, f));
         s.specular = snowCover * 0.04f;
         s.material = snowCover > 0.5f ? MAT_SNOW : (f > 0.5f ? MAT_FOREST : (meadow > 0.5f ? MAT_GRASS : MAT_ROCK));
     } else if (scene == SCENE_SNOW) {
@@ -258,15 +286,18 @@ static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, flo
     } else if (scene == SCENE_ISLAND) {
         // 白沙滩（靠水的一条被浪打湿了发暗），后面是热带的草地，再往里是雨林；山上太陡的地方露出黑色的火山岩
         float land = islandLand(p);
-        float3 sand = float3(0.62f, 0.57f, 0.46f) * (1.0f + vary * 0.22f);
+        float3 sand = float3(0.52f, 0.47f, 0.37f) * (1.0f + vary * 0.22f);
         float3 lawn = mix(float3(0.07f, 0.17f, 0.04f), float3(0.13f, 0.20f, 0.06f), saturate(n1 * 1.4f - 0.3f))
                     * (1.0f + vary * 0.7f);
-        float3 jungle = float3(0.02f, 0.075f, 0.022f) * (0.5f + 1.1f * n2);
+        // 雨林：树冠大、一层压一层，颜色比温带的林子绿得多，夹着几棵发黄发亮的
+        float3 jungle = float3(0.02f, 0.075f, 0.022f) * (0.5f + 1.1f * n2)
+                      * mix(1.0f, 0.34f + 1.35f * crownN * crownN, crown.y)
+                      * mix(float3(0.9f, 1.0f, 1.0f), float3(1.5f, 1.25f, 0.6f), saturate(n1 * 2.4f - 1.0f));
         float3 basalt = float3(0.11f, 0.10f, 0.095f) * (1.0f + vary * 0.4f);
         float beach = tSmooth(0.045f, 0.028f, land + (n1 - 0.5f) * 0.006f);
         float3 ground = mix(lawn, sand, beach);
         ground = mix(sand * 0.6f, ground, tSmooth(0.35f, 1.1f, h));
-        ground = mix(ground, jungle, tSmooth(0.35f, 0.65f, forestV));
+        ground = mix(ground, jungle, tSmooth(0.5f - forestEdge, 0.5f + forestEdge, forestV));
         ground = mix(basalt, ground, tSmooth(0.68f, 0.8f, flatness));
         s.albedo = ground;
         s.material = forestV > 0.5f ? MAT_FOREST : (beach > 0.5f ? MAT_SAND : MAT_GRASS);
@@ -275,9 +306,15 @@ static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, flo
         float2 kc = float2(150.0f, -350.0f);
         float rk = length(p - kc);
         float rc = length(p - CONE_CENTER);
-        float3 ash = float3(0.10f, 0.095f, 0.09f) * (1.0f + vary * 0.8f);
-        float3 oldLava = float3(0.05f, 0.046f, 0.044f) * (0.7f + 0.8f * n2);
+        // 破火山口的底：深灰的火山灰，一片片被氧化成铁锈红，风把浅色的细灰吹成一道道；老熔岩流是发亮的黑
+        float3 ash = float3(0.062f, 0.058f, 0.056f) * (1.0f + vary * 0.9f);
+        ash = mix(ash, float3(0.095f, 0.050f, 0.036f) * (1.0f + vary * 0.6f), sm.g * 0.55f);
+        ash = mix(ash, float3(0.12f, 0.115f, 0.108f), sm.r * 0.5f);
+        float3 oldLava = float3(0.032f, 0.030f, 0.030f) * (0.6f + 0.9f * n2);
         float3 floorC = mix(ash, oldLava, sm.b);
+        // 火山锥脚下、熔岩流两边的硫磺：发黄发白的一圈
+        float sulfur = tSmooth(40.0f, 6.0f, decodeEdge(sm.a)) * tSmooth(0.45f, 0.7f, n2);
+        floorC = mix(floorC, float3(0.30f, 0.25f, 0.07f), sulfur * 0.6f);
         // 火山锥上面是红褐色的火山渣
         floorC = mix(floorC, float3(0.16f, 0.07f, 0.04f) * (1.0f + vary), tSmooth(CONE_BASE_RADIUS, 220.0f, rc));
         // 外坡下面长着绿的（热带岛），海边是黑沙滩
@@ -287,11 +324,14 @@ static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, flo
         s.albedo = mix(floorC, outside, tSmooth(2250.0f, 2450.0f, rk));
         s.albedo = mix(rock * 0.6f, s.albedo, tSmooth(0.66f, 0.78f, flatness));
         s.material = MAT_ASH;
+        s.specular = sm.b * 0.03f * tSmooth(2250.0f, 2000.0f, rk);     // 老熔岩的壳像玻璃，有一点反光
+        s.roughness = 0.5f;
         if (decodeEdge(sm.a) < 0.0f) {
             // 熔岩：发光的橙红，表面一块块结了暗壳
             float crust = tSmooth(0.45f, 0.62f, detailNoise(noise, p, 9.0f, footprint * 0.5f, 0.21f));
             float hot = 1.0f - 0.85f * crust;
-            s.emission = float3(2.4f, 0.55f, 0.08f) * 0.06f * hot;
+            // 流动的熔岩：壳的裂缝里最亮（发黄），壳上是暗红
+            s.emission = mix(float3(2.4f, 0.42f, 0.05f), float3(2.6f, 1.1f, 0.22f), hot * hot) * 0.075f * hot;
             s.albedo = mix(float3(0.08f, 0.03f, 0.02f), float3(0.03f), crust);
             s.material = MAT_LAVA;
         }
@@ -350,9 +390,12 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
         float fade = saturate(sc / (footprint * 7.0f) - 1.0f);
         if (fade <= 0.0f) continue;
         float e = sc * 0.15f;
-        float c0 = noise.sample(linearRepeat, float3(p.x / sc, layers[i], p.y / sc), level(0)).r;
-        float cx = noise.sample(linearRepeat, float3((p.x + e) / sc, layers[i], p.y / sc), level(0)).r;
-        float cz = noise.sample(linearRepeat, float3(p.x / sc, layers[i], (p.y + e) / sc), level(0)).r;
+        // 坐标先弯一下（几百米一个来回）：噪声贴图每 37 米重复一圈，不弯的话远处的岩壁、火山口壁上是一排排整齐的鱼鳞
+        float2 w = p + sc * 0.45f * sin(p.yx * (0.42f / sc) + float2(0.0f, 1.7f));
+        float lod = noiseLod(footprint, sc);
+        float c0 = noise.sample(trilinearRepeat, float3(w.x / sc, layers[i], w.y / sc), level(lod)).r;
+        float cx = noise.sample(trilinearRepeat, float3((w.x + e) / sc, layers[i], w.y / sc), level(lod)).r;
+        float cz = noise.sample(trilinearRepeat, float3(w.x / sc, layers[i], (w.y + e) / sc), level(lod)).r;
         n[i] = mix(0.5f, c0, fade);
         bump += float3(c0 - cx, 0.0f, c0 - cz) * (fade * rough * 1.4f);
     }
@@ -362,27 +405,120 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
         float2 wind = float2(0.8f, 0.6f);
         float phase = dot(p, wind) * 1.6f + 6.0f * (n[1] - 0.5f);
         bump += float3(wind.x, 0.0f, wind.y) * (0.12f * cos(phase) * fade);
+        bump *= 1.0f + 1.6f * saturate((N.y - 0.8f) * 5.0f);       // 平的雪面上，雪丘和吹出来的雪垄起伏更明显
     }
     N = normalize(N + bump);
 
+    // 近处再加两层细节（贴图一圈 1.9 米、0.37 米，各转一个角度，免得和上面两层对齐成格子）：离地一两百米以内才采样。
+    // 草丛、砂砾、雪粒这些比最细的 6 米那层还小的东西，之前落地前后看是糊的一片
+    float fine[2] = { 0.5f, 0.5f };
+    float fineFade[2] = { 0.0f, 0.0f };
+    float3 fineBump = 0.0f;
+    const float fineScales[2] = { 1.9f, 0.37f };
+    const float2 fineRot[2] = { float2(0.8f, 0.6f), float2(-0.28f, 0.96f) };
+    for (int i = 0; i < 2; i++) {
+        float sc = fineScales[i];
+        float fade = saturate(sc / (footprint * 9.0f) - 1.0f);
+        if (fade <= 0.0f) continue;
+        float2 ax = fineRot[i], ay = float2(-ax.y, ax.x);
+        float2 q = float2(dot(p, ax), dot(p, ay)) / sc;
+        float layer = 0.27f + 0.4f * float(i);
+        float c0 = noise.sample(linearRepeat, float3(q.x, layer, q.y), level(0)).r;
+        float cx = noise.sample(linearRepeat, float3(q.x + 0.09f, layer, q.y), level(0)).r;
+        float cz = noise.sample(linearRepeat, float3(q.x, layer, q.y + 0.09f), level(0)).r;
+        fine[i] = mix(0.5f, c0, fade);
+        fineFade[i] = fade;
+        float2 gw = ax * (c0 - cx) + ay * (c0 - cz);
+        fineBump += float3(gw.x, 0.0f, gw.y) * fade;
+    }
+
     float4 sm = surfaceMapAt(surfaceMap, p);
-    Surface s = terrainSurface(scene, p, h, geometric, footprint, n[0], n[1], sm, noise);
+    // 树冠：倒过来的 Worley 噪声本来就是一团团鼓包。贴图一圈 56 米（海岛的雨林树大，84 米），一棵树 7 ~ 10 米；
+    // 两公里以内、附近有林子才采样。高度场差分出法线：每棵树朝太阳的一面亮、背面暗，林子不再是一块平涂的深绿
+    float2 crown = float2(0.5f, 0.0f);
+    float3 crownBump = 0.0f;
+    if (scene != SCENE_VOLCANO && (sm.g > 0.02f || (scene == SCENE_GRASSLAND && sm.b > 0.02f))) {
+        float tile = scene == SCENE_ISLAND ? 84.0f : 56.0f;
+        float fade = saturate(tile / (footprint * 26.0f) - 1.0f);
+        if (fade > 0.0f) {
+            float2 q = p / tile;
+            float lod = noiseLod(footprint, tile);
+            float c0 = noise.sample(trilinearRepeat, float3(q.x, 0.58f, q.y), level(lod)).b;
+            float cx = noise.sample(trilinearRepeat, float3(q.x + 0.02f, 0.58f, q.y), level(lod)).b;
+            float cz = noise.sample(trilinearRepeat, float3(q.x, 0.58f, q.y + 0.02f), level(lod)).b;
+            crown = float2(mix(0.5f, c0, fade), fade);
+            crownBump = float3(c0 - cx, 0.0f, c0 - cz) * (fade * 5.0f);
+        }
+    }
+    Surface s = terrainSurface(scene, p, h, geometric, footprint, n[0], n[1], sm, crown, noise);
     float onTarget = 0.0f;
     s.albedo = targetColor(p, s.albedo, onTarget);
+
+    // 近处的细节按材质加：深浅、凹凸的幅度各不一样
+    float fa = fine[0] - 0.5f, fb = fine[1] - 0.5f;
+    float relief = 0.6f;
+    float sparkle = 0.0f;
+    if (onTarget > 0.5f) {
+        s.albedo *= 1.0f + fa * 0.10f + fb * 0.08f;            // 靶是铺在地上的一块布：一点皱
+        relief = 0.25f;
+    } else if (s.material == MAT_FOREST) {
+        N = normalize(N + crownBump);
+        relief = 0.0f;
+    } else if (s.material == MAT_GRASS) {
+        // 草：一丛丛深浅不一，夹着干了发黄的；凑近了有零星的小花（成片地长）
+        s.albedo *= 1.0f + fa * 0.7f + fb * 0.8f;
+        s.albedo = mix(s.albedo, s.albedo * float3(1.5f, 1.25f, 0.7f), saturate(fa * 4.0f - 0.5f) * 0.6f);
+        if (fineFade[1] > 0.0f) {
+            float2 q = float2(dot(p, float2(0.6f, -0.8f)), dot(p, float2(0.8f, 0.6f))) / 2.6f;
+            float dots = noise.sample(linearRepeat, float3(q.x, 0.91f, q.y), level(0)).a;
+            float flower = smoothstep(0.9f, 0.95f, dots) * saturate(fa * 5.0f + 0.3f) * fineFade[1];
+            float3 petal = scene == SCENE_ALPINE ? mix(float3(0.55f, 0.5f, 0.1f), float3(0.35f, 0.2f, 0.5f), step(0.5f, n[1]))
+                                                 : mix(float3(0.7f, 0.7f, 0.62f), float3(0.7f, 0.55f, 0.08f), step(0.55f, n[1]));
+            s.albedo = mix(s.albedo, petal, flower);
+        }
+        relief = 1.1f;
+    } else if (s.material == MAT_SNOW) {
+        // 雪：颜色几乎不变，细细的起伏；朝着太阳的雪粒一闪一闪（位置跟着视线变，头一动就换一批）
+        s.albedo *= 1.0f + fa * 0.05f + fb * 0.04f;
+        relief = 0.45f;
+        if (fineFade[1] > 0.0f) {
+            float2 q = p / 0.7f + rd.xz * 0.6f;
+            float g = noise.sample(linearRepeat, float3(q.x, 0.77f + rd.y * 0.2f, q.y), level(0)).a;
+            sparkle = smoothstep(0.93f, 0.985f, g) * fineFade[1];
+        }
+    } else if (s.material == MAT_SAND) {
+        // 沙：细粒，被浪和风理出来的一道道浅纹
+        float ripple = sin(dot(p, float2(0.94f, 0.34f)) * 9.0f + fa * 9.0f) * fineFade[0];
+        s.albedo *= 1.0f + fa * 0.16f + fb * 0.22f + ripple * 0.035f;
+        fineBump += float3(0.94f, 0.0f, 0.34f) * (ripple * 0.05f);
+        relief = 0.45f;
+    } else if (s.material == MAT_ASH) {
+        // 火山灰、火山渣：粗砂一样的颗粒，散着拳头大的黑石头
+        s.albedo *= 1.0f + fa * 0.4f + fb * 0.3f;
+        s.albedo *= 1.0f - 0.5f * smoothstep(0.2f, 0.26f, fb) * fineFade[1] * step(0.55f, fine[0]);
+        relief = 0.8f;
+    } else {
+        s.albedo *= 1.0f + fa * 0.5f + fb * 0.45f;            // 岩石、碎石
+        relief = 1.3f;
+    }
+    N = normalize(N + fineBump * relief);
 
     // 光：太阳（山影 × 云影）+ 天光（× 环境光遮蔽）
     float2 shade = terrainShade.sample(linearClamp, p / TERRAIN_MAP_SIZE + 0.5f, level(0)).rg;
     float2 cloudXZ = p - F.ground.yw - sunDir.xz * (h / max(sunDir.y, 0.05f));
     float od = cloudShadow.sample(linearRepeat, cloudXZ / WEATHER_TILE + 0.5f, level(0)).r;
     od *= smoothstep(300.0f, 650.0f, length(p - LZ_TARGET));     // 着陆区不落云影（和海面一样）
-    float shadow = shade.r * exp(-od * F.clouds.z * 0.5f);
+    // 云影：积云底下不是全黑——阳光在云里散射过，漏下来两三成
+    float cloudVis = mix(0.24f, 1.0f, exp(-od * F.clouds.z * 0.5f));
+    float shadow = shade.r * cloudVis;
     // 自己的伞衣和身体的影子（快落地时才看得清：离得越近边越实）
     float3 Ls = stageSunDirection(F);
     float3 sunVis = shadow * canopyShadow(in.stagePos, Ls, F) * bodyShadow(in.stagePos, Ls, F);
     float altKm = h * 0.001f;
     float3 sunE = altKm < 1.0f ? mix(A.sunAtSea.rgb, A.sunAtCloudBase.rgb, saturate(altKm))
                                : mix(A.sunAtCloudBase.rgb, A.sunAtCloudTop.rgb, saturate((altKm - 1.0f) / 8.0f));
-    float3 skyE = A.skyIrradianceSea.rgb * (0.55f + 0.45f * N.y) * shade.g;
+    // 天光（带上云漫射下来的白光，见 cloudySkyFill）
+    float3 skyE = cloudySkyFill(A.skyIrradianceSea.rgb) * (0.55f + 0.45f * N.y) * shade.g;
     float NdotL = saturate(dot(N, sunDir));
     float3 color;
     if (s.material == MAT_WATER && onTarget < 0.5f) {
@@ -412,12 +548,14 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
         }
     } else {
         // 背阴的陡坡还会被对面照亮的山坡、谷底反射一点暖光（不然阴面只剩蓝天光，发蓝发暗）
-        float3 bounce = sunE * 0.12f * float3(1.0f, 0.95f, 0.85f) * saturate(1.0f - N.y) * shade.g;
+        // （平地也有一点：周围被太阳照亮的地面、山坡反射回来的光）
+        float3 bounce = sunE * float3(1.0f, 0.95f, 0.85f) * (0.035f + 0.15f * saturate(1.0f - N.y)) * shade.g;
         color = s.albedo / PI * (sunE * NdotL * sunVis + skyE + bounce);
         if (s.specular > 0.0f) {
             float3 H = normalize(sunDir - rd);
             color += sunE * sunVis * s.specular * pow(saturate(dot(N, H)), 1.0f / max(s.roughness * s.roughness, 0.002f) * 0.5f);
         }
+        color += sunE * sunVis * (sparkle * 0.22f * NdotL);
         color += s.emission;
     }
 

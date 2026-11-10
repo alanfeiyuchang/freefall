@@ -255,7 +255,9 @@ static CloudHit marchClouds(float3 ro, float3 rd, float jitter, constant FrameUn
             float3 albedo = plume > cloudD ? float3(0.62f, 0.58f, 0.54f) : float3(1.0f);
             empty = 0;
             float sigmaE = d * sigma;
-            float2 lightOD = lightOpticalDepth(p, sunDir, maps, bias, far) * sigma;
+            // 朝太阳的那几步用便宜的版本（4 步、不带细节噪声）：15 km 以外，或者这条视线已经被前面的云挡掉八成五
+            // ——后面的样本最多只占这个像素的一成五，光算得粗一点看不出来
+            float2 lightOD = lightOpticalDepth(p, sunDir, maps, bias, far || T < 0.15f) * sigma;
             float od = lightOD.x;
             // 单次散射（带前向的相函数：逆光看边缘发亮）+ 两级越来越「穿透」的多次散射（各向同性）。
             // 多次散射是云顺光时看起来雪白的原因——只有单次散射的话，前向相函数往回散的光太少，云会发灰发蓝。

@@ -188,11 +188,10 @@ final class JumpSession {
     /// 画面用的航向（世界绕你转多少）
     var displayHeading: Double { timeline.heading }
 
-    /// armsLayout：袖子用的身体朝向（伞下不锁，人转了肩膀也跟着转），nil 就用 layout
-    func objects(layout: BodyLayout, armsLayout: BodyLayout? = nil, hands: [HandPose], watchOnLeft: Bool,
+    func objects(layout: BodyLayout, hands: [HandPose], watchOnLeft: Bool,
                  proxyHands: Bool = false, gloves: Bool = false, head: SIMD3<Float>? = nil) -> SceneObjects {
         var o = SceneObjects.make(SceneObjects.Input(timeline: timeline, eyeHeight: layout.anchor.y, layout: layout,
-                                                     armsLayout: armsLayout, interaction: interaction,
+                                                     interaction: interaction,
                                                      cloth: timeline.sinceDeploy == nil ? nil : cloth,
                                                      hands: hands, watchOnLeft: watchOnLeft, proxyHands: proxyHands,
                                                      gloves: gloves))

@@ -448,54 +448,55 @@ enum Gear {
              color: metal, segments: 40, sides: 8)
     }
 
-    /// 跳伞服的袖子（戴手套时）：从手套袖口外面套上去，顺着前臂到手肘，再弯过去连到肩膀。
-    /// 手部追踪只给到前臂（腕和前臂的方向），手肘按前臂长 27 厘米往回推，肩膀用身体上的固定点。
-    /// 前臂一段截面是扁的（横着宽），越往上越粗越圆，手肘那里布堆起来褶子多。
-    /// 真手藏起来以后，没有袖子手套就像飘在空中；只做到手肘的话，弓身时一眼能看到截断的袖口。
-    static func sleeve(_ out: inout [MeshVertex], hand: HandPose, shoulder: SIMD3<Float>) {
+    /// 跳伞服的袖子（戴手套时）：只有小臂这一截——从手套袖口外面套上去，顺着前臂到手肘，在手肘那里收口。
+    /// 手部追踪只给到前臂（腕和前臂的方向），手肘按前臂长 27 厘米往回推。大臂和肩膀没有追踪，以前按身体朝向猜，
+    /// 猜错了袖子会横在脸前，所以不画了：只留看得准的小臂和手。
+    /// 截面是扁的（横着宽），越往手肘越粗；袖口一圈松紧带，手肘那头布往里卷成一个圆口（不是敞着的管子，看不到里面）。
+    static let forearmLength: Float = 0.27
+
+    static func sleeve(_ out: inout [MeshVertex], hand: HandPose) {
         let f = SceneObjects.wristFrame(hand)
         let wrist = hand[.forearmWrist]
         let arm = f.towardElbow
-        let elbow = wrist + arm * 0.27
-        let path = spline([wrist + arm * 0.034, wrist + arm * 0.14, elbow, elbow + (shoulder - elbow) * 0.5, shoulder],
-                          steps: 8)
-        let n = path.count
-        var length: [Float] = [0]
-        for i in 1..<n { length.append(length[i - 1] + simd_length(path[i] - path[i - 1])) }
-        let total = max(length[n - 1], 1e-3)
-        let elbowAt = length[16] / total                     // 第 3 个控制点（每段 8 步）
-        // 平行移动的标架：从手腕的（侧向, 手背）出发，沿着袖子不扭
-        var side = f.side, back = f.back
-        var frames: [(SIMD3<Float>, SIMD3<Float>)] = []
-        for i in 0..<n {
-            let t = simd_normalize(path[min(i + 1, n - 1)] - path[max(i - 1, 0)])
-            side = simd_normalize(side - simd_dot(side, t) * t)
-            back = simd_normalize(simd_cross(t, side) * (simd_dot(simd_cross(t, side), back) >= 0 ? 1 : -1))
-            frames.append((side, back))
-        }
-        let sides = 24
+        let side = f.side, back = f.back
+        let start: Float = 0.034, end = forearmLength
+        let rings = 22, sides = 24
+        /// 手肘那头最后 4.5 厘米收成圆口
+        let capLength: Float = 0.045
         func point(_ i: Int, _ k: Int) -> (SIMD3<Float>, SIMD3<Float>, SIMD2<Float>) {
-            let s = length[i] / total
+            let s = Float(i) / Float(rings)
+            let along = start + (end - start) * s
             let a = 2 * Float.pi * Float(k % sides) / Float(sides)
-            let r = 0.045 + 0.022 * smoothstep(0, 0.9, s)
-            // 褶子：沿着袖子、绕着袖子两个方向的起伏；手肘那里堆得最多；袖口那头收紧（松紧带）
-            let bunch = exp(-pow((s - elbowAt) / 0.08, 2))
-            let fold = 1 + (0.03 + 0.05 * bunch) * sin(length[i] * 70 + a * 2) * smoothstep(0, 0.05, s)
-                + 0.02 * sin(a * 5 + length[i] * 31)
-            let cuff = 1 - 0.06 * (1 - smoothstep(0, 0.03, s))
-            let flat = 1 - smoothstep(0.1, 0.5, s)              // 前臂扁，上臂圆
-            let rs = r * (1 + 0.08 * flat) * fold * cuff, rb = r * (1 - 0.08 * flat) * fold * cuff
-            let (e1, e2) = frames[i]
-            let normal = simd_normalize(e1 * (cos(a) / rs) + e2 * (sin(a) / rb))
-            return (path[i] + e1 * (rs * cos(a)) + e2 * (rb * sin(a)), normal, SIMD2(length[i], r * a))
+            let r = 0.045 + 0.013 * smoothstep(0, 1, s)
+            // 褶子：顺着袖子的几道长褶 + 绕着袖子的横褶，越靠手肘越松；袖口那头被松紧带收紧，褶子细密
+            let loose = smoothstep(0.05, 0.6, s)
+            let fold = 1 + (0.018 + 0.03 * loose) * sin(along * 70 + a * 2) * smoothstep(0, 0.08, s)
+                + 0.016 * sin(a * 5 + along * 31) + 0.012 * (1 - loose) * sin(a * 14)
+            let cuff = 1 - 0.07 * (1 - smoothstep(0, 0.05, s))
+            // 收口：最后一段半径按四分之一圆收到 35%，再往里翻
+            let c = max(along - (end - capLength), 0) / capLength              // 0…1
+            let close = (1 - c * c).squareRoot() * 0.65 + 0.35
+            let rs = r * 1.08 * fold * cuff * close, rb = r * 0.92 * fold * cuff * close
+            // 法线：侧面的椭圆法线，收口处往手肘方向倒
+            let radial = simd_normalize(side * (cos(a) / rs) + back * (sin(a) / rb))
+            let normal = simd_normalize(radial * (1 - c * 0.85) + arm * (c * 1.2))
+            return (wrist + arm * along + side * (rs * cos(a)) + back * (rb * sin(a)), normal, SIMD2(along, r * a))
         }
         let color = SIMD3<Float>(0.028, 0.034, 0.05)      // 深海军蓝的跳伞服
-        for i in 0..<(n - 1) {
+        for i in 0..<rings {
             for k in 0..<sides {
                 let p00 = point(i, k), p10 = point(i + 1, k), p11 = point(i + 1, k + 1), p01 = point(i, k + 1)
                 quad(&out, (p00.0, p10.0, p11.0, p01.0), (p00.1, p10.1, p11.1, p01.1),
                      (p00.2, p10.2, p11.2, p01.2), color, .webbing)
             }
+        }
+        // 圆口里面：一片往里凹的深色圆盖（袖子里是暗的）
+        let center = wrist + arm * (end - 0.012)
+        for k in 0..<sides {
+            let p0 = point(rings, k), p1 = point(rings, k + 1)
+            vertex(&out, p0.0, arm, p0.2, color * 0.35, .webbing)
+            vertex(&out, center, arm, SIMD2(end, 0), color * 0.2, .webbing)
+            vertex(&out, p1.0, arm, p1.2, color * 0.35, .webbing)
         }
     }
 

@@ -68,6 +68,8 @@ struct Ray { float3 origin; float3 direction; };
 
 constexpr sampler linearClamp(filter::linear, address::clamp_to_edge);
 constexpr sampler linearRepeat(filter::linear, address::repeat);
+/// 按指定的 mip 级取（linearRepeat 没有 mip 过滤，永远取第 0 级）
+constexpr sampler trilinearRepeat(filter::linear, mip_filter::linear, address::repeat);
 constexpr sampler pixelLinearClamp(filter::linear, coord::pixel, address::clamp_to_edge);
 
 static inline float remap(float v, float lo, float hi, float newLo, float newHi) {
@@ -159,6 +161,17 @@ static inline float3 tonemap(float3 x) {
     return acesFitted(x);
 #endif
 }
+
+/// 地面受到的天光。晴空的辐照度又蓝又暗，但天上一半是被太阳照得雪白的积云，漫射下来的是白光：
+/// 只按蓝天算，背阴的山坡、云影里的地面、自己影子里的沙滩经过色调映射是一片发黑的藏蓝色。
+static inline float3 cloudySkyFill(float3 skyBlue) {
+    return mix(skyBlue, float3(dot(skyBlue, float3(0.2126f, 0.7152f, 0.0722f))), 0.5f) * 1.32f;
+}
+
+/// 靶的红、白、黄（铺在地上的一块布）。比真布暗一点：太阳直射下再亮，色调映射会把红色冲成橙粉色
+#define TARGET_RED float3(0.50f, 0.032f, 0.026f)
+#define TARGET_WHITE float3(0.70f)
+#define TARGET_YELLOW float3(0.78f, 0.56f, 0.04f)
 
 static inline float3 linearToSrgb(float3 c) {
     return select(1.055f * pow(c, 1.0f / 2.4f) - 0.055f, c * 12.92f, c <= 0.0031308f);

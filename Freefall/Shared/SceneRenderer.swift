@@ -134,6 +134,8 @@ final class SceneRenderer: @unchecked Sendable {
          maxViewCount: Int, queue: MTLCommandQueue, scene: JumpScene = .atoll, gloveDirectory: URL? = nil) throws {
         self.device = device
         self.scene = scene
+        // 雪山：满眼是太阳直射的雪，按别的关的曝光整片雪面都顶到纯白、看不出起伏。像拍雪景一样收小光圈，天也跟着更蓝
+        if scene == .snow { settings.exposure = 5.6 }
 
         /// 用到函数常量的函数必须带常量值特化以后才能建管线：平时 revealConstant = false（不带开场遮罩）
         func specialized(_ name: String, reveal: Bool) throws -> MTLFunction {
@@ -147,13 +149,14 @@ final class SceneRenderer: @unchecked Sendable {
         /// 带「开场实体化」遮罩的版本（Common.h 的函数常量 revealConstant）
         func revealFunction(_ name: String) throws -> MTLFunction { try specialized(name, reveal: true) }
         func texture(_ type: MTLTextureType, _ format: MTLPixelFormat, _ width: Int, _ height: Int,
-                     _ depth: Int = 1) -> MTLTexture {
+                     _ depth: Int = 1, mipmapped: Bool = false) -> MTLTexture {
             let d = MTLTextureDescriptor()
             d.textureType = type
             d.pixelFormat = format
             d.width = width
             d.height = height
             d.depth = depth
+            if mipmapped { d.mipmapLevelCount = Int(log2(Double(max(width, height, depth)))) + 1 }
             d.usage = [.shaderRead, .shaderWrite]
             d.storageMode = .private
             return device.makeTexture(descriptor: d)!
@@ -181,7 +184,9 @@ final class SceneRenderer: @unchecked Sendable {
             return try device.makeRenderPipelineState(descriptor: d)
         }
 
-        baseNoise = texture(.type3D, .rgba8Unorm, 128, 128, 128)
+        // 带 mip：地形拿它的一层当细节噪声，中远处一个像素盖十几个纹素，不按 mip 取的话又闪又慢（每次采样都不在缓存里）。
+        // 云的步进还是取第 0 级
+        baseNoise = texture(.type3D, .rgba8Unorm, 128, 128, 128, mipmapped: true)
         detailNoise = texture(.type3D, .rgba8Unorm, 32, 32, 32)
         weather = texture(.type2D, .rgba8Unorm, 1024, 1024)
         cloudShadow = texture(.type2D, .r16Float, 2048, 2048)
@@ -372,6 +377,10 @@ final class SceneRenderer: @unchecked Sendable {
 
         encodeSkyView(enc, into: skySeaLUT, viewHeightKm: 6360.002)
         enc.endEncoding()
+        if let blit = cb.makeBlitCommandEncoder() {
+            blit.generateMipmaps(for: baseNoise)
+            blit.endEncoding()
+        }
         cb.commit()
     }
 
@@ -695,11 +704,13 @@ final class SceneRenderer: @unchecked Sendable {
             enc.setFragmentTexture(panel.texture, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
-        // 头盔 HUD：最后画，只测深度不写（手伸到它前面会挡住它）
+        // 头盔 HUD：最后画，测深度（手伸到它前面会挡住它），也写深度。
+        // 要写：混合沉浸里系统按深度把画面和透视合成。开场房间里那行提示后面什么都没画（深度还是清屏的 0 = 无穷远），
+        // 之前只有颜色没有深度，真机上看不到；同一帧里写了深度的扶杆看得到。（推断出来的原因，离屏测试里两种都画得出来）
         for p in hud {
             var u = p.uniforms
             enc.setRenderPipelineState(helmetHudPipeline)
-            enc.setDepthStencilState(testDepth)
+            enc.setDepthStencilState(nearerDepth)
             enc.setVertexBytes(&views, length: MemoryLayout<ViewUniforms>.stride * viewCount, index: 0)
             enc.setVertexBytes(&u, length: MemoryLayout<PanelUniforms>.stride, index: 1)
             enc.setFragmentBytes(&u, length: MemoryLayout<PanelUniforms>.stride, index: 1)
