@@ -5,7 +5,7 @@
 //     tools/render-check/run.sh [输出目录] [shots|perf|seq|film|maps|all] [只画名字里含这个的镜头]
 //
 // 出图只存左眼（右眼只差 6.4 cm 视差）。perf 的数字是 M 系列 Mac 的，真机（M2 Vision Pro，GPU 10 核）大约要乘 4。
-// 手部追踪只有真机有，这里用合成的关节姿态（syntheticHand）检查手套和手腕高度表的样子。
+// 手部追踪和透视只有真机有，这里用合成的关节姿态（syntheticHand）摆手，画两只肤色的手代替真手，检查表戴得对不对。
 
 import CoreGraphics
 import Foundation
@@ -113,7 +113,7 @@ func hands(_ pose: Hands) -> [HandPose] {
     case .arch: return [archLeft, archRight]
     case .watch:
         return [syntheticHand(left: true, wrist: SIMD3(-0.07, eyeHeight - 0.3, -0.32),
-                              forward: SIMD3(1, 0.12, 0.08), palm: SIMD3(0, -1, 0.15)), archRight]
+                              forward: SIMD3(1, 0.12, 0.08), palm: SIMD3(0, -1, 0.15))]
     }
 }
 
@@ -143,7 +143,7 @@ func render(_ timeline: JumpTimeline, yaw: Float, pitch: Float, hands handPoses:
     frame.ground = SIMD4(Float(timeline.position.x), 0, Float(timeline.position.y), 0)
     frame.placeAltimeter(feet: timeline.altitudeFeet, eyeHeight: eyeHeight,
                          leftHand: handPoses.first(where: { $0.isLeft }))
-    let objects = SceneObjects.make(timeline: timeline, eyeHeight: eyeHeight, hands: handPoses)
+    let objects = SceneObjects.make(timeline: timeline, eyeHeight: eyeHeight, hands: handPoses, proxyHands: true)
 
     let cb = queue.makeCommandBuffer()!
     renderer.encodeSky(cb, altitude: altitude)
@@ -262,7 +262,7 @@ if mode == "seq" || mode == "all" {
 
 if mode == "film" {
     // 预览视频：从机舱开始按 90 Hz 跑完整段（时间累积和重投影都和真机一样逐帧跑），存成 30 fps。
-    // 机舱、出舱、开伞这几段按原速，自由落体和伞降按 3 倍速。头部动作和手是写死的。只存左眼。
+    // 机舱、出舱、开伞这几段按原速，自由落体和伞降按 3 倍速。头部动作是写死的；只在抬手看表时画替身手。只存左眼。
     let width = 1280, height = 720
     let color = makeArray(.bgra8Unorm_srgb, width: width, height: height, shared: true)
     let depth = makeArray(.depth32Float, width: width, height: height, shared: false)
@@ -291,7 +291,6 @@ if mode == "film" {
             speed = 1
             targetPitch = -12
         case .freefall:
-            pose = .arch
             if sinceRamp < 7 {
                 speed = 1
                 if sinceRamp > 1.5 { targetYaw = 170; targetPitch = 25 }   // 回头看飞机飞走
@@ -311,6 +310,7 @@ if mode == "film" {
             } else {
                 targetYaw = 20 * sin(t * 2 * .pi / 30)
                 targetPitch = -28 + 6 * sin(t * 2 * .pi / 19)
+                if sinceDeploy > 50 && sinceDeploy < 55 { pose = .watch; targetPitch = -48; targetYaw = 0 }
             }
         }
         // 头转得平滑一点（时间常数 0.4 秒），换镜头不会跳

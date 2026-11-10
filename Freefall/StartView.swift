@@ -55,7 +55,7 @@ struct StartView: View {
     private func jump() async {
         model.openWindow = openWindow
         model.dismissImmersiveSpace = dismissImmersiveSpace
-        // 手部追踪：第一次会弹授权。不允许也能玩，只是没有手套，高度表放在前下方
+        // 手部追踪：第一次会弹授权，只用来把高度表戴在左手腕上。不允许也能玩，高度表放在前下方
         if HandTrackingProvider.isSupported {
             let result = await ARKitSession().requestAuthorization(for: [.handTracking])
             model.handsAllowed = result[.handTracking] == .allowed

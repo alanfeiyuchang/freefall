@@ -8,7 +8,7 @@ import SwiftUI
 
 // 渲染循环的骨架来自 Bubble Dream（再往上是 MetalSplatter 的 visionOS 示例，MIT，© Sean Cier）。
 
-/// 每帧：推进时间线 → 拿头和手的位姿 → 天空视图表 → 每个 drawable 画云层 + 天空海面 + 飞机 / 伞 / 手套 + 高度表。
+/// 每帧：推进时间线 → 拿头和左手腕的位姿 → 天空视图表 → 每个 drawable 画云层 + 天空海面 + 飞机 / 伞 / 表带 + 高度表。
 final class ImmersiveRenderer: @unchecked Sendable {
     private static let log = Logger(subsystem: "com.feiyuchang.freefall", category: "Renderer")
     private static let maxFramesInFlight = 3
@@ -184,7 +184,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
         let stageFromDevice = stage * originFromDevice
         let headY = stageFromDevice.columns.3.y
 
-        // 手：按这一帧显示的时刻预测，手套才跟得上
+        // 手：按这一帧显示的时刻预测，表才跟得上手腕
         var hands: [HandPose] = []
         if handsEnabled, handTracking.state == .running {
             let (left, right) = handTracking.handAnchors(at: presentation.timeInterval)

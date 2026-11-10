@@ -7,7 +7,7 @@ final class AppModel {
     static let shared = AppModel()
 
     var isFalling = false
-    /// 允许了手部追踪：画手套、高度表戴在左手腕上
+    /// 允许了手部追踪：高度表戴在左手腕上（不允许就放在前下方）
     var handsAllowed = false
 
     /// 开始窗口关掉以后就没有视图能拿到这两个环境动作了，所以先存下来，落完时用。

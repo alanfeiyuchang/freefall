@@ -4,7 +4,6 @@ import SwiftUI
 @main
 struct FreefallApp: App {
     @State private var immersionStyle: ImmersionStyle = .full
-    private let model = AppModel.shared
 
     var body: some Scene {
         WindowGroup(id: StartView.windowID) {
@@ -19,8 +18,9 @@ struct FreefallApp: App {
         }
         // full：整个视野都是天空，看不到房间
         .immersionStyle(selection: $immersionStyle, in: .full)
-        // 允许手部追踪时，系统不显示你的真手，换成画出来的跳伞手套；不允许就照常显示真手
-        .upperLimbVisibility(model.handsAllowed ? .hidden : .visible)
+        // 真手透视出来，按深度和画面合成：表盘比手腕近，就盖在手腕上；伞绳、舱壁比手远，就被手挡住。
+        // （.visible 会让手永远盖在最上面，手腕上的表就看不见了）
+        .upperLimbVisibility(.automatic)
     }
 }
 

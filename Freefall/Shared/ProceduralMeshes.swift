@@ -14,7 +14,7 @@ struct MeshVertex {
 }
 
 enum MeshMaterial: Float {
-    case diffuse = 0, emissive = 1, lampRed = 2, lampGreen = 3, fabric = 4, glove = 5
+    case diffuse = 0, emissive = 1, lampRed = 2, lampGreen = 3, fabric = 4, soft = 5
 }
 
 struct MeshBuilder {

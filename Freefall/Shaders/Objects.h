@@ -1,7 +1,8 @@
 #pragma once
 #include "Common.h"
 
-// 场景里的实体：飞机（货舱内部 + 外壳）、伞衣、伞绳和背带、手套、手腕高度表、前方高度表面板（没有手部追踪时）。
+// 场景里的实体：飞机（货舱内部 + 外壳）、伞衣、伞绳和背带、手腕上的表带和高度表、前方高度表面板（没有手部追踪时）。
+// 手是透视出来的真手：系统按这里写的深度把手和画面合成（upperLimbVisibility = automatic），所以深度要写对。
 // 都在主 pass 画完天空和云之后画，正常做深度测试（reverse-Z：更近 = 深度更大）。
 // 光照和天空用同一套单位（大气外的太阳照度 = 1），最后同样乘曝光、ACES，画面才连贯。
 
@@ -16,14 +17,14 @@ struct MeshVertex {
 #define MATERIAL_LAMP_RED 2
 #define MATERIAL_LAMP_GREEN 3
 #define MATERIAL_FABRIC 4      // 伞衣：两面都能看，背光时透光
-#define MATERIAL_GLOVE 5       // 手套：布料，边缘有一点绒面的亮光
+#define MATERIAL_SOFT 5        // 表带、背带（离屏测试里代替真手的手也用它）：边缘有一点柔和的亮光
 
 struct ObjectUniforms {
     float4x4 model;      // 物体 → 舞台
-    float4 params;       // x 跳伞灯（0 红 1 绿），y 机舱里的程度（手套用），zw 未用
+    float4 params;       // x 跳伞灯（0 红 1 绿），y 机舱里的程度（表带、背带的光照），zw 未用
 };
 
-/// 两端半径不同的胶囊（手指的一节、背带）。a、b 的 w 是半径。
+/// 两端半径不同的胶囊（背带、表带的一段）。a、b 的 w 是半径。
 struct RoundCone {
     float4 a;
     float4 b;
@@ -140,7 +141,7 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
                  + skyE * (0.12f + 0.88f * daylight)
                  + cabinRed * in.interior;
         radiance = albedo * E / PI;
-        if (material == MATERIAL_GLOVE) {
+        if (material == MATERIAL_SOFT) {
             float rim = pow(1.0f - saturate(dot(N, V)), 3.0f);
             radiance += rim * 0.35f * (sunE * 0.05f * daylight + skyE * 0.08f + cabinRed * 0.3f * in.interior);
         }

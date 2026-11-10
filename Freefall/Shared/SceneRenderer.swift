@@ -68,7 +68,7 @@ final class SceneRenderer: @unchecked Sendable {
     private let canopyMesh: MTLBuffer
     private let canopyVertexCount: Int
     private let canopyAttachments: [SIMD3<Float>]
-    /// 手套和背带的胶囊，每帧重写；GPU 可能还在读前几帧的，轮流用
+    /// 背带和表带的胶囊，每帧重写；GPU 可能还在读前几帧的，轮流用
     private var coneBuffers: [MTLBuffer] = []
     private var coneBufferIndex = 0
     private static let maxCones = 160
@@ -484,7 +484,7 @@ final class SceneRenderer: @unchecked Sendable {
         enc.endEncoding()
     }
 
-    /// 飞机、伞衣和伞绳、手套和背带。都在天空和云之后画，正常做深度测试。
+    /// 飞机、伞衣和伞绳、背带和表带。都在天空和云之后画，正常做深度测试（真手按这个深度和画面合成）。
     private func encodeObjects(_ enc: MTLRenderCommandEncoder, objects: SceneObjects,
                                views: inout [ViewUniforms], frame: inout FrameUniforms) {
         let viewCount = views.count

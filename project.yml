@@ -32,4 +32,4 @@ targets:
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UIApplicationPreferredDefaultSceneSessionRole: UIWindowSceneSessionRoleApplication
         INFOPLIST_KEY_NSWorldSensingUsageDescription: 用来跟踪你头部的位置和朝向。
-        INFOPLIST_KEY_NSHandsTrackingUsageDescription: 用来把你的手画成跳伞手套，左手腕上戴着高度表。
+        INFOPLIST_KEY_NSHandsTrackingUsageDescription: 用来把高度表戴在你的左手腕上。

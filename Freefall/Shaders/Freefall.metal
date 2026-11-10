@@ -663,7 +663,7 @@ fragment float4 hudFragment(HudOut in [[stage_in]],
     }
 
     float opacity = F.hudUp.w * F.camera.z;
-    float background = watch ? 0.92f : 0.42f;              // 表盘是实心的黑表面
+    float background = watch ? 1.0f : 0.42f;               // 表盘是实心的黑表面（透明的话透出来的是天，不是手腕）
     float alpha = max(panel * background, max(max(text, arc), rim * 0.5f)) * opacity;
     const float3 orange = float3(1.0f, 0.42f, 0.08f);
     float3 rgb = (text + rim * (watch ? 0.35f : 0.5f) * (1.0f - text) + arc * orange * (1.0f - text)) * opacity;

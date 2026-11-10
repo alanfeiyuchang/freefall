@@ -156,7 +156,7 @@ struct JumpTimeline {
         return fadeIn * (1 - Self.smoothstep(min((time - fadeTime) / Self.fadeOutDuration, 1)))
     }
 
-    /// 还在机舱里的程度（手套的光照用：舱里是红灯，出去以后是太阳）
+    /// 还在机舱里的程度（表带、背带的光照用：舱里是红灯，出去以后是太阳）
     var inCabin: Double {
         guard let leftRampTime else { return 1 }
         return 1 - Self.smoothstep(min((time - leftRampTime) / 0.6, 1))
