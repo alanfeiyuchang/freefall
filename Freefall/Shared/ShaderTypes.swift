@@ -34,6 +34,30 @@ struct FrameUniforms {
     var heading = SIMD4<Float>(1, 0, 0, 0)
     /// x 场景编号，y 云层整体抬高多少米，z 有地形（SceneRenderer 按场景填）
     var world = SIMD4<Float>(0, 0, 0, 0)
+    /// 伞衣的影子（舞台空间）：xyz 伞衣中心，w 影子强度（0 = 没开伞；充气越足越接近 1）
+    var canopyCenter = SIMD4<Float>(0, 0, 0, 0)
+    /// xyz 展向单位向量（左翼尖 → 右翼尖），w 投影的半展长（米）
+    var canopySpan = SIMD4<Float>(1, 0, 0, 0)
+    /// xyz 弦向单位向量（前缘 → 后缘），w 半弦长（米）
+    var canopyChord = SIMD4<Float>(0, 0, 1, 0)
+    /// 身体的影子（舞台空间）：xyz 头顶，w 有没有（0/1）。身体当成一根从头顶竖直垂到脚的胶囊
+    var bodyShadow = SIMD4<Float>(0, 0, 0, 0)
+}
+
+/// 和 Objects.h 的 LineSegment 一样：一段绳子（伞绳、刹车绳），画成朝着眼睛的细长条
+struct LineSegment {
+    /// xyz 起点，w 半径（米）
+    var a: SIMD4<Float>
+    /// xyz 终点，w 未用
+    var b: SIMD4<Float>
+    /// rgb 颜色（反照率），a 未用
+    var color: SIMD4<Float>
+
+    init(_ a: SIMD3<Float>, _ b: SIMD3<Float>, radius: Float, color: SIMD3<Float>) {
+        self.a = SIMD4(a, radius)
+        self.b = SIMD4(b, 0)
+        self.color = SIMD4(color, 0)
+    }
 }
 
 /// 和 Common.h 的 PanelUniforms 一样：提示文字面板

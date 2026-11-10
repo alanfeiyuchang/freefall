@@ -385,6 +385,9 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
     float od = cloudShadow.sample(linearRepeat, cloudXZ / WEATHER_TILE + 0.5f, level(0)).r;
     od *= smoothstep(300.0f, 650.0f, length(p - LZ_TARGET));     // 着陆区不落云影（和海面一样）
     float shadow = shade.r * exp(-od * F.clouds.z * 0.5f);
+    // 自己的伞衣和身体的影子（快落地时才看得清：离得越近边越实）
+    float3 Ls = stageSunDirection(F);
+    float3 sunVis = shadow * canopyShadow(in.stagePos, Ls, F) * bodyShadow(in.stagePos, Ls, F);
     float altKm = h * 0.001f;
     float3 sunE = altKm < 1.0f ? mix(A.sunAtSea.rgb, A.sunAtCloudBase.rgb, saturate(altKm))
                                : mix(A.sunAtCloudBase.rgb, A.sunAtCloudTop.rgb, saturate((altKm - 1.0f) / 8.0f));
@@ -397,14 +400,14 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
         float2 slope = waveSlope(p, F.camera.y, footprint, noise, residual) * (scene == SCENE_VOLCANO ? 1.0f : 0.35f);
         float3 Nw = normalize(float3(-slope.x, 1.0f, -slope.y));
         float3 waterAlbedo = scene == SCENE_GLACIER ? float3(0.02f, 0.10f, 0.11f) : float3(0.006f, 0.02f, 0.025f);
-        color = oceanShade(Nw, rd, sunDir, shadow, 0.006f + residual, waterAlbedo, A, skySeaLUT);
+        color = oceanShade(Nw, rd, sunDir, dot(sunVis, float3(0.3333f)), 0.006f + residual, waterAlbedo, A, skySeaLUT);
     } else {
         // 背阴的陡坡还会被对面照亮的山坡、谷底反射一点暖光（不然阴面只剩蓝天光，发蓝发暗）
         float3 bounce = sunE * 0.12f * float3(1.0f, 0.95f, 0.85f) * saturate(1.0f - N.y) * shade.g;
-        color = s.albedo / PI * (sunE * NdotL * shadow + skyE + bounce);
+        color = s.albedo / PI * (sunE * NdotL * sunVis + skyE + bounce);
         if (s.specular > 0.0f) {
             float3 H = normalize(sunDir - rd);
-            color += sunE * shadow * s.specular * pow(saturate(dot(N, H)), 1.0f / max(s.roughness * s.roughness, 0.002f) * 0.5f);
+            color += sunE * sunVis * s.specular * pow(saturate(dot(N, H)), 1.0f / max(s.roughness * s.roughness, 0.002f) * 0.5f);
         }
         color += s.emission;
     }
@@ -423,7 +426,7 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
     float4 cloud = cloudColor.sample(pixelLinearClamp, in.position.xy * F.clouds.x, in.viewIndex);
     color = color * cloud.a + cloud.rgb;
 
-    color = acesFitted(color * F.exposure.x) * F.camera.z;
+    color = tonemap(color * F.exposure.x) * F.camera.z;
     if (F.heading.z > 0.001f) {
         float2 screen = screenPosition(in.position.xy, in.viewIndex, F.camera.w > 0.5f, rateMap);
         float2 uv = (screen - views[in.viewIndex].viewport.xy) / views[in.viewIndex].viewport.zw - 0.5f;

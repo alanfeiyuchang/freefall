@@ -211,15 +211,17 @@ func look(atCloud point: SIMD2<Double>, altitude: Double, from t: JumpTimeline) 
 @discardableResult
 func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [HandPose],
             color: MTLTexture, depth: MTLTexture, fovY: Float, handTracking: Bool = true,
-            watchOnLeft: Bool = true, panel showPanel: Bool = true) -> Double {
+            watchOnLeft: Bool = true, panel showPanel: Bool = true, eye: SIMD3<Float>? = nil) -> Double {
     let width = color.width, height = color.height
     let head = rotation(yaw: yaw, pitch: pitch)
+    // 第三人称看自己身上的装备：相机挪到 eye（相对眼睛），身体留在原地
+    let eyeOffset = eye ?? SIMD3<Float>(0, 0, 0)
     let proj = projection(fovY: fovY, aspect: Float(width) / Float(height), near: 0.05)
     var views: [ViewUniforms] = []
     for dx in [Float(-0.032), 0.032] {
         var stageFromCamera = head
         let offset = head * SIMD4(dx, 0, 0, 0)
-        stageFromCamera.columns.3 = SIMD4(offset.x, eyeHeight + offset.y, offset.z, 1)
+        stageFromCamera.columns.3 = SIMD4(offset.x + eyeOffset.x, eyeHeight + offset.y + eyeOffset.y, offset.z + eyeOffset.z, 1)
         let vp = proj * stageFromCamera.inverse
         views.append(ViewUniforms(viewProjection: vp, inverseViewProjection: vp.inverse,
                                   cameraPosition: stageFromCamera.columns.3,
@@ -237,8 +239,11 @@ func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [
     frame.placeAltimeter(feet: t.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand, alarm: t.alarmLevel)
     // 和真机一样：允许了手部追踪时只有手腕上的表，戴表的手不在视野里就没有高度表
     if handTracking && watchHand == nil { frame.hudUp.w = 0 }
-    let objects = session.objects(layout: layout, hands: handPoses, watchOnLeft: watchOnLeft, proxyHands: true,
+    var objects = session.objects(layout: layout, hands: handPoses, watchOnLeft: watchOnLeft, proxyHands: true,
                                   head: SIMD3(0, eyeHeight, 0))
+    if env["NOLINES"] != nil { objects.lines = [] }
+    if env["NOMESH"] != nil { objects.meshVertices = [] }
+    if env["NOSHADOW"] != nil { objects.canopyShadow = nil; objects.bodyTop = nil }
     textPanel.set(showPanel ? session.hint : "")
     let forward = (head * SIMD4<Float>(0, 0, -1, 0)).xyz
     let panel = textPanel.texture.map {
@@ -291,9 +296,44 @@ struct Shot {
     var lookAtTarget = false
     /// 看向雨区（碎积云层中心、这个高度；覆盖 yaw / pitch）
     var lookAtRain: Double?
+    /// 第三人称：相机相对眼睛的位置（看自己身上的装备）
+    var eye: SIMD3<Float>?
+    /// 背对太阳看（自己的影子在前面），再往左转多少度（正对着影子时会被右边的伸缩带挡住），pitch 照用
+    var lookAwayFromSun: Float?
+}
+
+/// 背对太阳的朝向（度）：太阳在世界坐标里，舞台按航向转
+func yawAwayFromSun(_ t: JumpTimeline) -> Float {
+    let sun = SceneRenderer.sunDirection(for: t.scene)
+    let d = SIMD2<Double>(-Double(sun.x), -Double(sun.z))
+    let c = cos(t.heading), s = sin(t.heading)
+    let local = SIMD2(d.x * c - d.y * s, d.x * s + d.y * c)
+    return Float(atan2(-local.x, -local.y) * 180 / .pi)
 }
 
 let alarmFeet = { (feet: Int) in at { $0.altitudeFeet <= feet } }
+
+/// 装备近景：背带、拉手、3 环、伸缩带、操纵环、滑块、表；快落地时地上自己的影子
+let gearShots: [Shot] = [
+    Shot(name: "x1_chest", session: { alarmFeet(3600) }, yaw: 0, pitch: -68, fovY: 62),
+    Shot(name: "x2_handle_pull", session: { alarmFeet(3300) }, yaw: -12, pitch: -60, hands: .handle, fovY: 55),
+    Shot(name: "x3_risers", session: { deployed(12) }, yaw: 0, pitch: 48, fovY: 75),
+    Shot(name: "x4_toggle", session: { deployed(12) }, yaw: -61, pitch: -13, fovY: 30),
+    Shot(name: "x5_three_ring", session: { deployed(12) }, yaw: -78, pitch: -50, fovY: 40),
+    Shot(name: "x6_toggles_held", session: { deployed(12) }, yaw: 0, pitch: 18, hands: .toggles, fovY: 80),
+    // 第三人称：从前面看自己（自由落体时、开伞后）
+    Shot(name: "x9_front_freefall", session: { alarmFeet(3600) }, yaw: 180, pitch: -12, fovY: 50,
+         eye: SIMD3(0, 0.0, -1.1)),
+    Shot(name: "xa_front_canopy", session: { deployed(12) }, yaw: 180, pitch: 4, fovY: 60, eye: SIMD3(0, -0.05, -1.3)),
+    Shot(name: "xb_side_canopy", session: { deployed(12) }, yaw: -90, pitch: 2, fovY: 60, eye: SIMD3(-1.2, 0.0, -0.1)),
+    Shot(name: "x7_watch", session: { freefall(6500) }, yaw: 22, pitch: -38, hands: .watch, fovY: 30),
+    Shot(name: "x8_shadow", session: { at { $0.phase == .canopy && $0.heightAboveGround < 14 } }, yaw: 0,
+         pitch: -40, fovY: 80, lookAwayFromSun: 28),
+    Shot(name: "xc_shadow_60m", session: { at { $0.phase == .canopy && $0.heightAboveGround < 60 } }, yaw: 0,
+         pitch: -32, fovY: 60, lookAwayFromSun: 14),
+    Shot(name: "xd_flare_front", session: { at { $0.phase == .canopy && $0.heightAboveGround < 14 } }, yaw: 180,
+         pitch: 4, fovY: 60, eye: SIMD3(0, -0.05, -1.3)),
+]
 
 let atollShots: [Shot] = [
     Shot(name: "d1_door_start", session: { at { $0.time >= 1.5 } }, yaw: 0, pitch: -12),
@@ -339,7 +379,8 @@ let atollShots: [Shot] = [
     Shot(name: "l2_landed_canopy", session: { at { since($0.landedTime, $0) >= 6 } }, yaw: 0,
          pitch: -20, fovY: 80),
     Shot(name: "l3_crash", session: { at(deployFeet: 200) { $0.landedTime != nil } }, yaw: 0, pitch: -30),
-]
+] + gearShots
+
 
 /// 地形场景的镜头：高空俯瞰、穿过云层、报警时、开伞后看靶、看两边的山、低空、落地
 let terrainShots: [Shot] = [
@@ -358,7 +399,7 @@ let terrainShots: [Shot] = [
          fovY: 80),
     Shot(name: "tc_landed", session: { at { since($0.landedTime, $0) >= 3 } }, yaw: 0, pitch: -20, fovY: 80),
     Shot(name: "td_landed_around", session: { at { since($0.landedTime, $0) >= 3 } }, yaw: 120, pitch: 8, fovY: 80),
-]
+] + gearShots
 
 let shots = jumpScene == .atoll ? atollShots : terrainShots
 
@@ -446,15 +487,16 @@ if mode == "shots" || mode == "all" {
         let h = hands(shot.hands, session)
         var yaw = shot.yaw, pitch = shot.pitch
         if shot.lookAtTarget { (yaw, pitch) = lookAtTarget(session.timeline) }
+        if let offset = shot.lookAwayFromSun { yaw = yawAwayFromSun(session.timeline) + offset }
         if let h = shot.lookAtRain {
             (yaw, pitch) = look(atCloud: JumpTimeline.deckCenter, altitude: h, from: session.timeline)
         }
         for _ in 0..<11 {
             render(session, yaw: yaw, pitch: pitch, hands: h, color: color, depth: depth, fovY: shot.fovY,
-                   watchOnLeft: shot.watchOnLeft)
+                   watchOnLeft: shot.watchOnLeft, eye: shot.eye)
         }
         let ms = render(session, yaw: yaw, pitch: pitch, hands: h, color: color, depth: depth, fovY: shot.fovY,
-                        watchOnLeft: shot.watchOnLeft)
+                        watchOnLeft: shot.watchOnLeft, eye: shot.eye)
         saveLeftEye(color, to: outDir.appendingPathComponent("\(shot.name).png"))
         let t = session.timeline
         print(String(format: "%@  t=%.1f s  %.0f m（离地 %.0f）  %@  雨 %.2f  %.1f ms  「%@」", shot.name, t.time,
@@ -706,6 +748,16 @@ if mode == "perf" || mode == "all" {
     let start = Date()
     for _ in 0..<900 { s.step(dt: 1.0 / 90, hands: [], layout: layout) }
     print(String(format: "  伞衣布料 + 时间线：每帧 %.3f ms（CPU）", Date().timeIntervalSince(start) / 900 * 1000))
+    // CPU：每帧组装网格（伞衣、滑块、装备、表）和绳子
+    let handPoses = hands(.toggles, s) + hands(.watch, s)
+    let start2 = Date()
+    var vertexCount = 0, lineCount = 0
+    for _ in 0..<300 {
+        let o = s.objects(layout: layout, hands: handPoses, watchOnLeft: true, proxyHands: false, head: SIMD3(0, eyeHeight, 0))
+        vertexCount = o.meshVertices.count; lineCount = o.lines.count
+    }
+    print(String(format: "  组装网格：每帧 %.3f ms（CPU），%d 个顶点、%d 段绳子", Date().timeIntervalSince(start2) / 300 * 1000,
+                 vertexCount, lineCount))
 }
 
 if mode == "maps" || mode == "all" {

@@ -580,6 +580,10 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
         // 着陆区几百米内不落云影（阳光从云缝里照下来）：云相对地面的位置取决于你在舱里等了多久，靶不能碰巧在阴影里
         od *= smoothstep(300.0f, 650.0f, length(g - TARGET_CENTER));
         float shadow = exp(-od * F.clouds.z * 0.5f);
+        // 自己的伞衣和身体的影子：这个点在舞台空间的位置（视线没转航向的方向 × 距离）
+        float3 stageP = views[in.viewIndex].cameraPosition.xyz + rotateHeading(rd, F.heading.x, -F.heading.y) * t;
+        float3 Ls = stageSunDirection(F);
+        float3 sunVis = shadow * canopyShadow(stageP, Ls, F) * bodyShadow(stageP, Ls, F);
 
         // 水下的颜色：深海往上散出来的光 + 浅处的白沙底（红光被水吸收得最快，越浅越青绿）
         float3 waterAlbedo = float3(0.004f, 0.017f, 0.034f);
@@ -609,10 +613,10 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
             const float3 absorption = float3(0.45f, 0.065f, 0.035f);   // 每米
             waterAlbedo += float3(0.55f, 0.6f, 0.55f) * exp(-2.0f * absorption * depth);
         }
-        float3 surface = oceanShade(N, rd, sunDir, shadow, 0.006f + residual, waterAlbedo, A, skySeaLUT);
+        float3 surface = oceanShade(N, rd, sunDir, dot(sunVis, float3(0.3333f)), 0.006f + residual, waterAlbedo, A, skySeaLUT);
         if (land + surf > 0.0f) {
             // 沙洲和白浪：漫反射（沙滩、椰林、浪花）
-            float3 E = A.sunAtSea.rgb * shadow * saturate(dot(sphereN, sunDir)) + A.skyIrradianceSea.rgb;
+            float3 E = A.sunAtSea.rgb * sunVis * saturate(dot(sphereN, sunDir)) + A.skyIrradianceSea.rgb;
             // 沙滩近看有细纹（风吹出来的沙纹），水边一圈湿沙颜色深
             float ripple = waveNoise.sample(linearRepeat, float3(g.x / 2.5f, 0.53f, g.y / 2.5f), level(0)).r;
             float wet = sandbar * smoothstep(-6.0f, 0.0f, sandEdge);
@@ -642,7 +646,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
     float4 cloud = cloudColor.sample(pixelLinearClamp, in.position.xy * F.clouds.x, in.viewIndex);
     color = color * cloud.a + cloud.rgb;
 
-    color = acesFitted(color * F.exposure.x) * F.camera.z;
+    color = tonemap(color * F.exposure.x) * F.camera.z;
     // 伞下转弯时视野四周压暗一圈（转向是世界绕你转，暗边能明显减轻晕）
     if (F.heading.z > 0.001f) {
         float2 uv = (screen - views[in.viewIndex].viewport.xy) / views[in.viewIndex].viewport.zw - 0.5f;

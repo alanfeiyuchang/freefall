@@ -92,10 +92,19 @@ final class SceneRenderer: @unchecked Sendable {
     private let linePipeline: MTLRenderPipelineState
     private let planeMesh: MTLBuffer
     private let planeVertexCount: Int
-    /// 伞衣网格每帧由布料模拟重建：GPU 可能还在读前几帧的，轮流用几块
-    private var canopyBuffers: [MTLBuffer] = []
-    private var canopyBufferIndex = 0
-    private static let maxCanopyVertices = 8000
+    /// 每帧重建的网格（伞衣、滑块、拉手、操纵环、表）：GPU 可能还在读前几帧的，轮流用几块
+    private var meshBuffers: [MTLBuffer] = []
+    private var meshBufferIndex = 0
+    private static let maxMeshVertices = 40_000
+    /// 身上不动的装备（背带、伸缩带）：启动时生成一次，画的时候平移到身体的位置
+    private let harnessMesh: MTLBuffer
+    private let harnessVertexCount: Int
+    private let risersMesh: MTLBuffer
+    private let risersVertexCount: Int
+    /// 绳子，每帧重写
+    private var lineBuffers: [MTLBuffer] = []
+    private var lineBufferIndex = 0
+    private static let maxLines = 512
     private let panelPipeline: MTLRenderPipelineState
     /// 背带和表带的胶囊，每帧重写；GPU 可能还在读前几帧的，轮流用
     private var coneBuffers: [MTLBuffer] = []
@@ -215,15 +224,9 @@ final class SceneRenderer: @unchecked Sendable {
                                           depth: depthFormat, blend: false)
         conePipeline = try renderPipeline("roundConeVertex", "objectFragment", colors: [colorFormat],
                                           depth: depthFormat, blend: false)
-        let lineDescriptor = MTLRenderPipelineDescriptor()
-        lineDescriptor.label = "lines"
-        lineDescriptor.vertexFunction = try function("lineVertex")
-        lineDescriptor.fragmentFunction = try function("lineFragment")
-        lineDescriptor.colorAttachments[0].pixelFormat = colorFormat
-        lineDescriptor.depthAttachmentPixelFormat = depthFormat
-        lineDescriptor.maxVertexAmplificationCount = maxViewCount
-        lineDescriptor.inputPrimitiveTopology = .line
-        linePipeline = try device.makeRenderPipelineState(descriptor: lineDescriptor)
+        // 绳子：朝着眼睛的细长条，边缘按覆盖率半透明（预乘 alpha 叠上去）
+        linePipeline = try renderPipeline("lineVertex", "lineFragment", colors: [colorFormat],
+                                          depth: depthFormat, blend: true)
         // 雨丝：叠加上去（不影响 alpha）
         let rainDescriptor = MTLRenderPipelineDescriptor()
         rainDescriptor.label = "rain"
@@ -245,9 +248,18 @@ final class SceneRenderer: @unchecked Sendable {
         planeMesh = device.makeBuffer(bytes: plane, length: MemoryLayout<MeshVertex>.stride * plane.count,
                                       options: .storageModeShared)!
         for _ in 0..<8 {
-            canopyBuffers.append(device.makeBuffer(length: MemoryLayout<MeshVertex>.stride * Self.maxCanopyVertices,
-                                                   options: .storageModeShared)!)
+            meshBuffers.append(device.makeBuffer(length: MemoryLayout<MeshVertex>.stride * Self.maxMeshVertices,
+                                                 options: .storageModeShared)!)
+            lineBuffers.append(device.makeBuffer(length: MemoryLayout<LineSegment>.stride * Self.maxLines,
+                                                 options: .storageModeShared)!)
         }
+        let harness = Gear.harness, risers = Gear.risers
+        harnessVertexCount = harness.count
+        harnessMesh = device.makeBuffer(bytes: harness, length: MemoryLayout<MeshVertex>.stride * harness.count,
+                                        options: .storageModeShared)!
+        risersVertexCount = risers.count
+        risersMesh = device.makeBuffer(bytes: risers, length: MemoryLayout<MeshVertex>.stride * risers.count,
+                                       options: .storageModeShared)!
         panelPipeline = try renderPipeline("panelVertex", "panelFragment", colors: [colorFormat],
                                            depth: depthFormat, blend: true)
         for _ in 0..<8 {
@@ -446,6 +458,13 @@ final class SceneRenderer: @unchecked Sendable {
         var views = views
         var frame = complete(frame)
         frame.camera.w = rateMap == nil ? 0 : 1
+        // 伞衣和身体的影子（地形、海面、装备、绳子都要用）
+        if let shadow = objects.canopyShadow {
+            frame.canopyCenter = shadow.center
+            frame.canopySpan = shadow.span
+            frame.canopyChord = shadow.chord
+        }
+        if let top = objects.bodyTop { frame.bodyShadow = SIMD4(top, 1) }
         let rateBuffer = rateMap.map(rateMapBuffer(for:)) ?? emptyRateMapBuffer
 
         // 0. 地形：先选块，画一遍深度（云层按它截断）
@@ -758,7 +777,7 @@ final class SceneRenderer: @unchecked Sendable {
         return t
     }
 
-    /// 飞机、伞衣和伞绳、背带和表带。都在天空和云之后画，正常做深度测试（真手按这个深度和画面合成）。
+    /// 飞机、伞衣和伞绳、身上的装备、手腕上的表。都在天空和云之后画，正常做深度测试（真手按这个深度和画面合成）。
     private func encodeObjects(_ enc: MTLRenderCommandEncoder, objects: SceneObjects,
                                views: inout [ViewUniforms], frame: inout FrameUniforms) {
         let viewCount = views.count
@@ -767,29 +786,13 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setFragmentBytes(&views, length: viewsLength, index: 0)
         enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
         enc.setFragmentBuffer(atmosphereConstants, offset: 0, index: 2)
+        enc.setFragmentTexture(skyViewLUT, index: 0)      // 金属、塑料反射的天空
 
         func uniforms(_ model: simd_float4x4) -> ObjectUniforms {
             ObjectUniforms(model: model, params: SIMD4(objects.jumpLightGreen ? 1 : 0, objects.inCabin, 0, 0))
         }
-
-        if let plane = objects.planeTransform {
-            var u = uniforms(plane)
-            enc.setRenderPipelineState(meshPipeline)
-            enc.setVertexBuffer(planeMesh, offset: 0, index: 0)
-            enc.setVertexBytes(&views, length: viewsLength, index: 1)
-            enc.setVertexBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 2)
-            enc.setFragmentBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 3)
-            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: planeVertexCount)
-        }
-
-        if !objects.canopyVertices.isEmpty {
-            let count = min(objects.canopyVertices.count, Self.maxCanopyVertices)
-            let buffer = canopyBuffers[canopyBufferIndex]
-            canopyBufferIndex = (canopyBufferIndex + 1) % canopyBuffers.count
-            objects.canopyVertices.withUnsafeBytes { raw in
-                buffer.contents().copyMemory(from: raw.baseAddress!, byteCount: MemoryLayout<MeshVertex>.stride * count)
-            }
-            var u = uniforms(matrix_identity_float4x4)
+        func draw(_ buffer: MTLBuffer, count: Int, model: simd_float4x4) {
+            var u = uniforms(model)
             enc.setRenderPipelineState(meshPipeline)
             enc.setVertexBuffer(buffer, offset: 0, index: 0)
             enc.setVertexBytes(&views, length: viewsLength, index: 1)
@@ -798,14 +801,18 @@ final class SceneRenderer: @unchecked Sendable {
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: count)
         }
 
-        if !objects.lines.isEmpty {
-            // 伞绳、刹车绳、钢索：一像素宽的线（一次最多 4 KB 的顶点）
-            var points = Array(objects.lines.prefix(250))
-            enc.setRenderPipelineState(linePipeline)
-            enc.setVertexBytes(&points, length: MemoryLayout<SIMD4<Float>>.stride * points.count, index: 0)
-            enc.setVertexBytes(&views, length: viewsLength, index: 1)
-            enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
-            enc.drawPrimitives(type: .line, vertexStart: 0, vertexCount: points.count)
+        if let plane = objects.planeTransform { draw(planeMesh, count: planeVertexCount, model: plane) }
+        if let anchor = objects.harnessAnchor { draw(harnessMesh, count: harnessVertexCount, model: translation(anchor)) }
+        if let anchor = objects.risersAnchor { draw(risersMesh, count: risersVertexCount, model: translation(anchor)) }
+
+        if !objects.meshVertices.isEmpty {
+            let count = min(objects.meshVertices.count, Self.maxMeshVertices)
+            let buffer = meshBuffers[meshBufferIndex]
+            meshBufferIndex = (meshBufferIndex + 1) % meshBuffers.count
+            objects.meshVertices.withUnsafeBytes { raw in
+                buffer.contents().copyMemory(from: raw.baseAddress!, byteCount: MemoryLayout<MeshVertex>.stride * count)
+            }
+            draw(buffer, count: count, model: matrix_identity_float4x4)
         }
 
         let cones = objects.roundCones.prefix(Self.maxCones)
@@ -822,6 +829,20 @@ final class SceneRenderer: @unchecked Sendable {
             enc.setFragmentBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 3)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: Self.coneVertexCount,
                                instanceCount: cones.count)
+        }
+
+        // 绳子最后画（半透明的边，只测深度不写深度）
+        let lines = objects.lines.prefix(Self.maxLines)
+        if !lines.isEmpty {
+            let buffer = lineBuffers[lineBufferIndex]
+            lineBufferIndex = (lineBufferIndex + 1) % lineBuffers.count
+            let pointer = buffer.contents().bindMemory(to: LineSegment.self, capacity: Self.maxLines)
+            for (i, l) in lines.enumerated() { pointer[i] = l }
+            enc.setRenderPipelineState(linePipeline)
+            enc.setDepthStencilState(testDepth)
+            enc.setVertexBuffer(buffer, offset: 0, index: 0)
+            enc.setVertexBytes(&views, length: viewsLength, index: 1)
+            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: lines.count)
         }
     }
 

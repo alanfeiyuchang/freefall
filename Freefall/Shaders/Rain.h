@@ -114,6 +114,6 @@ fragment float4 rainFragment(RainOut in [[stage_in]],
     float a = in.alpha * (1.0f - in.across * in.across) * 0.6f * saturate(R.offset.w * 2.0f);
     // 雨滴把周围的天光（在云里是白亮的云光）折射、反射过来
     float3 radiance = A.skyIrradianceSea.rgb / PI * 2.2f + A.sunAtCloudBase.rgb * 0.03f;
-    float3 c = acesFitted(radiance * F.exposure.x) * F.camera.z;
+    float3 c = tonemap(radiance * F.exposure.x) * F.camera.z;
     return float4(c * a, 0.0f);     // 叠加上去
 }

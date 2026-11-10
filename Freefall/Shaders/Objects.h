@@ -1,5 +1,6 @@
 #pragma once
 #include "Common.h"
+#include "Atmosphere.h"
 
 // 场景里的实体：飞机（货舱内部 + 外壳）、伞衣、伞绳和背带、手腕上的表带和高度表、前方高度表面板（没有手部追踪时）。
 // 手是透视出来的真手：系统按这里写的深度把手和画面合成（upperLimbVisibility = automatic），所以深度要写对。
@@ -17,7 +18,12 @@ struct MeshVertex {
 #define MATERIAL_LAMP_RED 2
 #define MATERIAL_LAMP_GREEN 3
 #define MATERIAL_FABRIC 4      // 伞衣：两面都能看，背光时透光
-#define MATERIAL_SOFT 5        // 表带、背带（离屏测试里代替真手的手也用它）：边缘有一点柔和的亮光
+#define MATERIAL_SOFT 5        // 离屏测试里代替真手的手：边缘有一点柔和的亮光
+// 装备（Shared/Gear.swift）：GGX 高光 + 天空反射，按真材料给粗糙度
+#define MATERIAL_WEBBING 6     // 尼龙织带（背带、伸缩带、操纵环、拉手的布面）：斜纹 + 绒光
+#define MATERIAL_METAL 7       // 金属（3 环、连接环、扣眼、卡扣、钢索、表圈）
+#define MATERIAL_PLASTIC 8     // 硬塑料（钢索软管、表壳）
+#define MATERIAL_RUBBER 9      // 橡胶（表带）
 
 struct ObjectUniforms {
     float4x4 model;      // 物体 → 舞台
@@ -108,24 +114,64 @@ vertex ObjectOut roundConeVertex(uint vid [[vertex_id]],
     return o;
 }
 
+// MARK: - 材质
+
+/// 地面平均反照率（金属环反射到的地面、装备朝下的面接到的反光）
+static inline float sceneGroundAlbedo(int scene) {
+    switch (scene) {
+    case 1: return 0.13f;     // 草原
+    case 2: return 0.12f;     // 高山
+    case 3: return 0.65f;     // 雪山
+    case 4: return 0.45f;     // 冰川
+    case 5: return 0.07f;     // 火山
+    default: return 0.06f;    // 环礁：海面
+    }
+}
+
+/// GGX（Trowbridge-Reitz）+ Smith 可见性，不含菲涅耳。a2 = 粗糙度⁴（已经加过几何高光抗锯齿）
+static inline float ggx(float NdotH, float NdotV, float NdotL, float a2, float roughness) {
+    float d = NdotH * NdotH * (a2 - 1.0f) + 1.0f;
+    float D = a2 / (PI * d * d);
+    float k = (roughness + 1.0f) * (roughness + 1.0f) / 8.0f;
+    float G = (NdotV / (NdotV * (1.0f - k) + k)) * (NdotL / (NdotL * (1.0f - k) + k));
+    return D * G / max(4.0f * NdotV * NdotL, 1e-4f);
+}
+
+/// 环境光的镜面部分（Karis 2014 的解析近似，代替预积分表）
+static inline float3 envBRDF(float3 F0, float roughness, float NdotV) {
+    const float4 c0 = float4(-1.0f, -0.0275f, -0.572f, 0.022f);
+    const float4 c1 = float4(1.0f, 0.0425f, 1.04f, -0.04f);
+    float4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28f * NdotV)) * r.x + r.y;
+    float2 ab = float2(-1.04f, 1.04f) * a004 + r.zw;
+    return F0 * ab.x + ab.y;
+}
+
 fragment float4 objectFragment(ObjectOut in [[stage_in]],
                                constant ViewUniforms *views [[buffer(0)]],
                                constant FrameUniforms &F [[buffer(1)]],
                                constant AtmosphereConstants &A [[buffer(2)]],
-                               constant ObjectUniforms &O [[buffer(3)]]) {
+                               constant ObjectUniforms &O [[buffer(3)]],
+                               texture2d<float> skyLUT [[texture(0)]]) {
     float3 eye = views[in.viewIndex].cameraPosition.xyz;
     float3 V = normalize(eye - in.stagePos);
     float3 N = normalize(in.normal);
     if (dot(N, V) < 0.0f) N = -N;                 // 两面都画（舱壁、伞衣）
+    // 导数在分支外面算（分支里 2×2 像素块可能走不同的路，导数没定义）
+    float3 dpx = dfdx(in.stagePos), dpy = dfdy(in.stagePos);
+    float2 duvx = dfdx(in.uv), duvy = dfdy(in.uv);
+    float3 dnx = dfdx(N), dny = dfdy(N);
     // 太阳在世界坐标里；伞下转向是世界绕着你转，舞台里的东西要按航向反过来转一下太阳
-    float3 L = rotateHeading(F.sunDirection.xyz, F.heading.x, -F.heading.y);
+    float3 L = stageSunDirection(F);
     int material = int(in.color.a + 0.5f);
     float3 albedo = in.color.rgb;
     float daylight = 1.0f - in.interior;
 
     float altitude = F.camera.x + in.stagePos.y;
     float3 sunE = mix(A.sunAtCloudBase.rgb, A.sunAtCloudTop.rgb, saturate((altitude - 1000.0f) / 8000.0f));
-    float3 skyE = A.skyIrradianceSea.rgb * (0.55f + 0.45f * N.y) + A.groundBounce.rgb * PI * saturate(-N.y) * 0.5f;
+    float groundAlbedo = sceneGroundAlbedo(int(F.world.x));
+    float3 groundL = A.groundBounce.rgb * (groundAlbedo / 0.06f);       // 地面往上的平均辐亮度
+    float3 skyE = A.skyIrradianceSea.rgb * (0.55f + 0.45f * N.y) + groundL * PI * saturate(-N.y) * 0.5f;
     const float3 cabinRed = float3(0.05f, 0.0045f, 0.0035f);   // 货舱里的红色夜灯（照度）
 
     float3 radiance;
@@ -135,6 +181,74 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
         radiance = albedo * (O.params.x < 0.5f ? 1.0f : 0.004f);
     } else if (material == MATERIAL_LAMP_GREEN) {
         radiance = albedo * (O.params.x > 0.5f ? 1.0f : 0.004f);
+    } else if (material >= MATERIAL_WEBBING) {
+        // 装备。室内程度用机舱里的程度（顶点里那一位存的是 uv）
+        float interior = O.params.y;
+        float dl = 1.0f - interior;
+        float3 sunVis = canopyShadow(in.stagePos, L, F) * (dl * dl);
+        // 贴着胸口的装备，朝里的一面（+Z 朝着身体）看到的是自己的身体而不是天空
+        float2 torso = F.bodyShadow.xz + float2(0.0f, 0.06f);
+        float nearTorso = F.bodyShadow.w * smoothstep(0.32f, 0.16f, length(in.stagePos.xz - torso));
+        float3 bodyL = 0.04f * A.skyIrradianceSea.rgb / PI;              // 深色跳伞服
+        float3 sky = skyE * (1.0f - 0.55f * nearTorso * saturate(N.z));
+
+        float roughness, metallic = 0.0f, sheen = 0.0f, specScale = 1.0f;
+        float3 diffuseAlbedo = albedo;
+        if (material == MATERIAL_WEBBING) {
+            // 织出来的面不是一整块光滑的面，镜面反射比实心塑料弱得多（黑织带在太阳下也还是黑的）
+            roughness = 0.75f; sheen = 1.0f; specScale = 0.4f;
+            // 斜纹：一道道 1.8 毫米的斜棱，按 uv（米）画；小于几个像素就淡掉（VR 里细纹会闪）
+            float3 Tu = cross(dpy, N) * duvx.x + cross(N, dpx) * duvy.x;
+            float3 Tv = cross(dpy, N) * duvx.y + cross(N, dpx) * duvy.y;
+            float footprint = max(length(duvx) + length(duvy), 1e-6f);
+            float fade = saturate(0.0018f / (footprint * 3.0f) - 0.3f);
+            if (fade > 0.0f && length(Tu) > 1e-9f && length(Tv) > 1e-9f) {
+                Tu = normalize(Tu); Tv = normalize(Tv);
+                float phase = (in.uv.x * 0.8f + in.uv.y) / 0.0018f * 2.0f * PI;
+                float warp = sin(in.uv.x / 0.0009f * 2.0f * PI);
+                diffuseAlbedo *= 1.0f + fade * (0.12f * sin(phase) + 0.05f * warp);
+                N = normalize(N - (Tu * 0.8f + Tv) * (cos(phase) * 0.13f * fade));
+            }
+        } else if (material == MATERIAL_METAL) {
+            roughness = 0.24f; metallic = 1.0f;
+        } else if (material == MATERIAL_PLASTIC) {
+            roughness = 0.36f;
+        } else {
+            roughness = 0.58f;
+        }
+        // 几何高光抗锯齿（Tokuyoshi & Kaplanyan）：法线在一个像素里变得越快，高光越宽，细环上不闪
+        float variance = 0.25f * (dot(dnx, dnx) + dot(dny, dny));
+        float a = roughness * roughness;
+        float a2 = saturate(a * a + min(2.0f * variance, 0.18f));
+        float3 F0 = mix(float3(0.04f), albedo, metallic);
+        diffuseAlbedo *= 1.0f - metallic;
+
+        float NdotV = max(dot(N, V), 1e-3f);
+        float NdotL = saturate(dot(N, L));
+        float3 H = normalize(L + V);
+        float NdotH = saturate(dot(N, H));
+        float m = 1.0f - saturate(dot(V, H));
+        float3 Fs = F0 + (1.0f - F0) * (m * m) * (m * m) * m;
+        float3 spec = Fs * ggx(NdotH, NdotV, NdotL, a2, roughness) * NdotL * specScale;
+
+        // 天空的反射：反射方向转到世界坐标查天空表；朝下的反射看到地面，朝身体的看到自己
+        float3 R = reflect(-V, N);
+        float3 Rw = rotateHeading(R, F.heading.x, F.heading.y);
+        float camR = ATM_BOTTOM + max(altitude, 1.0f) * 0.001f;
+        float3 env = skyViewLookup(skyLUT, normalize(float3(Rw.x, max(Rw.y, 0.002f), Rw.z)), F.sunDirection.xyz, camR, false);
+        env = mix(env, groundL, smoothstep(0.02f, -0.08f, Rw.y));
+        env = mix(env, bodyL, nearTorso * saturate(R.z * 1.6f + 0.15f) * 0.9f);
+        env = mix(cabinRed * 0.2f / PI, env, dl * dl);
+        float3 specEnv = env * envBRDF(F0, roughness, NdotV) * specScale;
+
+        float3 diffuse = diffuseAlbedo / PI * (sunE * sunVis * NdotL + sky * (0.12f + 0.88f * dl) + cabinRed * interior);
+        radiance = diffuse + sunE * sunVis * spec + specEnv;
+        if (sheen > 0.0f) {
+            // 尼龙的绒光：掠射角上一层发灰的柔光（黑色织带的轮廓靠它）
+            float rim = pow(1.0f - NdotV, 5.0f);
+            radiance += rim * 0.1f * (mix(albedo, float3(0.5f), 0.5f)) / PI
+                      * (sunE * sunVis * saturate(dot(N, L) + 0.3f) * 0.5f + sky);
+        }
     } else if (material == MATERIAL_FABRIC) {
         // 正面挨太阳照；背面看过去是透过来的光（尼龙伞布很薄，逆光下整片发亮）
         float lit = saturate(dot(N, L)), through = saturate(-dot(N, L));
@@ -149,14 +263,22 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
         float rib = 1.0f - smoothstep(0.015f, 0.015f + fu * 1.5f, du);
         float halfRib = 1.0f - smoothstep(0.008f, 0.008f + fu * 1.5f, dh);
         float seam = 1.0f - smoothstep(0.006f, 0.006f + fv * 1.5f, dv);
-        float layers = 1.0f - 0.6f * rib - 0.3f * halfRib - 0.25f * seam;
+        // 防撕裂格（ripstop）：每 6 毫米一道粗一点的线，近看才有
+        float grid = 0.0f;
+        float gridFade = saturate(0.006f / (max(fu, fv) * 4.0f) - 0.25f);
+        if (gridFade > 0.0f) {
+            float2 g = abs(fract(float2(u, v) / 0.006f + 0.5f) - 0.5f) * 0.006f;
+            float2 w = float2(fu, fv) * 1.2f + 0.0003f;
+            grid = max(1.0f - smoothstep(0.0f, w.x, g.x), 1.0f - smoothstep(0.0f, w.y, g.y)) * gridFade;
+        }
+        float layers = 1.0f - 0.6f * rib - 0.3f * halfRib - 0.25f * seam - 0.12f * grid;
         // 尼龙有一层柔和的光泽
         float3 H = normalize(L + V);
-        float sheen = pow(saturate(dot(N, H)), 24.0f) * 0.12f;
+        float gloss = pow(saturate(dot(N, H)), 24.0f) * 0.12f;
         // 透过来的光被染成布的颜色（尼龙对自己颜色的光透得最多），所以逆光的伞衣颜色更浓、更亮
         float3 transmitted = albedo * sqrt(albedo) * 1.6f * through * layers;
         radiance = albedo / PI * (sunE * lit * (0.85f + 0.15f * layers) + skyE) + sunE * transmitted / PI
-                 + sunE * sheen * lit;
+                 + sunE * gloss * lit;
     } else {
         // 太阳只照得到舱门附近（室内程度低的地方）；天光往里衰减得慢一些；越往里红灯越明显
         float3 E = sunE * saturate(dot(N, L)) * daylight * daylight
@@ -168,25 +290,100 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
             radiance += rim * 0.35f * (sunE * 0.05f * daylight + skyE * 0.08f + cabinRed * 0.3f * in.interior);
         }
     }
-    float3 c = acesFitted(radiance * F.exposure.x) * F.camera.z;
+    float3 c = tonemap(radiance * F.exposure.x) * F.camera.z;
     return float4(c, 1.0f);
 }
 
-// MARK: - 伞绳（一像素宽的线）
+// MARK: - 绳子（伞绳、刹车绳）
+
+/// 一段绳子：画成始终朝着眼睛的细长条，按真实粗细（不到一个像素就按覆盖率变淡），横截面当圆柱打光
+struct LineSegment {
+    float4 a;            // xyz 起点，w 半径（米）
+    float4 b;            // xyz 终点
+    float4 color;        // rgb 反照率
+};
 
 struct LineOut {
     float4 position [[position]];
+    float3 stagePos;
+    float3 side;                             // 横过绳子的方向（舞台空间）
+    float3 color [[flat]];
+    float across [[center_no_perspective]];  // 离中线多少像素
+    float radiusPx [[center_no_perspective]];
+    uint viewIndex [[flat]];
 };
 
 vertex LineOut lineVertex(uint vid [[vertex_id]],
+                          uint iid [[instance_id]],
                           ushort amp [[amplification_id]],
-                          device const float4 *points [[buffer(0)]],
+                          device const LineSegment *segments [[buffer(0)]],
                           constant ViewUniforms *views [[buffer(1)]]) {
+    LineSegment s = segments[iid];
+    float4x4 VP = views[amp].viewProjection;
+    float3 a = s.a.xyz, b = s.b.xyz;
+    float4 ca = VP * float4(a, 1.0f), cb = VP * float4(b, 1.0f);
     LineOut o;
-    o.position = views[amp].viewProjection * float4(points[vid].xyz, 1.0f);
+    o.viewIndex = amp;
+    o.color = s.color.rgb;
+    // 近平面裁剪：一端跑到眼睛后面，就把它挪回 w = 1 厘米的地方
+    const float nearW = 0.01f;
+    if (ca.w < nearW && cb.w < nearW) {
+        o.position = float4(0.0f, 0.0f, -1.0f, 1.0f);
+        o.stagePos = a; o.side = float3(1.0f, 0.0f, 0.0f); o.across = 0.0f; o.radiusPx = 0.0f;
+        return o;
+    }
+    if (ca.w < nearW) { float t = (nearW - ca.w) / (cb.w - ca.w); a = mix(a, b, t); ca = mix(ca, cb, t); }
+    if (cb.w < nearW) { float t = (nearW - cb.w) / (ca.w - cb.w); b = mix(b, a, t); cb = mix(cb, ca, t); }
+    bool atB = vid >= 2;
+    float sideSign = (vid & 1) ? 1.0f : -1.0f;
+    float4 c = atB ? cb : ca;
+    float3 p = atB ? b : a;
+    float2 halfVP = views[amp].viewport.zw * 0.5f;
+    float2 sa = ca.xy / ca.w * halfVP, sb = cb.xy / cb.w * halfVP;
+    float2 dir = sb - sa;
+    float len = length(dir);
+    dir = len > 1e-4f ? dir / len : float2(1.0f, 0.0f);
+    float2 normal = float2(-dir.y, dir.x);
+    // 这一端一米有多少像素
+    float pxPerMeter = length(float3(VP[0][0], VP[1][0], VP[2][0])) * halfVP.x / c.w;
+    float radiusPx = s.a.w * pxPerMeter;
+    float halfPx = max(radiusPx, 0.5f) + 1.0f;               // 比绳子宽一像素，边缘留给抗锯齿
+    float2 offset = normal * (sideSign * halfPx) + dir * (atB ? 0.7f : -0.7f);
+    c.xy += offset / halfVP * c.w;
+    // 屏幕上的横向对应到舞台里哪个方向（符号要和屏幕上一致，圆柱哪边亮才对）
+    float3 axis = normalize(b - a + 1e-6f);
+    float3 toEye = normalize(views[amp].cameraPosition.xyz - p);
+    float3 side = normalize(cross(axis, toEye) + 1e-6f);
+    float4 cs = VP * float4(p + side * 0.01f, 1.0f);
+    if (dot(cs.xy / cs.w * halfVP - (atB ? sb : sa), normal) < 0.0f) side = -side;
+    o.position = c;
+    o.stagePos = p;
+    o.side = side;
+    o.across = sideSign * halfPx;
+    o.radiusPx = radiusPx;
     return o;
 }
 
-fragment float4 lineFragment(LineOut in [[stage_in]], constant FrameUniforms &F [[buffer(1)]]) {
-    return float4(float3(0.035f) * F.camera.z, 1.0f);
+fragment float4 lineFragment(LineOut in [[stage_in]],
+                             constant ViewUniforms *views [[buffer(0)]],
+                             constant FrameUniforms &F [[buffer(1)]],
+                             constant AtmosphereConstants &A [[buffer(2)]]) {
+    float r = max(in.radiusPx, 0.5f);
+    float alpha = saturate(r + 0.5f - abs(in.across)) * saturate(in.radiusPx / 0.5f);
+    if (alpha < 0.003f) discard_fragment();
+    float3 eye = views[in.viewIndex].cameraPosition.xyz;
+    float3 V = normalize(eye - in.stagePos);
+    float x = clamp(in.across / r, -1.0f, 1.0f);
+    float3 N = normalize(normalize(in.side) * x + V * sqrt(saturate(1.0f - x * x)));
+    float3 L = stageSunDirection(F);
+    float altitude = F.camera.x + in.stagePos.y;
+    float3 sunE = mix(A.sunAtCloudBase.rgb, A.sunAtCloudTop.rgb, saturate((altitude - 1000.0f) / 8000.0f))
+                * canopyShadow(in.stagePos, L, F);
+    float3 skyE = A.skyIrradianceSea.rgb * (0.55f + 0.45f * N.y);
+    // 编织的绳子：漫反射为主，顺着绳子有一点点光泽
+    float3 H = normalize(L + V);
+    float gloss = pow(saturate(dot(N, H)), 18.0f) * 0.08f;
+    float3 radiance = in.color / PI * (sunE * saturate(dot(N, L) * 0.8f + 0.2f) + skyE) + sunE * gloss;
+    float3 c = tonemap(radiance * F.exposure.x) * F.camera.z;
+    return float4(c * alpha, alpha);
 }

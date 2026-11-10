@@ -15,6 +15,8 @@ struct MeshVertex {
 
 enum MeshMaterial: Float {
     case diffuse = 0, emissive = 1, lampRed = 2, lampGreen = 3, fabric = 4, soft = 5
+    /// 装备（Gear.swift）：尼龙织带、金属（环、扣、钢索）、塑料（软管、表壳）、橡胶（表带）
+    case webbing = 6, metal = 7, plastic = 8, rubber = 9
 }
 
 struct MeshBuilder {

@@ -1,9 +1,9 @@
 import Foundation
 import simd
 
-/// 伞衣的布料模拟（位置约束 PBD，CPU 上跑，370 个粒子）。
+/// 伞衣的布料模拟（位置约束 PBD，CPU 上跑，715 个粒子）。
 ///
-/// 只模拟上表面一张 37×10 的粒子网格（9 个气室 × 4 + 1 列，前缘到后缘 10 行）；下表面按翼型厚度沿法线往下推，
+/// 只模拟上表面一张 55×13 的粒子网格（9 个气室 × 6 + 1 列，前缘到后缘 13 行）；下表面按翼型厚度沿法线往下推，
 /// 厚度乘上每列的「充气程度」——没充起来时上下两层贴在一起，就是一块软布。
 /// 布的约束只限制拉伸、不限制压缩：挤在一起时会自然起皱、翻折。
 ///
@@ -14,8 +14,10 @@ import simd
 ///   3.5 ~     飞行：形状基本定住，后缘一直有点抖；拉环拉下去，那一侧的后缘被拽下来
 /// 落地以后形状弹簧松掉，伞塌下来盖在地上。
 final class CanopyCloth: @unchecked Sendable {
-    static let columns = 37
-    static let rows = 10
+    static let columns = 55
+    static let rows = 13
+    /// 每个气室几列
+    static let columnsPerCell = 6
     static let span: Float = 8.4
     static let chord: Float = 3.0
     static let cells = 9
@@ -228,11 +230,11 @@ final class CanopyCloth: @unchecked Sendable {
         }
     }
 
-    /// 伞绳挂在每道肋（每 4 列）的 A/B/C/D 四排上
+    /// 伞绳挂在每道肋（每 6 列）的 A/B/C/D 四排上
     private let lineAttachmentIndices: [Int] = {
         var result: [Int] = []
         for rib in 0...CanopyCloth.cells {
-            for row in [0, 3, 5, 8] { result.append(row * CanopyCloth.columns + rib * 4) }
+            for row in [0, 4, 7, 11] { result.append(row * CanopyCloth.columns + rib * CanopyCloth.columnsPerCell) }
         }
         return result
     }()
@@ -240,7 +242,7 @@ final class CanopyCloth: @unchecked Sendable {
     private let lineIsLeft: [Bool] = {
         var result: [Bool] = []
         for rib in 0...CanopyCloth.cells {
-            for _ in 0..<4 { result.append(rib * 4 < CanopyCloth.columns / 2) }
+            for _ in 0..<4 { result.append(rib * CanopyCloth.columnsPerCell < CanopyCloth.columns / 2) }
         }
         return result
     }()
@@ -276,7 +278,38 @@ final class CanopyCloth: @unchecked Sendable {
     /// 后缘外侧几道肋上的点：刹车绳（左、右各 3 根）挂在这里
     var brakeAttachments: (left: [SIMD3<Float>], right: [SIMD3<Float>]) {
         let row = (Self.rows - 1) * Self.columns
-        return ([0, 4, 8].map { bottomPoint(row + $0) }, [28, 32, 36].map { bottomPoint(row + $0) })
+        let k = Self.columnsPerCell, last = Self.columns - 1
+        return ([0, k, 2 * k].map { bottomPoint(row + $0) }, [last - 2 * k, last - k, last].map { bottomPoint(row + $0) })
+    }
+
+    /// 伞衣投在地上、身上的影子的形状：一块平板（中心、展向、弦向），强度 = 平均充气程度
+    struct ShadowShape {
+        /// xyz 中心，w 强度
+        var center: SIMD4<Float>
+        /// xyz 展向单位向量（左翼尖 → 右翼尖），w 半展长
+        var span: SIMD4<Float>
+        /// xyz 弦向单位向量（前缘 → 后缘），w 半弦长
+        var chord: SIMD4<Float>
+    }
+
+    func shadowShape() -> ShadowShape {
+        let c = Self.columns, r = Self.rows
+        var center = SIMD3<Float>(0, 0, 0)
+        for p in positions { center += p }
+        center /= Float(positions.count)
+        var left = SIMD3<Float>(0, 0, 0), right = left, lead = left, trail = left
+        for j in 0..<r { left += positions[j * c]; right += positions[j * c + c - 1] }
+        for i in 0..<c { lead += positions[i]; trail += positions[(r - 1) * c + i] }
+        let spanVector = (right - left) / Float(r)
+        let spanLength = length(spanVector)
+        let ex = spanLength > 1e-3 ? spanVector / spanLength : SIMD3<Float>(1, 0, 0)
+        var chordVector = (trail - lead) / Float(c)
+        chordVector -= dot(chordVector, ex) * ex
+        let chordLength = length(chordVector)
+        let ez = chordLength > 1e-3 ? chordVector / chordLength : SIMD3<Float>(0, 0, 1)
+        let strength = inflation.reduce(0, +) / Float(inflation.count)
+        return ShadowShape(center: SIMD4(center, strength), span: SIMD4(ex, spanLength / 2),
+                           chord: SIMD4(ez, chordLength / 2))
     }
 
     /// 伞顶中间（引导伞的连接点）
@@ -285,7 +318,6 @@ final class CanopyCloth: @unchecked Sendable {
     /// 网格：上表面、下表面、两侧翼尖封口。前缘不封（冲压翼伞的进气口），能看到气室里面。
     /// 伞布颜色按气室条纹；position.w = 展向坐标（米）、normal.w = 弦向坐标（米），给 shader 画缝线。
     func buildMesh(into out: inout [MeshVertex]) {
-        out.removeAll(keepingCapacity: true)
         let c = Self.columns, r = Self.rows
         let palette: [SIMD3<Float>] = [
             SIMD3(0.05, 0.10, 0.32), SIMD3(0.85, 0.22, 0.05), SIMD3(0.82, 0.82, 0.80),
@@ -305,7 +337,7 @@ final class CanopyCloth: @unchecked Sendable {
         }
         for j in 0..<(r - 1) {
             for i in 0..<(c - 1) {
-                let color = palette[min(i / 4, Self.cells - 1)]
+                let color = palette[min(i / Self.columnsPerCell, Self.cells - 1)]
                 let k00 = j * c + i, k10 = k00 + 1, k01 = k00 + c, k11 = k01 + 1
                 for (pts, sign) in [(positions, Float(1)), (bottom, Float(-1))] {
                     let n00 = normals[k00] * sign, n10 = normals[k10] * sign

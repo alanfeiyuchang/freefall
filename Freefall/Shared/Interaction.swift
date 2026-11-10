@@ -6,8 +6,8 @@ struct BodyLayout {
     /// (头的 x, 起跳时的眼高, 头的 z)
     var anchor: SIMD3<Float>
 
-    /// 开伞拉手：右胸前的红色小枕头（主背带上）
-    var handleRest: SIMD3<Float> { anchor + SIMD3(0.13, -0.5, -0.19) }
+    /// 开伞拉手：右胸前的红色小枕头（插在主承重带上的口袋里，见 Gear.handleRest）
+    var handleRest: SIMD3<Float> { anchor + Gear.handleRest }
     /// 左右操纵环：挂在后背带上，垂到下巴两侧前方
     var toggleRest: (SIMD3<Float>, SIMD3<Float>) {
         (anchor + SIMD3(-0.27, -0.07, -0.15), anchor + SIMD3(0.27, -0.07, -0.15))
