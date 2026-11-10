@@ -13,8 +13,14 @@ struct TerrainNode {
 struct TerrainUniforms {
     /// xyz 头在舞台空间的位置，w 场景编号
     var camera: SIMD4<Float>
-    /// x 0 级块用到的距离，y 海面以下按海画（1/0）
+    /// x 0 级块用到的距离，y 海面以下按海画（1/0），z 画浮岛的底面（1/0）
     var lod: SIMD4<Float>
+}
+
+/// 和 Terrain.h 的 CityUniforms 一样
+struct CityUniforms {
+    /// xy 地面坐标原点相对舞台原点的偏移
+    var origin: SIMD4<Float>
 }
 
 /// 地形网格的 LOD（CDLOD，Strugar 2009）：一棵很大的四叉树（根 1,048 km 见方，盖过地平线），

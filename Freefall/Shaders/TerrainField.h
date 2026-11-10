@@ -15,6 +15,7 @@
 #define SCENE_SNOW 3
 #define SCENE_ISLAND 4
 #define SCENE_VOLCANO 5
+#define SCENE_SKY 6
 
 #define LZ_TARGET float2(380.0f, -620.0f)
 #define VALLEY_DIR float2(0.59028f, -0.80720f)
@@ -34,6 +35,8 @@
 #define MAT_MORAINE 10
 #define MAT_CREVASSE 11
 #define MAT_SAND 12
+#define MAT_VOID 13         // 天空之城：岛外面，下面是云海
+#define MAT_PAVED 14        // 石板铺的地
 
 // 火山：火山口、熔岩湖、烟柱（地面坐标）
 #define CONE_CENTER float2(-500.0f, -950.0f)
@@ -134,6 +137,7 @@ static inline float dzElevation(int scene) {
     case SCENE_SNOW: return 2750.0f;
     case SCENE_ISLAND: return 3.5f;
     case SCENE_VOLCANO: return 620.0f;
+    case SCENE_SKY: return 3300.0f;
     default: return 0.0f;
     }
 }
@@ -328,6 +332,124 @@ static inline float plumeDensity(float2 p, float altitude) {
     return saturate(1.0f - d * d) * tSmooth(3200.0f, 1800.0f, above);
 }
 
+// MARK: - 天空之城：云海上面的一群浮岛（和 Swift 的 TerrainField.sky* 逐行对应）
+//
+// 岛都摆在谷坐标里（沿进场方向, 横向，原点在靶上），每座是一个椭圆，边被噪声啃得参差不齐；俯视互不重叠，
+// 所以顶面还是一张高度场。岛的底面是另一张高度场（倒过来的山，岛边上两张面合在一起），只有 GPU 用。
+// 岛外面什么都没有（地形网格按 mask 裁掉）；CPU 那边岛外的「地面」是 SKY_VOID：伞降到那个高度算掉进云海。
+
+#define SKY_COUNT 16
+#define SKY_ALT 3293.0f
+#define SKY_VOID 2880.0f
+#define SKY_CITADEL float2(215.0f, 0.0f)
+#define SKY_POOL float2(120.0f, -150.0f)
+#define SKY_POOL_RADIUS 24.0f
+
+/// 第 i 座岛：xy 中心（谷坐标），zw 两个半轴（米）。0 是着陆的主岛
+static inline float4 skyIslandShape(int i) {
+    const float4 shape[SKY_COUNT] = {
+        float4(60.0f, 0.0f, 330.0f, 235.0f),      float4(-520.0f, -290.0f, 150.0f, 110.0f),
+        float4(-440.0f, 350.0f, 125.0f, 95.0f),   float4(590.0f, -340.0f, 190.0f, 140.0f),
+        float4(640.0f, 300.0f, 150.0f, 115.0f),   float4(70.0f, -540.0f, 115.0f, 85.0f),
+        float4(130.0f, 500.0f, 105.0f, 85.0f),    float4(-960.0f, 80.0f, 230.0f, 170.0f),
+        float4(1180.0f, -20.0f, 280.0f, 210.0f),  float4(-270.0f, -200.0f, 34.0f, 27.0f),
+        float4(-190.0f, 290.0f, 30.0f, 24.0f),    float4(330.0f, -380.0f, 36.0f, 28.0f),
+        float4(440.0f, 360.0f, 32.0f, 26.0f),     float4(-700.0f, 470.0f, 48.0f, 36.0f),
+        float4(900.0f, -600.0f, 70.0f, 52.0f),    float4(-40.0f, 820.0f, 80.0f, 60.0f),
+    };
+    return shape[i];
+}
+
+/// x 岛面比主岛高多少（米），y 噪声的种子
+static inline float2 skyIslandInfo(int i) {
+    const float2 info[SKY_COUNT] = {
+        float2(0.0f, 1.3f),    float2(45.0f, 4.1f),    float2(-60.0f, 7.7f),   float2(120.0f, 2.9f),
+        float2(-90.0f, 9.3f),  float2(70.0f, 5.5f),    float2(-40.0f, 6.2f),   float2(180.0f, 8.4f),
+        float2(60.0f, 3.6f),   float2(-25.0f, 11.0f),  float2(30.0f, 12.5f),   float2(-50.0f, 13.2f),
+        float2(15.0f, 14.9f),  float2(100.0f, 15.4f),  float2(-140.0f, 16.8f), float2(150.0f, 17.1f),
+    };
+    return info[i];
+}
+
+/// 在第 i 座岛里有多深：> 0 在岛上（岛心约 1），< 0 在外面
+static inline float skyMask(float2 sl, int i) {
+    float4 s = skyIslandShape(i);
+    float e = 1.0f - length((sl - s.xy) / s.zw);
+    if (e < -0.4f) return e;
+    return e + 0.2f * tFbm(sl / (0.6f * min(s.z, s.w)) + skyIslandInfo(i).y, 3);
+}
+
+/// 最近的岛：x 它的 mask，y 编号
+static inline float2 skyNearest(float2 sl) {
+    float best = -1e9f;
+    int index = 0;
+    for (int i = 0; i < SKY_COUNT; i++) {
+        float m = skyMask(sl, i);
+        if (m > best) { best = m; index = i; }
+    }
+    return float2(best, float(index));
+}
+
+/// 岛的顶面（m ≤ 0 时顺着岛边往外延出去一点：网格在岛边被裁开，裁口两侧的顶点高度要连得上）。
+/// terraces：带不带城堡的三层台基。台基画的时候是 SkyCity 的网格（直上直下的石墙，地形网格的格子抹不出来），
+/// 地形网格在那里是平的；落地判定、高度图用的高度带台基（和 CPU 一致）
+static inline float skyTop(float2 p, float2 sl, int i, float m, bool terraces) {
+    float2 info = skyIslandInfo(i);
+    float mm = max(m, 0.0f);
+    float h = SKY_ALT + info.x + 7.0f * tSmooth(0.0f, 0.5f, mm) - 4.0f * (1.0f - tSmooth(0.0f, 0.07f, mm))
+            + 2.5f * tFbm(p / 90.0f + info.y, 3) + 0.4f * tFbm(p / 14.0f, 2);
+    if (i == 0) {
+        // 主岛：靶周围一片平的草坪；城堡的三层台基；一个水池
+        float flatH = SKY_ALT + 7.0f;
+        h = mix(flatH + 0.15f * tFbm(p / 30.0f, 2), h, tSmooth(45.0f, 110.0f, length(sl)));
+        float rc = length(sl - SKY_CITADEL);
+        h = mix(flatH, h, tSmooth(84.0f, 110.0f, rc));
+        if (terraces) h += 4.0f * (tSmooth(79.0f, 77.5f, rc) + tSmooth(65.0f, 63.5f, rc) + tSmooth(51.0f, 49.5f, rc));
+        h -= 2.2f * tSmooth(31.0f, 23.0f, length(sl - SKY_POOL));
+    }
+    return h;
+}
+
+/// 岛的底面（只有 GPU 用）：岛边一圈几十米的崖壁，往里是倒过来的山，挂着一道道石棱
+static inline float skyBottom(float2 p, int i, float m, float top) {
+    float4 s = skyIslandShape(i);
+    float minAxis = min(s.z, s.w);
+    // 厚度在岛边（m = 0）两侧要是 m 的线性函数（m < 0 是负的）：网格在 m = 0 被裁开，裁口上的高度是两头顶点的线性插值，
+    // 厚度过零点和 mask 过零点对不上的话，顶面和底面之间会裂开一道缝
+    float cliff = (14.0f + 0.12f * minAxis) * clamp(m / 0.05f, -1.0f, 1.0f);
+    float body = (20.0f + 0.75f * minAxis) * (m < 0.0f ? 1.6f * m : 1.0f - pow(1.0f - min(m, 1.0f), 1.6f));
+    float rough = 0.7f + 0.6f * tRidged(p / (0.45f * minAxis) + skyIslandInfo(i).y, 3);
+    return top - cliff - body * rough;
+}
+
+/// 画网格用：第 i 座岛的顶面或底面在 p 的高度
+static inline float skySurface(float2 p, int i, bool under) {
+    float2 sl = valleyCoords(p);
+    float m = skyMask(sl, i);
+    float top = skyTop(p, sl, i, m, false);
+    return under ? skyBottom(p, i, m, top) : top;
+}
+
+static inline float skyHeight(float2 p) {
+    float2 sl = valleyCoords(p);
+    float2 n = skyNearest(sl);
+    return n.x > 0.0f ? skyTop(p, sl, int(n.y), n.x, true) : SKY_VOID;
+}
+
+/// 开花的树林（> 0.5 算树林）：靶周围、进场的那一路、城堡和水池边上没有
+static inline float skyForest(float2 p) {
+    float2 sl = valleyCoords(p);
+    float2 n = skyNearest(sl);
+    if (n.x <= 0.0f) return 0.0f;
+    float patches = tFbm(p / 150.0f + float2(6.6f, 3.3f), 3);
+    float f = tSmooth(0.02f, 0.14f, patches) * tSmooth(0.06f, 0.14f, n.x);
+    if (int(n.y) == 0) {
+        f *= tSmooth(60.0f, 95.0f, abs(sl.y)) * tSmooth(105.0f, 135.0f, length(sl - SKY_CITADEL))
+           * tSmooth(34.0f, 46.0f, length(sl - SKY_POOL));
+    }
+    return f;
+}
+
 // MARK: - 汇总
 
 static inline float terrainHeight(int scene, float2 p) {
@@ -337,6 +459,7 @@ static inline float terrainHeight(int scene, float2 p) {
     case SCENE_SNOW: return snowHeight(p);
     case SCENE_ISLAND: return islandHeight(p);
     case SCENE_VOLCANO: return volcanoHeight(p);
+    case SCENE_SKY: return skyHeight(p);
     default: return 0.0f;
     }
 }
@@ -360,6 +483,14 @@ static inline int terrainHazard(int scene, float2 p, float h) {
         if (h < 0.5f) return MAT_WATER;
         if (volcanoLava(p)) return MAT_LAVA;
         return 0;
+    case SCENE_SKY: {
+        float2 sl = valleyCoords(p);
+        float2 n = skyNearest(sl);
+        if (n.x <= 0.0f) return MAT_VOID;
+        if (int(n.y) == 0 && length(sl - SKY_POOL) < SKY_POOL_RADIUS) return MAT_WATER;
+        if (skyForest(p) > 0.5f) return MAT_FOREST;
+        return 0;
+    }
     default:
         return 0;
     }

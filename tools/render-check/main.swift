@@ -25,7 +25,7 @@ let filter = args.count > 4 ? args[4] : ""
 try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
 
 let env = ProcessInfo.processInfo.environment
-/// 跳哪一关：SCENE=0 环礁（默认）1 草原 2 高山 3 雪山 4 冰川 5 火山
+/// 跳哪一关：SCENE=0 环礁（默认）1 草原 2 高山 3 雪山 4 海岛 5 火山 6 天空之城
 let jumpScene = JumpScene(rawValue: Int(env["SCENE"] ?? "0") ?? 0) ?? .atoll
 let device = MTLCreateSystemDefaultDevice()!
 let library = try device.makeLibrary(URL: URL(fileURLWithPath: args[1]))
@@ -544,6 +544,14 @@ if mode == "hazards" {
     check(.volcano, "火山锥坡上", TerrainField.coneCenter + SIMD2(300, 0))
     let plume = TerrainField.plumeDensity(TerrainField.coneCenter + TerrainField.plumeDrift * 500, altitude: TerrainField.coneTop + 460)
     print(String(format: "  火山 烟柱里（火山口上方 500 米）：浓度 %.2f（> 0.4 算冲进去）", plume))
+    check(.sky, "靶", TerrainField.target)
+    check(.sky, "水池中间", TerrainField.skyGround(TerrainField.skyPool))
+    check(.sky, "主岛左边的花树林", TerrainField.skyGround(SIMD2(40, -150)))
+    check(.sky, "两座岛之间（岛外）", TerrainField.skyGround(SIMD2(-300, 0)))
+    check(.sky, "城堡的台基上", TerrainField.skyGround(TerrainField.skyCitadel + SIMD2(-58, 0)))
+    print("  天空之城 城堡正上方 30 米撞不撞：\(SkyCity.hits(SIMD2<Double>(TerrainField.skyGround(TerrainField.skyCitadel)), altitude: 3349))；"
+          + "靶上方 30 米：\(SkyCity.hits(SIMD2<Double>(TerrainField.target), altitude: 3330))；"
+          + "建筑 \(SkyCity.layout.buildings.count) 个顶点，瀑布 \(SkyCity.layout.waterfalls.count) 个")
     check(.island, "靶", TerrainField.target)
     check(.island, "靶前 60 米（海边）", TerrainField.target - TerrainField.valleyDir * 60)
     check(.island, "靶前 150 米（礁坪）", TerrainField.target - TerrainField.valleyDir * 150)

@@ -566,7 +566,9 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
 
     float2 sea = sphereHits(ch, rd.y, 0.0f);
     bool ground = sea.x > 0.0f;
-    bool terrainScene = F.world.z > 0.5f;    // 地形场景的地面由地形网格画，这里只剩天空
+    // 地形场景的地面由地形网格画，这里只剩天空；天空之城的网格只有浮岛，岛外往下看还是这里画的海
+    bool skyCity = F.world.w > 0.5f;
+    bool terrainScene = F.world.z > 0.5f && !skyCity;
 #ifdef PROFILE_FLAT_SCENE
     float3 color = float3(0.02f);
 #else
@@ -584,7 +586,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
         float3 N = normalize(sphereN + float3(-slope.x, 0.0f, -slope.y));
         float od = cloudShadow.sample(linearRepeat, (xz + F.ground.xz) / WEATHER_TILE + 0.5f, level(0)).r;
         // 着陆区几百米内不落云影（阳光从云缝里照下来）：云相对地面的位置取决于你在舱里等了多久，靶不能碰巧在阴影里
-        od *= smoothstep(300.0f, 650.0f, length(g - TARGET_CENTER));
+        if (!skyCity) od *= smoothstep(300.0f, 650.0f, length(g - TARGET_CENTER));
         float shadow = exp(-od * F.clouds.z * 0.5f);
         // 自己的伞衣和身体的影子：这个点在舞台空间的位置（视线没转航向的方向 × 距离）
         float3 stageP = views[in.viewIndex].cameraPosition.xyz + rotateHeading(rd, F.heading.x, -F.heading.y) * t;
@@ -596,7 +598,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
         float land = 0.0f, vegetation = 0.0f, surf = 0.0f, depth = 1000.0f;
         float detail = waveNoise.sample(linearRepeat, float3(g.x / 40.0f, 0.37f, g.y / 40.0f), level(0)).g;
         float2 atollUV = (g - ATOLL_CENTER) / ATOLL_SIZE + 0.5f;
-        if (all(atollUV > 0.0f) && all(atollUV < 1.0f)) {
+        if (!skyCity && all(atollUV > 0.0f) && all(atollUV < 1.0f)) {
             float4 atoll = sampleBicubic(atollMap, atollUV);
             depth = ATOLL_MAX_DEPTH * atoll.g * atoll.g;
             // 环礁图一格 7.8 米，低空近看边缘是糊的：用细节噪声把沙洲、植被、浪花的边打碎
@@ -610,8 +612,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
         float2 sd = g - SANDBAR_CENTER;
         float2 sl = float2(sd.x * SANDBAR_COS + sd.y * SANDBAR_SIN, -sd.x * SANDBAR_SIN + sd.y * SANDBAR_COS);
         float sandEdge = (length(sl / SANDBAR_AXES) - 1.0f) * SANDBAR_AXES.y + (detail - 0.55f) * 16.0f;
-        float sandbar = smoothstep(1.5f, -1.5f, sandEdge);
-        depth = min(depth, max(sandEdge, 0.0f) * 0.045f + 0.15f);
+        float sandbar = skyCity ? 0.0f : smoothstep(1.5f, -1.5f, sandEdge);
+        if (!skyCity) depth = min(depth, max(sandEdge, 0.0f) * 0.045f + 0.15f);
         land = max(land, sandbar);
         vegetation *= 1.0f - sandbar;
         surf *= 1.0f - sandbar;

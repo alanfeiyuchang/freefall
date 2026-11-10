@@ -21,6 +21,8 @@ struct JumpTimeline {
         case lava           // 落进熔岩 / 火山口
         case crevasse       // 掉进冰裂缝
         case plume          // 冲进火山口的毒烟
+        case fell           // 天空之城：掉出浮岛，落进云海
+        case ruins          // 天空之城：撞上塔 / 城堡
     }
 
     // 飞机：在 30,000 ft 平飞，放人时的空速约 70 m/s（136 节）
@@ -241,6 +243,15 @@ struct JumpTimeline {
             if scene.hasTerrain { groundHeight = scene.groundHeight(at: groundPosition) }
             if terrainClearance <= 0 {
                 touchDown()
+            } else if scene == .sky, SkyCity.hits(groundPosition, altitude: altitude - eyeHeight) {
+                // 撞上塔 / 城堡：人停在撞上的地方，画面很快暗下去
+                outcome = .ruins
+                landingDistance = length(groundPosition - scene.target)
+                verticalSpeed = 0
+                velocity = .zero
+                turnRate = 0
+                phase = .landed
+                landedTime = time
             } else if scene == .volcano,
                       TerrainField.plumeDensity(SIMD2(Float(groundPosition.x), Float(groundPosition.y)),
                                                 altitude: Float(altitude)) > 0.4 {
@@ -299,7 +310,13 @@ struct JumpTimeline {
         landingDistance = length(groundPosition - scene.target)
         let p = SIMD2<Float>(Float(groundPosition.x), Float(groundPosition.y))
         let hazard = scene.hasTerrain ? TerrainField.hazard(scene, p, Float(groundHeight)) : nil
-        if verticalSpeed > Self.crashSpeed {
+        // 浮岛：从侧面飞进来、比岛面低一大截，是撞在岛边的崖壁上（不能把人搬到岛顶上去）
+        let hitCliff = scene == .sky && hazard != .void && terrainClearance < -12
+        if hazard == .void {
+            outcome = .fell
+        } else if hitCliff {
+            outcome = .terrain
+        } else if verticalSpeed > Self.crashSpeed {
             outcome = .crashed
         } else if scene == .atoll ? !LandingZone.atoll.isLand(groundPosition) : hazard == .water {
             outcome = .water
@@ -318,7 +335,7 @@ struct JumpTimeline {
         } else {
             outcome = .missed
         }
-        altitude = groundHeight + eyeHeight
+        if !hitCliff { altitude = groundHeight + eyeHeight }
         verticalSpeed = 0
         velocity = .zero
         turnRate = 0
@@ -359,7 +376,7 @@ struct JumpTimeline {
     /// 摔了、撞山、掉进岩浆 / 冰裂缝、冲进毒烟：画面很快暗下去
     var isFatal: Bool {
         switch outcome {
-        case .crashed, .terrain, .lava, .crevasse, .plume: return true
+        case .crashed, .terrain, .lava, .crevasse, .plume, .ruins: return true
         default: return false
         }
     }

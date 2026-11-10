@@ -429,7 +429,8 @@ final class ImmersiveRenderer: @unchecked Sendable {
         audioParams.rain = Float(t.rainIntensity)
         // 草原、高山：离地 150 米以内听得到林子里的鸟；火山：离火山锥 3 km 以内越来越响的轰鸣
         let low = Float(min(max((150 - t.terrainClearance) / 120, 0), 1))
-        audioParams.birds = (t.scene == .grassland || t.scene == .alpine) ? (t.phase == .landed ? 1 : low) : 0
+        audioParams.birds = (t.scene == .grassland || t.scene == .alpine || t.scene == .sky)
+            ? (t.phase == .landed ? 1 : low) : 0
         if t.scene == .volcano {
             let d = Float(length(t.groundPosition - SIMD2<Double>(TerrainField.coneCenter)))
             audioParams.rumble = 1 - min(max((d - 400) / 2600, 0), 1)

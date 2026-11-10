@@ -19,17 +19,36 @@ struct TerrainNode {
 
 struct TerrainUniforms {
     float4 camera;      // xyz 头在舞台空间的位置（按它算 LOD 距离），w 场景编号
-    float4 lod;         // x 0 级块用到的距离（米），y 海面以下按海画（1/0），zw 未用
+    float4 lod;         // x 0 级块用到的距离（米），y 海面以下按海画（1/0），z 画浮岛的底面（1/0），w 未用
+};
+
+/// 顶点着色器的输出：比片元的输入多一个裁剪距离（天空之城：岛外面的网格沿岛的轮廓裁掉；别的关恒为 1）
+struct TerrainVertexOut {
+    float4 position [[position]];
+    float3 stagePos;
+    float3 normal;
+    float2 ground;
+    float height;
+    float cell;
+    float under;
+    uint viewIndex [[flat]];
+    float clip [[clip_distance]];
 };
 
 struct TerrainOut {
     float4 position [[position]];
     float3 stagePos;
-    float3 normal;       // 世界方向（y 向上）
+    float3 normal;       // 世界方向（y 向上；浮岛的底面朝下）
     float2 ground;       // 地面坐标（绝对）
     float height;        // 海拔（米）
     float cell;          // 这一块的格距（米）
+    float under;         // 浮岛的底面（1/0）
     uint viewIndex [[flat]];
+};
+
+struct TerrainDepthOut {
+    float4 position [[position]];
+    float clip [[clip_distance]];
 };
 
 /// 一段直线路径（海拔从 h0 到 h1 公里，长 L 公里）的透射率：瑞利、米氏散射都是指数大气（标高 8 / 1.2 km），
@@ -52,7 +71,7 @@ static inline float terrainMapHeight(texture2d<float> map, float2 ground) {
     return map.sample(linearClamp, ground / TERRAIN_MAP_SIZE + 0.5f, level(0)).r;
 }
 
-vertex TerrainOut terrainVertex(uint vid [[vertex_id]],
+vertex TerrainVertexOut terrainVertex(uint vid [[vertex_id]],
                                 uint iid [[instance_id]],
                                 ushort amp [[amplification_id]],
                                 constant ViewUniforms *views [[buffer(0)]],
@@ -72,24 +91,38 @@ vertex TerrainOut terrainVertex(uint vid [[vertex_id]],
     float k = saturate((dist - range * 0.7f) / (range * 0.3f));
     float2 gm = g - fract(g * 0.5f) * 2.0f * k;
     float2 ground = n.origin.xy + gm * cell;
-    float h = terrainHeight(scene, ground);
     float e = max(cell * 0.5f, 0.5f);
-    float hx = terrainHeight(scene, ground + float2(e, 0.0f));
-    float hz = terrainHeight(scene, ground + float2(0.0f, e));
+    float h, hx, hz, clip = 1.0f;
+    bool under = T.lod.z > 0.5f;
+    if (scene == SCENE_SKY) {
+        // 浮岛：这个顶点归最近的那座岛，三个点都按它算（顶面或底面）；岛外面的部分按 mask 裁掉
+        float2 nearest = skyNearest(valleyCoords(ground));
+        int island = int(nearest.y);
+        clip = nearest.x;
+        h = skySurface(ground, island, under);
+        hx = skySurface(ground + float2(e, 0.0f), island, under);
+        hz = skySurface(ground + float2(0.0f, e), island, under);
+    } else {
+        h = terrainHeight(scene, ground);
+        hx = terrainHeight(scene, ground + float2(e, 0.0f));
+        hz = terrainHeight(scene, ground + float2(0.0f, e));
+    }
     float shown = T.lod.y > 0.5f ? max(h, 0.0f) : h;
-    TerrainOut o;
+    TerrainVertexOut o;
     o.stagePos = terrainToStage(n.relative.xy + gm * cell, shown, F);
     o.position = views[amp].viewProjection * float4(o.stagePos, 1.0f);
-    o.normal = normalize(float3(h - hx, e, h - hz));
+    o.normal = normalize(float3(h - hx, e, h - hz)) * (under ? -1.0f : 1.0f);
     o.ground = ground;
     o.height = h;
     o.cell = cell;
+    o.under = under ? 1.0f : 0.0f;
     o.viewIndex = amp;
+    o.clip = clip;
     return o;
 }
 
 /// 地形的深度预渲染（云层 pass 之前）：只要位置，不算法线，便宜三分之二
-vertex float4 terrainDepthVertex(uint vid [[vertex_id]],
+vertex TerrainDepthOut terrainDepthVertex(uint vid [[vertex_id]],
                                  uint iid [[instance_id]],
                                  ushort amp [[amplification_id]],
                                  constant ViewUniforms *views [[buffer(0)]],
@@ -107,9 +140,20 @@ vertex float4 terrainDepthVertex(uint vid [[vertex_id]],
     float range = T.lod.x * exp2(n.origin.w);
     float k = saturate((dist - range * 0.7f) / (range * 0.3f));
     float2 gm = g - fract(g * 0.5f) * 2.0f * k;
-    float h = terrainHeight(scene, n.origin.xy + gm * cell);
+    float2 ground = n.origin.xy + gm * cell;
+    TerrainDepthOut o;
+    o.clip = 1.0f;
+    float h;
+    if (scene == SCENE_SKY) {
+        float2 nearest = skyNearest(valleyCoords(ground));
+        o.clip = nearest.x;
+        h = skySurface(ground, int(nearest.y), T.lod.z > 0.5f);
+    } else {
+        h = terrainHeight(scene, ground);
+    }
     float shown = T.lod.y > 0.5f ? max(h, 0.0f) : h;
-    return views[amp].viewProjection * float4(terrainToStage(n.relative.xy + gm * cell, shown, F), 1.0f);
+    o.position = views[amp].viewProjection * float4(terrainToStage(n.relative.xy + gm * cell, shown, F), 1.0f);
+    return o;
 }
 
 // MARK: - 材质
@@ -177,6 +221,8 @@ kernel void generateSurfaceMap(texture2d<float, access::write> out [[texture(0)]
             * tSmooth(120.0f, 200.0f, length(p - LZ_TARGET));
     } else if (scene == SCENE_ISLAND) {
         v.g = islandForest(p);
+    } else if (scene == SCENE_SKY) {
+        v.g = skyForest(p);
     } else if (scene == SCENE_VOLCANO) {
         v.a = encodeEdge(min(lavaFlowDistance(p) - 14.0f, length(p - CONE_CENTER) - (CRATER_RADIUS - 20.0f)));
         v.b = tSmooth(0.0f, 0.12f, tFbm(p / 380.0f + float2(9.0f, 1.0f), 4));            // 老的熔岩流
@@ -195,7 +241,7 @@ static inline float4 surfaceMapAt(texture2d<float> map, float2 p) {
 /// n1、n2：37 米、6 米尺度的细节噪声（0..1，远了是 0.5），和细节起伏共用一次采样；sm：地面类型图；
 /// crown：x 树冠的高度场（0..1，远了是 0.5），y 看得清一棵棵树的程度（0 远、1 近）
 static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, float footprint, float n1, float n2,
-                                     float4 sm, float2 crown, texture3d<float> noise) {
+                                     float4 sm, float2 crown, bool under, texture3d<float> noise) {
     Surface s;
     s.roughness = 0.3f;
     s.specular = 0.0f;
@@ -302,6 +348,77 @@ static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, flo
         s.albedo = ground;
         s.material = forestV > 0.5f ? MAT_FOREST : (beach > 0.5f ? MAT_SAND : MAT_GRASS);
         if (h < 0.3f) s.material = MAT_WATER;
+    } else if (scene == SCENE_SKY) {
+        float2 sl = valleyCoords(p);
+        float2 nearest = skyNearest(sl);
+        float m = nearest.x;
+        int island = int(nearest.y);
+        float4 shape = skyIslandShape(island);
+        if (under) {
+            // 岛的底面：一层层的沉积岩，越往下越暗；岛边的崖壁上挂着青苔和藤
+            float strata = 0.5f + 0.5f * sin(h * 0.42f + 5.0f * n1 + 2.0f * n2);
+            float3 stone = mix(float3(0.21f, 0.18f, 0.15f), float3(0.33f, 0.29f, 0.24f), strata) * (1.0f + vary * 0.5f);
+            stone *= mix(0.62f, 1.0f, tSmooth(0.5f, 0.0f, m));
+            float moss = tSmooth(0.045f, 0.0f, m) * tSmooth(0.35f, 0.6f, n2);
+            s.albedo = mix(stone, float3(0.07f, 0.13f, 0.045f) * (1.0f + vary), moss * 0.8f);
+            s.material = MAT_ROCK;
+        } else {
+            // 高处的草：比平原上的更绿更亮；岛边一圈露出浅色的岩石
+            // （一大片一大片深浅不一：几十米一块，不然整座岛像一张刷了绿漆的桌面）
+            float patch = tFbm(p / 55.0f + float2(1.7f, 4.2f), 3);
+            float3 lawn = mix(float3(0.040f, 0.098f, 0.030f), float3(0.092f, 0.135f, 0.042f), saturate(n1 * 1.4f - 0.3f))
+                        * (1.0f + vary * 0.7f) * (1.0f + 0.45f * patch);
+            lawn = mix(lawn, float3(0.13f, 0.125f, 0.05f), tSmooth(0.25f, 0.6f, patch) * 0.35f);      // 发黄的干草
+            float3 pale = float3(0.27f, 0.245f, 0.21f) * (1.0f + vary * 0.5f);
+            float3 ground = mix(pale, lawn, tSmooth(0.015f, 0.05f, m + (n2 - 0.5f) * 0.03f));
+            // 石板：旧的铺地，缝里长草，一块块深浅不一。uv 是石板的格子坐标（一格大约 1.6 × 1.1 米）
+            float paved = 0.0f;
+            float2 slab = sl / float2(1.6f, 1.1f);
+            float court = length(sl - shape.xy);
+            if (island == 0) {
+                float r = length(sl), rc = length(sl - SKY_CITADEL);
+                // 靶外面一圈环形的广场、通到城堡的大道、城堡的台基（按极坐标铺）
+                float ring = tSmooth(19.0f, 21.0f, r) * tSmooth(38.0f, 35.0f, r);
+                float road = tSmooth(6.5f, 5.0f, abs(sl.y)) * tSmooth(30.0f, 34.0f, sl.x) * tSmooth(140.0f, 134.0f, sl.x);
+                float base = tSmooth(84.0f, 81.0f, rc);
+                paved = max(max(ring, road), base);
+                if (ring > 0.5f) slab = float2(atan2(sl.y, sl.x) * r / 1.6f, r / 1.1f);
+                if (base > 0.5f) slab = float2(atan2(sl.y - SKY_CITADEL.y, sl.x - SKY_CITADEL.x) * rc / 1.6f, rc / 1.1f);
+                // 水池的石头池沿
+                float rp = length(sl - SKY_POOL);
+                paved = max(paved, tSmooth(SKY_POOL_RADIUS + 5.0f, SKY_POOL_RADIUS + 3.5f, rp));
+            } else if (min(shape.z, shape.w) > 80.0f) {
+                // 大一点的岛中间一片圆形的旧院子（塔立在上面）
+                paved = tSmooth(0.2f * min(shape.z, shape.w), 0.2f * min(shape.z, shape.w) - 2.0f, court);
+                slab = float2(atan2(sl.y - shape.y, sl.x - shape.x) * court / 1.6f, court / 1.1f);
+            }
+            paved *= tSmooth(0.2f, 0.5f, n1 + paved * 0.6f);                       // 边上被草吃掉了一些
+            if (paved > 0.0f) {
+                float2 cell = floor(slab + float2(0.5f * floor(slab.y), 0.0f));
+                float2 f = fract(slab + float2(0.5f * floor(slab.y), 0.0f));
+                float joint = max(tSmooth(0.07f, 0.02f, min(f.x, 1.0f - f.x) * 1.6f),
+                                  tSmooth(0.07f, 0.02f, min(f.y, 1.0f - f.y) * 1.1f)) * saturate(1.3f - footprint * 4.0f);
+                float tint = tHash(int2(cell) + int2(31, 7));
+                float3 stone = float3(0.30f, 0.28f, 0.245f) * (1.0f + 0.14f * tint * saturate(1.5f - footprint * 2.0f) + vary * 0.35f);
+                stone = mix(stone, lawn * 0.8f, joint * 0.75f);
+                ground = mix(ground, stone, paved);
+            }
+            s.albedo = ground;
+            // 开花的树：一片片粉白的树冠，夹着没开花的绿树
+            // （花开得一片一片的：按几十米的噪声分，不是一棵粉一棵绿地撒胡椒面）
+            float bloom = tSmooth(-0.15f, 0.2f, patch + (crownN - 0.5f) * 0.25f);
+            float3 petals = mix(float3(0.50f, 0.30f, 0.34f), float3(0.60f, 0.52f, 0.50f), saturate(n1 * 1.6f - 0.4f))
+                          * mix(1.0f, 0.45f + 0.9f * crownN, crown.y);
+            float3 grove = mix(forest * float3(1.2f, 1.3f, 1.0f), petals, bloom);
+            s.albedo = mix(s.albedo, grove, tSmooth(0.5f - forestEdge, 0.5f + forestEdge, forestV));
+            s.material = forestV > 0.5f ? MAT_FOREST : (paved > 0.5f ? MAT_PAVED : (m < 0.03f ? MAT_ROCK : MAT_GRASS));
+            // 水池，和从水池流到岛边、跌下去的那条小溪
+            if (island == 0) {
+                float rp = length(sl - SKY_POOL);
+                float stream = abs(sl.x - SKY_POOL.x - 5.0f * sin(sl.y * 0.09f)) - 2.0f;
+                if (rp < SKY_POOL_RADIUS || (stream < 0.0f && sl.y < SKY_POOL.y)) waterEdge = -1.0f;
+            }
+        }
     } else {   // SCENE_VOLCANO
         float2 kc = float2(150.0f, -350.0f);
         float rk = length(p - kc);
@@ -339,6 +456,35 @@ static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, flo
     }
     if (waterEdge < 0.0f) s.material = MAT_WATER;
     return s;
+}
+
+/// 塔和城堡落在岛面上的影子（没有阴影贴图：把每座建筑当成一根往上收的圆柱，解析地算它在平地上的影子）。
+/// xy 谷坐标，z 底的半径，w 从岛面算起的高度（米）。和 SkyCity.swift 里摆的一致
+static inline float skyBuildingShadow(float2 p, float3 sunDir, int first) {
+    const float4 towers[13] = {
+        float4(215.0f, 0.0f, 46.0f, 15.0f),   float4(215.0f, 0.0f, 19.0f, 52.0f),    float4(215.0f, 0.0f, 4.5f, 78.0f),
+        float4(-520.0f, -290.0f, 7.0f, 63.0f), float4(70.0f, -548.0f, 6.0f, 46.0f),  float4(138.0f, 506.0f, 5.5f, 45.0f),
+        float4(-990.0f, 40.0f, 8.5f, 68.0f),  float4(-900.0f, 150.0f, 5.5f, 49.0f),  float4(1180.0f, -20.0f, 9.5f, 84.0f),
+        float4(1255.0f, 70.0f, 6.5f, 58.0f),  float4(1095.0f, -115.0f, 6.5f, 62.0f), float4(650.0f, 310.0f, 5.5f, 42.0f),
+        float4(-440.0f, 350.0f, 10.0f, 15.0f),
+    };
+    float2 sl = valleyCoords(p);
+    float2 away = -float2(dot(sunDir.xz, VALLEY_DIR), dot(sunDir.xz, VALLEY_SIDE));
+    float reach = length(away) / max(sunDir.y, 0.05f);            // 每米高度影子伸多长
+    away = normalize(away);
+    float lit = 1.0f;
+    for (int i = first; i < 13; i++) {
+        float4 t = towers[i];
+        float2 q = sl - t.xy;
+        float along = dot(q, away), across = abs(q.x * away.y - q.y * away.x);
+        float len = t.w * reach;
+        if (along < -t.z || along > len + 4.0f || across > t.z + 4.0f) continue;
+        float radius = t.z * mix(1.0f, 0.3f, saturate(along / len));
+        float soft = 0.6f + 0.035f * max(along, 0.0f);
+        float inside = smoothstep(-soft, soft, radius - across) * smoothstep(len + soft, len - soft, along);
+        lit = min(lit, 1.0f - inside);
+    }
+    return lit;
 }
 
 // MARK: - 片元
@@ -450,9 +596,10 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
             crownBump = float3(c0 - cx, 0.0f, c0 - cz) * (fade * 5.0f);
         }
     }
-    Surface s = terrainSurface(scene, p, h, geometric, footprint, n[0], n[1], sm, crown, noise);
+    bool under = in.under > 0.5f;
+    Surface s = terrainSurface(scene, p, h, geometric, footprint, n[0], n[1], sm, crown, under, noise);
     float onTarget = 0.0f;
-    s.albedo = targetColor(p, s.albedo, onTarget);
+    if (!under) s.albedo = targetColor(p, s.albedo, onTarget);
 
     // 近处的细节按材质加：深浅、凹凸的幅度各不一样
     float fa = fine[0] - 0.5f, fb = fine[1] - 0.5f;
@@ -497,6 +644,9 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
         s.albedo *= 1.0f + fa * 0.4f + fb * 0.3f;
         s.albedo *= 1.0f - 0.5f * smoothstep(0.2f, 0.26f, fb) * fineFade[1] * step(0.55f, fine[0]);
         relief = 0.8f;
+    } else if (s.material == MAT_PAVED) {
+        s.albedo *= 1.0f + fa * 0.22f + fb * 0.2f;            // 石板：磨平了，只有一点坑洼
+        relief = 0.5f;
     } else {
         s.albedo *= 1.0f + fa * 0.5f + fb * 0.45f;            // 岩石、碎石
         relief = 1.3f;
@@ -505,12 +655,15 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
 
     // 光：太阳（山影 × 云影）+ 天光（× 环境光遮蔽）
     float2 shade = terrainShade.sample(linearClamp, p / TERRAIN_MAP_SIZE + 0.5f, level(0)).rg;
+    if (under) shade = float2(1.0f, 0.8f);                       // 山影图是按顶面算的，底面不用
     float2 cloudXZ = p - F.ground.yw - sunDir.xz * (h / max(sunDir.y, 0.05f));
     float od = cloudShadow.sample(linearRepeat, cloudXZ / WEATHER_TILE + 0.5f, level(0)).r;
     od *= smoothstep(300.0f, 650.0f, length(p - LZ_TARGET));     // 着陆区不落云影（和海面一样）
+    if (scene == SCENE_SKY) od = 0.0f;                           // 浮岛在云海上面：云影图算的是落到海面上的影子
+    float built = scene == SCENE_SKY && !under ? skyBuildingShadow(p, sunDir, 0) : 1.0f;
     // 云影：积云底下不是全黑——阳光在云里散射过，漏下来两三成
     float cloudVis = mix(0.24f, 1.0f, exp(-od * F.clouds.z * 0.5f));
-    float shadow = shade.r * cloudVis;
+    float shadow = shade.r * cloudVis * built;
     // 自己的伞衣和身体的影子（快落地时才看得清：离得越近边越实）
     float3 Ls = stageSunDirection(F);
     float3 sunVis = shadow * canopyShadow(in.stagePos, Ls, F) * bodyShadow(in.stagePos, Ls, F);
@@ -550,6 +703,8 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
         // 背阴的陡坡还会被对面照亮的山坡、谷底反射一点暖光（不然阴面只剩蓝天光，发蓝发暗）
         // （平地也有一点：周围被太阳照亮的地面、山坡反射回来的光）
         float3 bounce = sunE * float3(1.0f, 0.95f, 0.85f) * (0.035f + 0.15f * saturate(1.0f - N.y)) * shade.g;
+        // 浮岛：朝下的面被底下雪白的云海照亮
+        if (scene == SCENE_SKY) bounce += sunE * (0.2f * saturate(0.25f - N.y));
         color = s.albedo / PI * (sunE * NdotL * sunVis + skyE + bounce);
         if (s.specular > 0.0f) {
             float3 H = normalize(sunDir - rd);
@@ -585,6 +740,207 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
         return float4(g * g * a + REVEAL_GLOW_COLOR * reveal.y * F.camera.z, saturate(a + reveal.y * 0.5f));
     }
     return float4(g * g, 1.0f);
+}
+
+// MARK: - 天空之城的建筑和瀑布（SkyCity.swift 生成的网格）
+//
+// 建筑是真的网格（柱子、塔、穹顶、拱桥、石环），顶点在地面坐标里（x、海拔、z），和地形一样每帧换到舞台空间。
+// 它也画进地形的深度预渲染：云层 pass 按那张深度截断视线，所以建筑后面的云不会盖到建筑上，
+// 片元里再把建筑前面的云叠上来（和地形一模一样的空气透视、叠云、色调映射）。
+
+struct CityUniforms {
+    float4 origin;      // xy 地面坐标原点相对舞台原点的偏移（CPU 用双精度算好），zw 未用
+};
+
+#define CITY_STONE 0
+#define CITY_COPPER 1
+#define CITY_GOLD 2
+#define CITY_DARK 3
+#define CITY_CRYSTAL 4
+#define CITY_FOLIAGE 5
+
+struct CityOut {
+    float4 position [[position]];
+    float3 stagePos;
+    float3 normal;       // 地面坐标系（y 向上）
+    float3 world;        // 地面坐标 x、海拔、z
+    float4 color;        // rgb 底色（烘了一点环境光遮蔽），a 材质
+    float2 uv;
+    uint viewIndex [[flat]];
+};
+
+vertex CityOut cityVertex(uint vid [[vertex_id]],
+                          ushort amp [[amplification_id]],
+                          device const MeshVertex *vertices [[buffer(0)]],
+                          constant ViewUniforms *views [[buffer(1)]],
+                          constant FrameUniforms &F [[buffer(2)]],
+                          constant CityUniforms &C [[buffer(3)]]) {
+    MeshVertex v = vertices[vid];
+    CityOut o;
+    o.stagePos = terrainToStage(v.position.xz + C.origin.xy, v.position.y, F);
+    o.position = views[amp].viewProjection * float4(o.stagePos, 1.0f);
+    o.normal = v.normal.xyz;
+    o.world = v.position.xyz;
+    o.color = v.color;
+    o.uv = float2(v.position.w, v.normal.w);
+    o.viewIndex = amp;
+    return o;
+}
+
+vertex float4 cityDepthVertex(uint vid [[vertex_id]],
+                              ushort amp [[amplification_id]],
+                              device const MeshVertex *vertices [[buffer(0)]],
+                              constant ViewUniforms *views [[buffer(1)]],
+                              constant FrameUniforms &F [[buffer(2)]],
+                              constant CityUniforms &C [[buffer(3)]]) {
+    MeshVertex v = vertices[vid];
+    return views[amp].viewProjection * float4(terrainToStage(v.position.xz + C.origin.xy, v.position.y, F), 1.0f);
+}
+
+/// 地形和建筑共用的收尾：空气透视 → 叠云 → 色调映射 → 转弯时压暗四周 → 抖动
+static inline float3 distantFinish(float3 color, float3 rd, float dist, float altitude, float3 eye, float4 position,
+                                   uint viewIndex, constant ViewUniforms *views, constant FrameUniforms &F,
+                                   constant rasterization_rate_map_data &rateMap, texture2d<float> skyLUT,
+                                   texture2d_array<float> cloudColor) {
+    float eyeAlt = max(eye.y + F.camera.x, 1.0f);
+    float camR = ATM_BOTTOM + eyeAlt * 0.001f;
+    float3 Tt = segmentTransmittance(eyeAlt * 0.001f, max(altitude, 0.0f) * 0.001f, dist * 0.001f * 2.2f);
+    float3 haze = skyViewLookup(skyLUT, normalize(float3(rd.x, 0.003f, rd.z)), F.sunDirection.xyz, camR, false);
+    color = color * Tt + haze * (1.0f - Tt);
+    float4 cloud = cloudColor.sample(pixelLinearClamp, position.xy * F.clouds.x, viewIndex);
+    color = color * cloud.a + cloud.rgb;
+    color = tonemap(color * F.exposure.x) * F.camera.z;
+    if (F.heading.z > 0.001f) {
+        float2 screen = screenPosition(position.xy, viewIndex, F.camera.w > 0.5f, rateMap);
+        float2 uv = (screen - views[viewIndex].viewport.xy) / views[viewIndex].viewport.zw - 0.5f;
+        color *= 1.0f - F.heading.z * smoothstep(0.17f, 0.5f, length(uv));
+    }
+    float3 g = sqrt(color) + (ign(position.xy + 17.0f) - 0.5f) / 255.0f;
+    return g * g;
+}
+
+fragment float4 cityFragment(CityOut in [[stage_in]],
+                             constant ViewUniforms *views [[buffer(0)]],
+                             constant FrameUniforms &F [[buffer(1)]],
+                             constant rasterization_rate_map_data &rateMap [[buffer(2)]],
+                             constant AtmosphereConstants &A [[buffer(3)]],
+                             texture2d<float> skyLUT [[texture(1)]],
+                             texture2d_array<float> cloudColor [[texture(3)]]) {
+    float3 eye = views[in.viewIndex].cameraPosition.xyz;
+    float3 toPoint = in.stagePos - eye;
+    float dist = max(length(toPoint), 0.01f);
+    float2 reveal = float2(1.0f, 0.0f);
+    if (revealActive) {
+        reveal = revealEnvironment(eye, toPoint / dist, F);
+        if (reveal.x + reveal.y < 0.003f) discard_fragment();
+    }
+    float3 rd = rotateHeading(toPoint / dist, F.heading.x, F.heading.y);
+    float3 sunDir = F.sunDirection.xyz;
+    float3 N = normalize(in.normal);
+    if (dot(N, rd) > 0.0f) N = -N;
+    float3 w = in.world;
+    int material = int(in.color.a + 0.5f);
+    float footprint = dist * 0.0011f;
+    float3 albedo = in.color.rgb;
+    float specular = 0.0f, gloss = 40.0f, wrap = 0.0f;
+    float3 emission = 0.0f;
+
+    if (material == CITY_STONE) {
+        // 砌石：一层层 0.62 米高的石块，错缝；每块深浅不一，缝是暗的。墙面沿水平切线展开，顶面按平面铺
+        float wall = saturate(1.0f - abs(N.y) * 1.6f);
+        float2 tangent = normalize(float2(-N.z, N.x) + float2(1e-4f, 0.0f));
+        float2 bp = wall > 0.5f ? float2(dot(w.xz, tangent) / 1.35f, w.y / 0.62f) : w.xz / float2(1.35f, 1.0f);
+        float row = floor(bp.y);
+        bp.x += 0.5f * fract(row * 0.5f) * 2.0f + 0.37f * tHash(int2(int(row), 7));
+        float2 f = fract(bp);
+        float fade = saturate(0.5f / (footprint * 6.0f) - 0.4f);
+        float joint = max(tSmooth(0.045f, 0.012f, min(f.x, 1.0f - f.x) * 1.35f), tSmooth(0.045f, 0.012f, min(f.y, 1.0f - f.y) * 0.62f));
+        float tint = tHash(int2(int(floor(bp.x)), int(row)));
+        albedo *= 1.0f + (0.10f * tint - 0.42f * joint) * fade;
+        // 风化：雨水顺着墙往下淌出来的一道道深色，背阴面和檐下长青苔，平的顶面上积土长草
+        float streak = tNoise(float2(dot(w.xz, tangent) * 0.9f, w.y * 0.07f) + 3.0f);
+        float blotch = tFbm(w.xz * 0.11f + w.y * 0.05f, 2);
+        albedo *= 1.0f - 0.22f * tSmooth(0.1f, 0.7f, streak) * wall + 0.16f * blotch;
+        float moss = tSmooth(0.05f, 0.45f, blotch + 0.35f * saturate(N.y) - 0.25f * dot(N, sunDir));
+        albedo = mix(albedo, float3(0.10f, 0.15f, 0.055f), moss * (0.25f + 0.45f * saturate(N.y)));
+    } else if (material == CITY_COPPER) {
+        // 铜皮的穹顶和尖顶：氧化成青绿色，一道道顺着坡往下的深浅，接缝处露出一点暗铜
+        float seam = abs(fract(in.uv.x * 12.0f) - 0.5f);
+        float run = tNoise(float2(in.uv.x * 40.0f, w.y * 0.25f));
+        albedo *= 1.0f + 0.22f * run;
+        albedo = mix(albedo, float3(0.16f, 0.10f, 0.06f), tSmooth(0.05f, 0.02f, seam) * saturate(1.5f - footprint * 8.0f) * 0.7f);
+        specular = 0.12f;
+        gloss = 24.0f;
+    } else if (material == CITY_GOLD) {
+        specular = 1.4f;
+        gloss = 90.0f;
+    } else if (material == CITY_FOLIAGE) {
+        // 树冠：一簇簇花和叶子的深浅；光从背面也透过来一点
+        float fade = saturate(1.2f - footprint * 3.0f);
+        albedo *= 1.0f + 0.32f * tNoise(w.xz * 1.6f + w.y * 0.9f) + 0.22f * tNoise(w.xz * 5.1f + w.y * 3.3f) * fade;
+        wrap = 0.5f;
+    } else if (material == CITY_CRYSTAL) {
+        // 浮空石：会自己发光的青色晶体，慢慢地一明一暗
+        emission = float3(0.25f, 0.9f, 0.8f) * (0.05f + 0.02f * sin(F.camera.y * 1.3f + w.x * 0.05f));
+        specular = 0.6f;
+        gloss = 60.0f;
+    }
+
+    float altKm = w.y * 0.001f;
+    float3 sunE = mix(A.sunAtCloudBase.rgb, A.sunAtCloudTop.rgb, saturate((altKm - 1.0f) / 8.0f));
+    float3 Ls = stageSunDirection(F);
+    float3 sunVis = canopyShadow(in.stagePos, Ls, F) * bodyShadow(in.stagePos, Ls, F);
+    // 台基、桥面这些朝上的石面也接城堡和塔的影子（跳过第一项：那是台基自己）
+    if (material == CITY_STONE && N.y > 0.7f) sunVis *= skyBuildingShadow(w.xz, sunDir, 1);
+    float NdotL = saturate((dot(N, sunDir) + wrap) / (1.0f + wrap));
+    float3 skyE = cloudySkyFill(A.skyIrradianceSea.rgb) * (0.55f + 0.45f * N.y);
+    // 侧面和朝下的面：被草地、石板和底下的云海照亮（暖一点）
+    float3 bounce = sunE * float3(1.0f, 0.96f, 0.88f) * (0.05f + 0.16f * saturate(1.0f - N.y));
+    float3 color = albedo / PI * (sunE * NdotL * sunVis + skyE + bounce) + emission;
+    if (specular > 0.0f) {
+        float3 H = normalize(sunDir - rd);
+        float3 tintS = material == CITY_GOLD ? float3(1.0f, 0.72f, 0.28f) : float3(1.0f);
+        color += sunE * sunVis * tintS * (specular * pow(saturate(dot(N, H)), gloss) * NdotL);
+        // 金属反射一点天光
+        color += tintS * cloudySkyFill(A.skyIrradianceSea.rgb) / PI * (specular * 0.25f);
+    }
+    float3 c = distantFinish(color, rd, dist, w.y, eye, in.position, in.viewIndex, views, F, rateMap, skyLUT, cloudColor);
+    if (revealActive) {
+        float a = reveal.x;
+        return float4(c * a + REVEAL_GLOW_COLOR * reveal.y * F.camera.z, saturate(a + reveal.y * 0.5f));
+    }
+    return float4(c, 1.0f);
+}
+
+/// 瀑布：从岛边跌进云海的一条水，越往下散得越开，最后化成水雾。半透明（预乘），叠在地形和天空上面。
+/// uv.x 横向 -1…1（一条水的两边），uv.y 已经往下落了多少米；color.a 存这一条总共落多高
+fragment float4 waterfallFragment(CityOut in [[stage_in]],
+                                  constant ViewUniforms *views [[buffer(0)]],
+                                  constant FrameUniforms &F [[buffer(1)]],
+                                  constant rasterization_rate_map_data &rateMap [[buffer(2)]],
+                                  constant AtmosphereConstants &A [[buffer(3)]],
+                                  texture2d<float> skyLUT [[texture(1)]],
+                                  texture2d_array<float> cloudColor [[texture(3)]]) {
+    float3 eye = views[in.viewIndex].cameraPosition.xyz;
+    float3 toPoint = in.stagePos - eye;
+    float dist = max(length(toPoint), 0.01f);
+    float3 rd = rotateHeading(toPoint / dist, F.heading.x, F.heading.y);
+    float fallen = in.uv.y, total = in.color.a;
+    // 水是加速往下落的：落了 y 米时的速度 √(2gy)，纹理坐标按落下的时间走，一道道水纹才不会越往下越被拉长
+    float t = sqrt(max(fallen, 0.0f) * 0.2f) - F.camera.y;
+    float streaks = 0.55f + 0.45f * tNoise(float2(in.uv.x * 3.5f + in.world.x * 0.3f, t * 2.2f))
+                  + 0.3f * tNoise(float2(in.uv.x * 9.0f, t * 5.0f + 3.0f));
+    float across = 1.0f - in.uv.x * in.uv.x;
+    float thin = saturate(1.0f - fallen / total);                       // 越往下越稀
+    float alpha = saturate(streaks) * across * (0.35f + 0.65f * thin) * smoothstep(0.0f, 0.12f, thin)
+                * smoothstep(0.0f, 1.5f, fallen + 1.0f);
+    float altKm = in.world.y * 0.001f;
+    float3 sunE = mix(A.sunAtCloudBase.rgb, A.sunAtCloudTop.rgb, saturate((altKm - 1.0f) / 8.0f));
+    float3 color = float3(0.86f, 0.9f, 0.93f) / PI * (sunE * 0.55f + cloudySkyFill(A.skyIrradianceSea.rgb));
+    // 空气透视和叠云要按「这一层盖住的那部分」算：先把颜色走完和地形一样的收尾，再整体乘不透明度
+    float3 c = distantFinish(color, rd, dist, in.world.y, eye, in.position, in.viewIndex, views, F, rateMap, skyLUT, cloudColor);
+    alpha *= cloudColor.sample(pixelLinearClamp, in.position.xy * F.clouds.x, in.viewIndex).a * 0.5f + 0.5f;
+    return float4(c * alpha, alpha);
 }
 
 // MARK: - 启动时

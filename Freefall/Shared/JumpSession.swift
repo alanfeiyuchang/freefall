@@ -317,6 +317,10 @@ final class JumpSession {
             if t.scene == .volcano, t.plumeProximity < 2.5 {
                 return bearing + "\n前面是火山口的毒烟，别过去"
             }
+            // 天空之城：脚下没有岛，而且已经快掉到岛面以下了
+            if t.scene == .sky, t.heightAboveGround < 90, t.terrainClearance > t.heightAboveGround + 200 {
+                return bearing + "\n脚下是云海，快飞回岛上"
+            }
             // 高度管理：直飞还能飞多远（和自动驾驶一样估），比离靶远太多就提醒先飞过去再掉头
             let reach = JumpTimeline.canopySpeed * max(t.heightAboveGround - 6, 0) / JumpTimeline.canopySink + 15
             if distance < 300, reach > distance + 150 {
@@ -346,11 +350,13 @@ final class JumpSession {
             return t.scene == .atoll ? "落在沙洲上，离靶心 \(Int(d)) 米——没进靶" : "平安落地，离靶心 \(Int(d)) 米——没进靶"
         case .water: return "掉进水里了——离靶心 \(Int(d)) 米"
         case .crashed: return String(format: "摔了——落地时每秒 %.0f 米，开伞太晚", t.landingSpeed)
-        case .terrain: return "撞上山坡了——那里太陡，落不了"
+        case .terrain: return t.scene == .sky ? "撞上了浮岛的岩壁——那里落不了" : "撞上山坡了——那里太陡，落不了"
         case .trees: return "落进树林，挂在树上了——离靶心 \(Int(d)) 米"
         case .lava: return "掉进熔岩里了"
         case .crevasse: return "掉进冰裂缝了"
         case .plume: return "冲进了火山口的毒烟"
+        case .fell: return "掉出了浮岛，落进云海——离靶心 \(Int(d)) 米"
+        case .ruins: return "撞上了石头城的塔"
         case nil: return nil
         }
     }
@@ -428,6 +434,8 @@ struct JumpResult: Sendable {
         case .lava: "flame.fill"
         case .crevasse: "snowflake"
         case .plume: "smoke.fill"
+        case .fell: "cloud.fill"
+        case .ruins: "building.columns.fill"
         }
     }
 }

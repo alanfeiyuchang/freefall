@@ -10,7 +10,7 @@ enum TerrainField {
     static let valleySide = SIMD2<Float>(0.80720, 0.59028)
 
     enum Material: Int {
-        case rock = 0, grass, forest, snow, ice, water, lava, ash, scree, field, moraine, crevasse, sand
+        case rock = 0, grass, forest, snow, ice, water, lava, ash, scree, field, moraine, crevasse, sand, void, paved
     }
 
     static let coneCenter = SIMD2<Float>(-500, -950)
@@ -285,6 +285,84 @@ enum TerrainField {
         return saturate(1 - d * d) * smooth(3200, 1800, above)
     }
 
+    // MARK: - 天空之城（TerrainField.h 的 sky* 逐行对应）
+
+    static let skyAlt: Float = 3293
+    static let skyVoid: Float = 2880
+    static let skyCitadel = SIMD2<Float>(215, 0)
+    static let skyPool = SIMD2<Float>(120, -150)
+    static let skyPoolRadius: Float = 24
+
+    /// 每座岛：xy 中心（谷坐标），zw 两个半轴（米）。0 是着陆的主岛
+    static let skyIslandShape: [SIMD4<Float>] = [
+        SIMD4(60, 0, 330, 235), SIMD4(-520, -290, 150, 110), SIMD4(-440, 350, 125, 95), SIMD4(590, -340, 190, 140),
+        SIMD4(640, 300, 150, 115), SIMD4(70, -540, 115, 85), SIMD4(130, 500, 105, 85), SIMD4(-960, 80, 230, 170),
+        SIMD4(1180, -20, 280, 210), SIMD4(-270, -200, 34, 27), SIMD4(-190, 290, 30, 24), SIMD4(330, -380, 36, 28),
+        SIMD4(440, 360, 32, 26), SIMD4(-700, 470, 48, 36), SIMD4(900, -600, 70, 52), SIMD4(-40, 820, 80, 60),
+    ]
+    /// x 岛面比主岛高多少（米），y 噪声的种子
+    static let skyIslandInfo: [SIMD2<Float>] = [
+        SIMD2(0, 1.3), SIMD2(45, 4.1), SIMD2(-60, 7.7), SIMD2(120, 2.9), SIMD2(-90, 9.3), SIMD2(70, 5.5),
+        SIMD2(-40, 6.2), SIMD2(180, 8.4), SIMD2(60, 3.6), SIMD2(-25, 11.0), SIMD2(30, 12.5), SIMD2(-50, 13.2),
+        SIMD2(15, 14.9), SIMD2(100, 15.4), SIMD2(-140, 16.8), SIMD2(150, 17.1),
+    ]
+
+    static func skyMask(_ sl: SIMD2<Float>, _ i: Int) -> Float {
+        let s = skyIslandShape[i]
+        let e = 1 - simd_length((sl - SIMD2(s.x, s.y)) / SIMD2(s.z, s.w))
+        if e < -0.4 { return e }
+        return e + 0.2 * fbm(sl / (0.6 * min(s.z, s.w)) + SIMD2(repeating: skyIslandInfo[i].y), 3)
+    }
+
+    /// 最近的岛：它的 mask 和编号
+    static func skyNearest(_ sl: SIMD2<Float>) -> (mask: Float, index: Int) {
+        var best: Float = -1e9
+        var index = 0
+        for i in 0..<skyIslandShape.count {
+            let m = skyMask(sl, i)
+            if m > best { best = m; index = i }
+        }
+        return (best, index)
+    }
+
+    static func skyTop(_ p: SIMD2<Float>, _ sl: SIMD2<Float>, _ i: Int, _ m: Float) -> Float {
+        let info = skyIslandInfo[i]
+        let mm = max(m, 0)
+        var h = skyAlt + info.x + 7 * smooth(0, 0.5, mm) - 4 * (1 - smooth(0, 0.07, mm))
+            + 2.5 * fbm(p / 90 + SIMD2(repeating: info.y), 3) + 0.4 * fbm(p / 14, 2)
+        if i == 0 {
+            let flatH = skyAlt + 7
+            h = mix(flatH + 0.15 * fbm(p / 30, 2), h, smooth(45, 110, simd_length(sl)))
+            let rc = simd_length(sl - skyCitadel)
+            h = mix(flatH, h, smooth(84, 110, rc))
+            h += 4 * (smooth(79, 77.5, rc) + smooth(65, 63.5, rc) + smooth(51, 49.5, rc))
+            h -= 2.2 * smooth(31, 23, simd_length(sl - skyPool))
+        }
+        return h
+    }
+
+    static func skyHeight(_ p: SIMD2<Float>) -> Float {
+        let sl = valleyCoords(p)
+        let n = skyNearest(sl)
+        return n.mask > 0 ? skyTop(p, sl, n.index, n.mask) : skyVoid
+    }
+
+    static func skyForest(_ p: SIMD2<Float>) -> Float {
+        let sl = valleyCoords(p)
+        let n = skyNearest(sl)
+        if n.mask <= 0 { return 0 }
+        let patches = fbm(p / 150 + SIMD2(6.6, 3.3), 3)
+        var f = smooth(0.02, 0.14, patches) * smooth(0.06, 0.14, n.mask)
+        if n.index == 0 {
+            f *= smooth(60, 95, abs(sl.y)) * smooth(105, 135, simd_length(sl - skyCitadel))
+                * smooth(34, 46, simd_length(sl - skyPool))
+        }
+        return f
+    }
+
+    /// 谷坐标 → 地面坐标（摆建筑用）
+    static func skyGround(_ sl: SIMD2<Float>) -> SIMD2<Float> { target + valleyDir * sl.x + valleySide * sl.y }
+
     // MARK: - 汇总
 
     static func height(_ scene: JumpScene, _ p: SIMD2<Float>) -> Float {
@@ -294,6 +372,7 @@ enum TerrainField {
         case .snow: return snowHeight(p)
         case .island: return islandHeight(p)
         case .volcano: return volcanoHeight(p)
+        case .sky: return skyHeight(p)
         case .atoll: return 0
         }
     }
@@ -316,6 +395,13 @@ enum TerrainField {
         case .volcano:
             if h < 0.5 { return .water }
             if volcanoLava(p) { return .lava }
+            return nil
+        case .sky:
+            let sl = valleyCoords(p)
+            let n = skyNearest(sl)
+            if n.mask <= 0 { return .void }
+            if n.index == 0, simd_length(sl - skyPool) < skyPoolRadius { return .water }
+            if skyForest(p) > 0.5 { return .forest }
             return nil
         case .snow, .atoll:
             return nil

@@ -69,6 +69,18 @@ final class SceneRenderer: @unchecked Sendable {
     private let revealPipelines: (scene: MTLRenderPipelineState, terrain: MTLRenderPipelineState,
                                   mesh: MTLRenderPipelineState, glove: MTLRenderPipelineState)
     private let terrainDepthPipeline: MTLRenderPipelineState
+    /// 天空之城的建筑和瀑布（SkyCity.swift 的网格，别的关是 nil）
+    private struct City {
+        var pipeline: MTLRenderPipelineState
+        var revealPipeline: MTLRenderPipelineState
+        var depthPipeline: MTLRenderPipelineState
+        var waterfallPipeline: MTLRenderPipelineState
+        var buildings: MTLBuffer
+        var buildingCount: Int
+        var waterfalls: MTLBuffer
+        var waterfallCount: Int
+    }
+    private let city: City?
     /// 没有地形时绑给云层 pass 的占位深度
     private let emptyTerrainDepth: MTLTexture
     private let patchIndices: MTLBuffer
@@ -229,6 +241,32 @@ final class SceneRenderer: @unchecked Sendable {
         depthOnly.maxVertexAmplificationCount = maxViewCount
         depthOnly.inputPrimitiveTopology = .triangle
         terrainDepthPipeline = try device.makeRenderPipelineState(descriptor: depthOnly)
+        if scene == .sky {
+            let layout = SkyCity.layout
+            let cityDepth = MTLRenderPipelineDescriptor()
+            cityDepth.label = "city depth"
+            cityDepth.vertexFunction = try function("cityDepthVertex")
+            cityDepth.depthAttachmentPixelFormat = .depth32Float
+            cityDepth.maxVertexAmplificationCount = maxViewCount
+            cityDepth.inputPrimitiveTopology = .triangle
+            city = City(
+                pipeline: try renderPipeline("cityVertex", "cityFragment", colors: [colorFormat], depth: depthFormat, blend: false),
+                revealPipeline: try renderPipeline("cityVertex", "cityFragment", colors: [colorFormat], depth: depthFormat,
+                                                   blend: false, reveal: true),
+                depthPipeline: try device.makeRenderPipelineState(descriptor: cityDepth),
+                waterfallPipeline: try renderPipeline("cityVertex", "waterfallFragment", colors: [colorFormat],
+                                                      depth: depthFormat, blend: true),
+                buildings: device.makeBuffer(bytes: layout.buildings,
+                                             length: MemoryLayout<MeshVertex>.stride * layout.buildings.count,
+                                             options: .storageModeShared)!,
+                buildingCount: layout.buildings.count,
+                waterfalls: device.makeBuffer(bytes: layout.waterfalls,
+                                              length: MemoryLayout<MeshVertex>.stride * layout.waterfalls.count,
+                                              options: .storageModeShared)!,
+                waterfallCount: layout.waterfalls.count)
+        } else {
+            city = nil
+        }
         let empty = MTLTextureDescriptor()
         empty.textureType = .type2DArray
         empty.pixelFormat = .depth32Float
@@ -650,6 +688,18 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setFragmentTexture(baseNoise, index: 6)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
+        // 瀑布：半透明，叠在浮岛和天空上面（片元的缓冲和贴图沿用上面天空 pass 绑的）
+        if let city, let terrainDraw, !revealing {
+            var cu = terrainDraw.city
+            enc.setRenderPipelineState(city.waterfallPipeline)
+            enc.setDepthStencilState(testDepth)
+            enc.setVertexBuffer(city.waterfalls, offset: 0, index: 0)
+            enc.setVertexBytes(&views, length: MemoryLayout<ViewUniforms>.stride * viewCount, index: 1)
+            enc.setVertexBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 2)
+            enc.setVertexBytes(&cu, length: MemoryLayout<CityUniforms>.stride, index: 3)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: city.waterfallCount)
+        }
+
         encodeObjects(enc, objects: objects, views: &views, frame: &frame, revealing: revealing)
 
         // 身边的雾团（在雨丝后面画：雨丝是叠加上去的亮线）
@@ -726,6 +776,8 @@ final class SceneRenderer: @unchecked Sendable {
         var buffer: MTLBuffer
         var count: Int
         var uniforms: TerrainUniforms
+        /// 建筑网格用的：地面坐标原点相对舞台原点的偏移
+        var city = CityUniforms(origin: SIMD4(0, 0, 0, 0))
     }
 
     /// 地形：选块（视锥裁剪）→ 写进这一帧的块缓冲
@@ -748,7 +800,16 @@ final class SceneRenderer: @unchecked Sendable {
             planes.append([r3 + r0, r3 - r0, r3 + r1, r3 - r1].map { $0 / simd_length(SIMD3($0.x, $0.y, $0.z)) })
         }
         let origin = terrain.groundOrigin, stageToAltitude = terrain.stageToAltitude
+        // 天空之城：只有浮岛上有地形，四叉树只往碰得到岛的块里走（岛按谷坐标里的椭圆，放大一圈当包围圆）
+        let islands: [(SIMD2<Double>, Double)] = scene == .sky ? TerrainField.skyIslandShape.map {
+            (SIMD2<Double>(TerrainField.skyGround(SIMD2($0.x, $0.y))), Double(max($0.z, $0.w)) * 1.3)
+        } : []
         TerrainLOD.select(camera: camera, heightRange: scene.heightRange, visible: { center, radius in
+            if !islands.isEmpty {
+                // 块的包围球里含了竖直方向的半高，水平上偏大一点，不要紧
+                let c = SIMD2(center.x, center.z)
+                guard islands.contains(where: { simd_length(c - $0.0) < radius + $0.1 }) else { return false }
+            }
             let rx = center.x - origin.x, rz = center.z - origin.y
             let d2 = rx * rx + rz * rz
             let p = SIMD3<Float>(Float(rx * c - rz * s), Float(center.y - stageToAltitude - d2 / (2 * 6_360_000)),
@@ -769,7 +830,8 @@ final class SceneRenderer: @unchecked Sendable {
         }
         let uniforms = TerrainUniforms(camera: SIMD4(head, Float(scene.rawValue)),
                                        lod: SIMD4(Float(TerrainLOD.range0), scene == .volcano ? 1 : 0, 0, 0))
-        return TerrainDraw(buffer: buffer, count: selectedNodes.count, uniforms: uniforms)
+        return TerrainDraw(buffer: buffer, count: selectedNodes.count, uniforms: uniforms,
+                           city: CityUniforms(origin: SIMD4(Float(-origin.x), Float(-origin.y), 0, 0)))
     }
 
     /// 地形的深度预渲染：和主 pass 同样的视口、rate map，只写深度。云层 pass 按它截断视线（山后面的云不算）
@@ -803,6 +865,20 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setVertexTexture(terrainHeightMap, index: 0)
         enc.drawIndexedPrimitives(type: .triangle, indexCount: patchIndexCount, indexType: .uint16,
                                   indexBuffer: patchIndices, indexBufferOffset: 0, instanceCount: draw.count)
+        if let city {
+            // 浮岛的底面，再加建筑（云不能盖到它们前面）
+            tu.lod.z = 1
+            enc.setVertexBytes(&tu, length: MemoryLayout<TerrainUniforms>.stride, index: 3)
+            enc.drawIndexedPrimitives(type: .triangle, indexCount: patchIndexCount, indexType: .uint16,
+                                      indexBuffer: patchIndices, indexBufferOffset: 0, instanceCount: draw.count)
+            var cu = draw.city
+            enc.setRenderPipelineState(city.depthPipeline)
+            enc.setVertexBuffer(city.buildings, offset: 0, index: 0)
+            enc.setVertexBytes(&views, length: MemoryLayout<ViewUniforms>.stride * views.count, index: 1)
+            enc.setVertexBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 2)
+            enc.setVertexBytes(&cu, length: MemoryLayout<CityUniforms>.stride, index: 3)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: city.buildingCount)
+        }
         enc.endEncoding()
     }
 
@@ -834,6 +910,21 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setFragmentTexture(surfaceMap, index: 7)
         enc.drawIndexedPrimitives(type: .triangle, indexCount: patchIndexCount, indexType: .uint16,
                                   indexBuffer: patchIndices, indexBufferOffset: 0, instanceCount: draw.count)
+        if let city {
+            tu.lod.z = 1
+            enc.setVertexBytes(&tu, length: MemoryLayout<TerrainUniforms>.stride, index: 3)
+            enc.setFragmentBytes(&tu, length: MemoryLayout<TerrainUniforms>.stride, index: 4)
+            enc.drawIndexedPrimitives(type: .triangle, indexCount: patchIndexCount, indexType: .uint16,
+                                      indexBuffer: patchIndices, indexBufferOffset: 0, instanceCount: draw.count)
+            // 建筑：片元的缓冲和贴图和地形绑的是同一套
+            var cu = draw.city
+            enc.setRenderPipelineState(revealing ? city.revealPipeline : city.pipeline)
+            enc.setVertexBuffer(city.buildings, offset: 0, index: 0)
+            enc.setVertexBytes(&views, length: viewsLength, index: 1)
+            enc.setVertexBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 2)
+            enc.setVertexBytes(&cu, length: MemoryLayout<CityUniforms>.stride, index: 3)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: city.buildingCount)
+        }
     }
 
     /// 每组视图一张地形深度（和颜色纹理一样大）

@@ -139,6 +139,7 @@ static inline float sceneGroundAlbedo(int scene) {
     case 3: return 0.65f;     // 雪山
     case 4: return 0.45f;     // 冰川
     case 5: return 0.07f;     // 火山
+    case 6: return 0.5f;      // 天空之城：脚下是云海
     default: return 0.06f;    // 环礁：海面
     }
 }
