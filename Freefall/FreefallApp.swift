@@ -12,20 +12,24 @@ struct FreefallApp: App {
         WindowGroup(id: StartView.windowID) {
             StartView()
         }
-        .defaultSize(width: 720, height: 660)
+        .defaultSize(width: 860, height: 720)
 
         ImmersiveSpace(id: StartView.spaceID) {
             CompositorLayer(configuration: FallLayerConfiguration()) { layerRenderer in
                 ImmersiveRenderer.start(layerRenderer, handsEnabled: AppModel.shared.handsAllowed,
                                         watchOnLeft: AppModel.shared.watchOnLeft, gloves: AppModel.shared.gloves,
-                                        scene: AppModel.shared.scene)
+                                        snapTurns: AppModel.shared.snapTurns, scene: AppModel.shared.scene)
             }
         }
         .immersionStyle(selection: $immersionStyle, in: .mixed, .full)
-        // 戴手套：真手和前臂整个藏起来，只画手套（苹果的手套示例也是这么做的）。
+        // 戴手套：开场在房间里还是真手（只有扶杆），握住扶杆、手套跟着飞机长出来以后，
+        // 真手和前臂整个藏起来，只画手套（苹果的手套示例也是这么做的）。
         // 不戴：真手透视出来，按深度和画面合成：表盘比手腕近，就盖在手腕上；伞绳、舱壁比手远，就被手挡住。
         // （.visible 会让手永远盖在最上面，手腕上的表就看不见了）
-        .upperLimbVisibility(model.gloves && model.handsAllowed ? .hidden : .automatic)
+        .upperLimbVisibility(model.realHandsHidden ? .hidden : .automatic)
+        // 看手心时系统会冒出 Home 键（还有翻过手来的控制中心），跳伞时抓扶杆、拉环、拉操纵环全是张着手，
+        // 一不小心就点到。整个沉浸空间里都藏起来（和 Wandless 这类手势游戏一样）；按一下数码表冠照样能退出
+        .persistentSystemOverlays(.hidden)
     }
 }
 

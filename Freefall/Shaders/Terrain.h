@@ -435,7 +435,7 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
     if (F.heading.z > 0.001f) {
         float2 screen = screenPosition(in.position.xy, in.viewIndex, F.camera.w > 0.5f, rateMap);
         float2 uv = (screen - views[in.viewIndex].viewport.xy) / views[in.viewIndex].viewport.zw - 0.5f;
-        color *= 1.0f - F.heading.z * smoothstep(0.22f, 0.55f, length(uv));
+        color *= 1.0f - F.heading.z * smoothstep(0.17f, 0.5f, length(uv));
     }
     float3 g = sqrt(color) + (ign(in.position.xy + 17.0f) - 0.5f) / 255.0f;
     if (revealActive) {

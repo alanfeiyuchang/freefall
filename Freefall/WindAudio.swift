@@ -31,17 +31,21 @@ final class JumpAudio: @unchecked Sendable {
         var rumble: Float = 0
         // 一次性的事件：计数加一就触发一次（渲染线程只管加，音频线程看到变化就播）
         var dings = 0, grabs = 0, rips = 0, deploys = 0, thuds = 0, crashes = 0, splashes = 0, wins = 0, fails = 0
-        /// 开场握住扶杆：飞机从手边长出来的那几秒（一次性的上扬的声音）
+        /// 开场握住扶杆：飞机从手边长出来的那几秒（一次性：细碎的凝结声 + 舱门外天出现时的一声闷响）
         var reveals = 0
+        /// 舱里的声音（风、发动机）有多闷 0…1：开场先像隔着墙听，飞机长出来的过程中慢慢变清楚
+        var muffle: Float = 0
     }
 
     private let engine = AVAudioEngine()
     private let params = OSAllocatedUnfairLock(initialState: Params())
 
     init?() {
+#if !os(macOS)
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .default)
         try? session.setActive(true)
+#endif
 
         let outputRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
         let sampleRate = outputRate > 0 ? outputRate : 48000
@@ -80,7 +84,8 @@ final class JumpDSP: @unchecked Sendable {
     // 平滑后的参数
     private var speed: Float = 0, gain: Float = 0, engineLevel: Float = 0
     private var canopy: Float = 0, ambience: Float = 0, turn: Float = 0, rain: Float = 0
-    private var birds: Float = 0, rumbleLevel: Float = 0
+    private var birds: Float = 0, rumbleLevel: Float = 0, muffle: Float = 0
+    private var muffleLow: [Float] = [0, 0], muffleLow2: [Float] = [0, 0]
     // 鸟叫：一串短促的「啾啾」，音高往上滑
     private var birdCountdown: Float = 1, birdTime: Float = -1, birdNotes = 0, birdPitch: Float = 3000
     private var birdPan: Float = 0, birdPhase: Float = 0
@@ -112,7 +117,13 @@ final class JumpDSP: @unchecked Sendable {
     // 一次性事件
     private var counters = [Int](repeating: 0, count: 10)
     private var eventTime = [Float](repeating: -1, count: 10)
-    private var revealLow: Float = 0, revealBand: Float = 0
+    // 开场实体化：低沉的气流声（低通截止频率跟着波前往上走）+ 稀疏的细碎「叮」粒子 + 最后舱门那一声闷响
+    private var revealLow: [Float] = [0, 0], revealLow2: [Float] = [0, 0]
+    private var grainTime: [Float] = [-1, -1, -1, -1, -1, -1, -1, -1]
+    private var grainFreq: [Float] = [3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000]
+    private var grainPan: [Float] = [0, 0, 0, 0, 0, 0, 0, 0]
+    private var grainPhase: [Float] = [0, 0, 0, 0, 0, 0, 0, 0]
+    private var nextGrain = 0
     private var deployLow: Float = 0, deployBand: Float = 0
     private var splashLow: Float = 0
 
@@ -157,6 +168,7 @@ final class JumpDSP: @unchecked Sendable {
             rain += (params.rain - rain) * smoothing
             birds += (params.birds - birds) * slow
             rumbleLevel += (params.rumble - rumbleLevel) * slow
+            muffle += (params.muffle - muffle) * smoothing
 
             var outL: Float = 0, outR: Float = 0
 
@@ -293,6 +305,21 @@ final class JumpDSP: @unchecked Sendable {
                 outL += e; outR += e
             }
 
+            // ---- 闷：两级低通，截止 18 kHz（全开）→ 110 Hz（只剩发动机的低吼）----
+            if muffle > 0.002 {
+                let cutoff = 18000 * pow(110 / 18000, muffle)
+                let k = 1 - exp(-2 * Float.pi * cutoff / sampleRate)
+                muffleLow[0] += (outL - muffleLow[0]) * k
+                muffleLow[1] += (outR - muffleLow[1]) * k
+                muffleLow2[0] += (muffleLow[0] - muffleLow2[0]) * k
+                muffleLow2[1] += (muffleLow[1] - muffleLow2[1]) * k
+                outL = muffleLow2[0]
+                outR = muffleLow2[1]
+            } else {
+                muffleLow = [outL, outR]
+                muffleLow2 = [outL, outR]
+            }
+
             // ---- 海浪和海鸥 ----
             if ambience > 0.01 {
                 surfPhase += dt / surfPeriod
@@ -368,10 +395,71 @@ final class JumpDSP: @unchecked Sendable {
             let e = oneShots()
             outL += e
             outR += e
+            let (rl, rr) = revealSound()
+            outL += rl
+            outR += rr
 
-            left?[i] = outL * gain
-            right?[i] = outR * gain
+            left?[i] = Self.limit(outL * gain)
+            right?[i] = Self.limit(outR * gain)
         }
+    }
+
+    /// 软限幅：0.7 以下原样，往上用 tanh 慢慢压到 1（几个声音叠在一起时不削波）
+    @inline(__always) private static func limit(_ x: Float) -> Float {
+        let a = abs(x)
+        guard a > 0.7 else { return x }
+        return (0.7 + 0.3 * tanh((a - 0.7) / 0.3)) * (x < 0 ? -1 : 1)
+    }
+
+    /// 开场实体化（立体声），配合舱里的声音从闷到清楚（Params.muffle）：
+    /// - 气流：噪声过两级低通，截止频率从 90 Hz 慢慢升到 1.3 kHz，很轻，左右声道各用各的噪声，听起来是包着你的
+    /// - 粒子：一颗颗很短的「叮」（2.5 ~ 6 kHz，再叠一个 2.76 倍的不谐和泛音，像冰晶、玻璃），十几毫秒衰减，
+    ///   随机左右，跟着波前越来越密再变稀，像东西一点点凝出来
+    /// - 舱门外的天出现时（约 2.8 秒）一声很轻的闷响（压力变了）
+    /// 没有旋律（之前的上扬和弦听起来像廉价的合成器，很怪）。
+    private func revealSound() -> (Float, Float) {
+        let k = Event.reveal.rawValue
+        guard eventTime[k] >= 0 else { return (0, 0) }
+        let t = eventTime[k]
+        eventTime[k] += dt
+        if eventTime[k] > 5.6 { eventTime[k] = -1 }
+        let rise = min(t / 4.6, 1)
+        let swell = rise * rise * (3 - 2 * rise) * (1 - max(0, (t - 4.2) / 1.4))
+        let cutoff = 90 * pow(14.5, rise)
+        let f = 1 - exp(-2 * Float.pi * cutoff / sampleRate)
+        var out: [Float] = [0, 0]
+        for c in 0..<2 {
+            revealLow[c] += (white() - revealLow[c]) * f
+            revealLow2[c] += (revealLow[c] - revealLow2[c]) * f
+            out[c] = revealLow2[c] * swell * 0.3
+        }
+        // 粒子：密度 = 波前推进得多快（越来越快，最后一下子收住）
+        let density = 40 * sin(Float.pi * min(t / 4.8, 1)) * min(t / 0.6, 1)
+        if unit() < density * dt {
+            let g = nextGrain
+            nextGrain = (nextGrain + 1) % grainTime.count
+            grainTime[g] = 0
+            grainFreq[g] = 2500 + 3500 * unit()
+            grainPan[g] = white()
+            grainPhase[g] = 0
+        }
+        for g in 0..<grainTime.count where grainTime[g] >= 0 {
+            let gt = grainTime[g]
+            grainPhase[g] += 2 * .pi * grainFreq[g] * dt
+            let v = (sin(grainPhase[g]) + 0.45 * sin(grainPhase[g] * 2.76) * exp(-gt * 60))
+                * exp(-gt * 90) * min(gt / 0.002, 1) * 0.04
+            out[0] += v * (0.5 - 0.5 * grainPan[g])
+            out[1] += v * (0.5 + 0.5 * grainPan[g])
+            grainTime[g] += dt
+            if gt > 0.08 { grainTime[g] = -1 }
+        }
+        // 舱门外的天出现（约 2.8 秒）：一声很轻的闷响
+        let thump = t - 2.8
+        if thump > 0, thump < 0.6 {
+            let v = sin(2 * .pi * 48 * thump) * min(thump / 0.04, 1) * exp(-thump * 7) * 0.22
+            out[0] += v; out[1] += v
+        }
+        return (out[0], out[1])
     }
 
     /// 一次性的声音（单声道），每个事件自己的时间从 0 开始走
@@ -418,22 +506,6 @@ final class JumpDSP: @unchecked Sendable {
             splashLow = splashLow * 0.9 + white() * 0.1
             out += sin(2 * .pi * 90 * t * exp(-t * 3)) * exp(-t * 9) * 0.6
             out += (white() * 0.5 + splashLow * 1.5) * exp(-t * 2.5) * min(t / 0.05, 1) * 0.5
-        }
-        if let t = advance(.reveal, 5.4) {         // 开场实体化：一阵越来越高、越来越亮的呼——，上面浮着一层泛音，最后落进飞机的轰鸣
-            let rise = min(t / 4.6, 1)
-            let envelope = rise * rise * (3 - 2 * rise) * (1 - max(0, (t - 4.4) / 1.0))
-            let w = white()
-            let sweep = 160 * pow(18, rise)                       // 160 Hz → 2.9 kHz
-            let f = 2 * sin(Float.pi * min(sweep, 5000) / sampleRate)
-            let high = w - revealLow - 0.7 * revealBand
-            revealBand += f * high
-            revealLow += f * revealBand
-            out += revealBand * envelope * 0.22
-            let shimmer: [Float] = [523.3, 784.0, 1046.5, 1568.0]
-            for (k, freq) in shimmer.enumerated() {
-                let wobble = 1 + 0.004 * sin(2 * .pi * (3.1 + Float(k)) * t)
-                out += sin(2 * .pi * freq * wobble * t) * envelope * envelope * (0.022 - Float(k) * 0.004)
-            }
         }
         if let t = advance(.win, 1.6) {            // 赢：三个上行音
             let notes: [Float] = [523.3, 659.3, 784.0]

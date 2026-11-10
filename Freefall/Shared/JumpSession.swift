@@ -31,6 +31,12 @@ final class JumpSession {
     private var rainOffset = SIMD3<Float>(0, 0, 0)
     static let rainBox: Float = 14
     static let rainDrops: Float = 6000
+    /// 雾团：同上，盒子大一些
+    private var mistOffset = SIMD3<Float>(0, 0, 0)
+    static let mistBox: Float = 44
+    static let mistPuffs: Float = 180
+    /// 淋湿的程度 0…1：在雨里、云里越来越湿，出来以后被风吹得慢慢干一点
+    private(set) var wetness: Double = 0
 
     init(timeline: JumpTimeline = JumpTimeline(), realHands: Bool, autopilot: Autopilot?) {
         self.timeline = timeline
@@ -65,16 +71,23 @@ final class JumpSession {
         if pinchesBegan > 0, timeline.phase == .landed { timeline.requestEnd() }
 
         timeline.step(dt)
+        updateDisplayHeading()
 
         let v = timeline.rainVelocity
         rainOffset += SIMD3(Float(v.x), Float(v.y), Float(v.z)) * Float(dt)
         rainOffset -= (rainOffset / Self.rainBox).rounded(.down) * Self.rainBox
+        let air = timeline.airVelocity
+        mistOffset += SIMD3(Float(air.x), Float(air.y), Float(air.z)) * Float(dt)
+        mistOffset -= (mistOffset / Self.mistBox).rounded(.down) * Self.mistBox
+        let soak = timeline.rainIntensity * 0.1 + timeline.inCloudDeck * 0.06
+        wetness = soak > 0.005 ? min(1, wetness + soak * dt) : max(0, wetness - 0.004 * dt)
 
         if !handsDriving {
             // 没有真手去拉：拉手开伞后就没了；操纵环按刹车量往下移，看起来是被拉下去的
-            if timeline.deployTime != nil {
+            if timeline.deployTime != nil, !interaction.handlePulled {
                 interaction.handlePulled = true
-                interaction.handle = nil
+                interaction.pulledRing = 1
+                interaction.rings[1] = nil
             }
             let rest = layout.toggleRest
             interaction.toggles = (rest.0 - SIMD3(0, Float(timeline.brakeLeft) * 0.32, 0),
@@ -137,6 +150,19 @@ final class JumpSession {
 
     // MARK: - 给画面用
 
+    /// 分段转向（防晕）：画面上的航向一次跳 15°，中间不连续转（飞行本身照样连续转）
+    var snapTurns = false
+    static let snapStep = 15.0 * .pi / 180
+    /// 画面用的航向：平滑转向时就是真的航向；分段转向时差出一格才跳一格
+    private(set) var displayHeading: Double = 0
+
+    private func updateDisplayHeading() {
+        let h = timeline.heading
+        guard snapTurns else { displayHeading = h; return }
+        let steps = ((h - displayHeading) / Self.snapStep).rounded(.towardZero)
+        if steps != 0 { displayHeading += steps * Self.snapStep }
+    }
+
     func objects(layout: BodyLayout, hands: [HandPose], watchOnLeft: Bool, proxyHands: Bool = false,
                  gloves: Bool = false, head: SIMD3<Float>? = nil) -> SceneObjects {
         var o = SceneObjects.make(SceneObjects.Input(timeline: timeline, eyeHeight: layout.anchor.y, layout: layout,
@@ -150,7 +176,7 @@ final class JumpSession {
         o.reveal = SIMD4(Float(c.x), Float(c.y), Float(c.z), radius)
         if timeline.scene.hasTerrain {
             o.terrain = TerrainFrame(scene: timeline.scene, groundOrigin: timeline.groundPosition,
-                                     stageToAltitude: timeline.altitude - timeline.eyeHeight, heading: timeline.heading)
+                                     stageToAltitude: timeline.altitude - timeline.eyeHeight, heading: displayHeading)
         }
         let rain = Float(timeline.rainIntensity)
         if rain > 0.005 {
@@ -161,7 +187,52 @@ final class JumpSession {
                                   center: SIMD4(head ?? layout.anchor, Self.rainDrops),
                                   box: SIMD4(Self.rainBox, 0, 0, 0))
         }
+        if timeline.phase != .cabin, timeline.phase != .exit, timeline.landedTime == nil, timeline.inCloudBand {
+            let v = timeline.airVelocity
+            o.mist = RainUniforms(offset: SIMD4(mistOffset, 1),
+                                  velocity: SIMD4(Float(v.x), Float(v.y), Float(v.z), 0.02),
+                                  center: SIMD4(head ?? layout.anchor, Self.mistPuffs),
+                                  box: SIMD4(Self.mistBox, 0, 0, 0))
+        }
+        o.wetness = Float(wetness)
         return o
+    }
+
+    /// 头盔 HUD 的读数（HelmetHUD）：开场实体化完成以后才开机
+    var hudState: HelmetHUD.State {
+        let t = timeline
+        var h = HelmetHUD.State()
+        if let grabbed = t.barGrabbedTime {
+            h.boot = Float((t.time - grabbed - JumpTimeline.revealDuration) / 1.4)
+        }
+        switch t.phase {
+        case .cabin: h.phase = t.greenLight ? "READY" : "STANDBY"
+        case .exit: h.phase = "EXIT"
+        case .freefall: h.phase = "FREEFALL"
+        case .opening: h.phase = "DEPLOY"
+        case .canopy: h.phase = "CANOPY"
+        case .landed, .done: h.phase = "LANDED"
+        }
+        h.altitudeFeet = t.altitudeFeet
+        h.aglMeters = Int(max(t.terrainClearance, 0))
+        h.fallSpeedKmh = Int(max(t.verticalSpeed, 0) * 3.6)
+        h.alarm = t.alarmLevel
+        h.headingDeg = Float(-displayHeading * 180 / .pi)
+        if t.phase != .cabin {
+            let d = t.scene.target - t.groundPosition
+            let c = cos(displayHeading), sn = sin(displayHeading)
+            let local = SIMD2(d.x * c - d.y * sn, d.x * sn + d.y * c)
+            h.targetBearingDeg = Float(atan2(local.x, -local.y) * 180 / .pi)
+            h.targetDistance = Int(length(d))
+        }
+        h.groundSpeedKmh = Int(length(t.velocity) * 3.6)
+        h.brakes = SIMD2(Float(t.brakeLeft), Float(t.brakeRight))
+        h.underCanopy = t.phase == .opening || t.phase == .canopy
+        h.inCabin = t.phase == .cabin
+        h.greenLight = t.greenLight
+        h.hint = hint
+        h.time = Float(t.time)
+        return h
     }
 
     /// 浮在面前的提示（空 = 不显示）
@@ -183,7 +254,7 @@ final class JumpSession {
         case .freefall:
             if let until = tooEarlyUntil, t.time < until { return "还没到开伞高度\n等手表报警再拉" }
             if t.alarmLevel > 0 {
-                return usesRealHands ? "开伞！\n右手抓住胸前的红色拉手，往外拉" : "开伞！捏一下手指"
+                return usesRealHands ? "开伞！\n抓住大臂上的红色拉环，往外拉（左右都行）" : "开伞！捏一下手指"
             }
             if let left = t.leftRampTime, t.time - left < 6 { return "手表在 3,500 英尺报警，那时再开伞" }
             return ""
@@ -209,6 +280,12 @@ final class JumpSession {
         case .landed, .done:
             return resultSummary.map { $0 + "\n捏一下手指结束" } ?? ""
         }
+    }
+
+    /// 落地结果（开始窗口里用图标显示）；还没落地是 nil
+    var jumpResult: JumpResult? {
+        guard let outcome = timeline.outcome, let summary = resultSummary else { return nil }
+        return JumpResult(scene: timeline.scene, outcome: outcome, distance: timeline.landingDistance, summary: summary)
     }
 
     /// 落地结果（一句话）；还没落地是 nil
@@ -277,5 +354,33 @@ struct PanelPlacer {
         let up = cross(right, direction)
         return PanelUniforms(center: SIMD4(head + direction * Self.distance, Float(width) * Self.metersPerPixel),
                              right: SIMD4(right, Float(height) * Self.metersPerPixel), up: SIMD4(up, opacity))
+    }
+}
+
+/// 一跳的结果：开始窗口里显示成一个图标（加离靶心多远），一句话的说明看着它时弹出来
+struct JumpResult: Sendable {
+    let scene: JumpScene
+    let outcome: JumpTimeline.Outcome
+    /// 离靶心多远（米）
+    let distance: Double
+    let summary: String
+
+    var won: Bool { outcome == .bullseye || outcome == .inTarget }
+    /// 平安落地（离靶心多远才有意义）
+    var landed: Bool { [.bullseye, .inTarget, .missed, .water, .trees].contains(outcome) }
+
+    var symbol: String {
+        switch outcome {
+        case .bullseye: "scope"
+        case .inTarget: "target"
+        case .missed: "figure.stand"
+        case .water: "water.waves"
+        case .crashed: "exclamationmark.triangle.fill"
+        case .terrain: "mountain.2.fill"
+        case .trees: "tree.fill"
+        case .lava: "flame.fill"
+        case .crevasse: "snowflake"
+        case .plume: "smoke.fill"
+        }
     }
 }

@@ -223,34 +223,29 @@ enum Gear {
 
     // MARK: - 身上的背带（不动，身体坐标里算一次）
 
-    /// 主承重带（左右各一条，从肩膀上方顺着胸口往下到胯）的控制点
-    static func mainLiftWeb(_ side: Float) -> [SIMD3<Float>] {
-        [SIMD3(0.13 * side, -0.16, 0.06), SIMD3(0.135 * side, -0.21, -0.02), SIMD3(0.127 * side, -0.30, -0.085),
-         SIMD3(0.12 * side, -0.40, -0.115), SIMD3(0.117 * side, -0.50, -0.128), SIMD3(0.12 * side, -0.60, -0.122),
-         SIMD3(0.127 * side, -0.72, -0.10)]
-    }
-
     /// 3 环释放装置的位置（肩膀前面，伸缩带从这里接出来）
     static func threeRingPoint(_ side: Float) -> SIMD3<Float> { SIMD3(0.15 * side, -0.19, -0.015) }
 
-    /// 开伞拉手平时的位置：右边主承重带上、胸口下面（BodyLayout.handleRest）
-    static let handleRest = SIMD3<Float>(0.125, -0.50, -0.15)
+    /// 开伞拉环平时挂的地方：左右大臂的前外侧（肩下约 9 厘米），两边都能拉（BodyLayout.ringRest）
+    static func ringRest(_ side: Float) -> SIMD3<Float> { SIMD3(0.215 * side, -0.325, -0.06) }
+    /// 拉环挂在肩带末端的一小块布片上（布片中心）
+    static func ringTab(_ side: Float) -> SIMD3<Float> { SIMD3(0.212 * side, -0.283, -0.058) }
 
-    /// 钢索软管：从拉手上沿出来，贴着右边的主承重带往上，过 3 环旁边绕到肩后（伞包在背上）
-    static let housingPath: [SIMD3<Float>] = spline([
-        SIMD3(0.10, -0.476, -0.141), SIMD3(0.108, -0.43, -0.131), SIMD3(0.113, -0.36, -0.113),
-        SIMD3(0.12, -0.28, -0.083), SIMD3(0.128, -0.21, -0.03), SIMD3(0.135, -0.17, 0.03),
-    ], steps: 5)
+    /// 肩带：从背后翻过肩膀，经过 3 环，顺着大臂前面垂到拉环的布片（胸前不再有带子挡着往下看）
+    static func yoke(_ side: Float) -> [SIMD3<Float>] {
+        spline([SIMD3(0.13 * side, -0.165, 0.11), SIMD3(0.145 * side, -0.14, 0.035), SIMD3(0.163 * side, -0.168, -0.022),
+                SIMD3(0.196 * side, -0.228, -0.05), SIMD3(0.211 * side, -0.27, -0.057)], steps: 5)
+    }
 
-    /// 背带：两条主承重带、胸带和卡扣（拉紧后多出来的一截垂在左边）、肩上的 3 环（大中小三个环套在一起）
+    /// 身上不动的装备：两条肩带、肩上的 3 环（大中小三个环套在一起）、拉环的布片、钢索软管
     static let harness: [MeshVertex] = {
         var v: [MeshVertex] = []
         v.reserveCapacity(12000)
         for side: Float in [-1, 1] {
-            let pts = spline(mainLiftWeb(side), steps: 4)
-            ribbon(&v, points: pts, across: pts.map { _ in SIMD3(1, 0, 0) }, width: 0.044, thickness: 0.004,
+            let path = yoke(side)
+            ribbon(&v, points: path, across: path.map { _ in SIMD3(1, 0, 0) }, width: 0.04, thickness: 0.0045,
                    color: webbing)
-            // 3 环：大环套在背带的环扣上，中环、小环依次往上套
+            // 3 环：大环套在肩带的环扣上，中环、小环依次往上套
             let base = threeRingPoint(side)
             let forward = SIMD3<Float>(0.15 * side, 0.1, -1)
             ring(&v, center: base, axis: forward, radii: SIMD2(0.021, 0.021), tube: 0.0042, color: metal)
@@ -258,34 +253,17 @@ enum Gear {
                  tube: 0.0035, color: metal)
             ring(&v, center: base + SIMD3(0.005 * side, 0.040, -0.007), axis: forward, radii: SIMD2(0.0075, 0.0075),
                  tube: 0.003, color: metal)
-        }
-        // 胸带：横过胸口，稍微往前拱
-        let chest = spline([SIMD3(-0.125, -0.345, -0.103), SIMD3(-0.06, -0.35, -0.114), SIMD3(0, -0.352, -0.118),
-                            SIMD3(0.06, -0.35, -0.114), SIMD3(0.125, -0.345, -0.103)], steps: 4)
-        ribbon(&v, points: chest, across: chest.map { _ in SIMD3(0, 1, 0) }, width: 0.038, thickness: 0.004,
-               color: webbing)
-        // 卡扣（摩擦调节扣）：一块圆角的金属，中间压着带子
-        pillow(&v, center: SIMD3(-0.072, -0.35, -0.118), axes: (SIMD3(1, 0, -0.15), SIMD3(0, 1, 0), SIMD3(0.15, 0, 1)),
-               half: SIMD3(0.012, 0.024, 0.005), exponent: 0.25, color: metal, material: .metal, segments: 16, rings: 8)
-        // 拉紧以后多出来的那截：从卡扣往左下垂
-        let tail = spline([SIMD3(-0.08, -0.35, -0.122), SIMD3(-0.108, -0.358, -0.121), SIMD3(-0.13, -0.39, -0.122),
-                           SIMD3(-0.138, -0.44, -0.128)], steps: 4)
-        ribbon(&v, points: tail, across: tail.map { _ in SIMD3(0, 0.3, 1) }, width: 0.036, thickness: 0.004,
-               color: webbing)
-        // 拉手的口袋：主承重带上缝的一块织带，拉手塞在里面（拉出来以后还在）
-        pillow(&v, center: handleRest + SIMD3(0.002, -0.004, 0.013), axes: (SIMD3(1, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, 1)),
-               half: SIMD3(0.047, 0.027, 0.0065), exponent: 0.22, color: webbing * 1.4, material: .webbing,
-               segments: 20, rings: 8)
-        // 钢索软管（黑色）：口上一圈金属箍
-        tube(&v, points: housingPath, radius: 0.0045, color: housingBlack, material: .plastic, sides: 12)
-        // 软管两头的金属箍
-        let n = housingPath.count
-        for (end, next) in [(housingPath[0], housingPath[1]), (housingPath[n - 1], housingPath[n - 2])] {
-            let dir = simd_normalize(next - end)
-            ring(&v, center: end + dir * 0.004, axis: dir, radii: SIMD2(0.0047, 0.0047), tube: 0.0016,
+            // 拉环的布片：缝在肩带末端，拉环从它下沿穿过去
+            pillow(&v, center: ringTab(side), axes: (SIMD3(1, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, 1)),
+                   half: SIMD3(0.013, 0.017, 0.0045), exponent: 0.25, color: webbing * 1.5, material: .webbing,
+                   segments: 16, rings: 8)
+            // 钢索软管：贴着肩带外侧翻过肩膀，到背后的伞包
+            let housing = path.reversed().map { p -> SIMD3<Float> in p + SIMD3(0.012 * side, 0.004, 0) }
+            tube(&v, points: Array(housing.dropLast(2)), radius: 0.0042, color: housingBlack, material: .plastic,
+                 sides: 12)
+            let mouth = housing[housing.count - 3], dir = simd_normalize(housing[housing.count - 4] - mouth)
+            ring(&v, center: mouth + dir * 0.004, axis: dir, radii: SIMD2(0.0045, 0.0045), tube: 0.0015,
                  color: metal, segments: 14, sides: 6)
-            lathe(&v, base: end - dir * 0.0005, axis: dir, profile: [SIMD2(0.0002, 0), SIMD2(0.0045, 0.0003)],
-                  color: housingBlack, material: .plastic, segments: 12)
         }
         return v
     }()
@@ -335,17 +313,17 @@ enum Gear {
     }()
 
     /// 落地以后的伸缩带：没有伞拉着，从 3 环垂到胸前。返回左右两个连接环的位置（舞台空间），伞绳从这里拖到地上
-    static func slackRisers(_ out: inout [MeshVertex], anchor: SIMD3<Float>) -> (SIMD3<Float>, SIMD3<Float>) {
+    static func slackRisers(_ out: inout [MeshVertex], layout: BodyLayout) -> (SIMD3<Float>, SIMD3<Float>) {
         var ends: [SIMD3<Float>] = []
         for side: Float in [-1, 1] {
-            let base = anchor + threeRingPoint(side) + SIMD3(0.005 * side, 0.03, -0.01)
-            let end = anchor + SIMD3(0.17 * side, -0.36, -0.2)
-            let pts = spline([base, base + SIMD3(0.02 * side, 0.05, -0.05), base + SIMD3(0.025 * side, -0.02, -0.14), end],
-                             steps: 5)
-            ribbon(&out, points: pts, across: pts.map { _ in SIMD3(1, 0, 0) }, width: 0.025, thickness: 0.008,
-                   color: webbing)
-            ring(&out, center: end + SIMD3(0, -0.012, 0), axis: SIMD3(1, 0, 0), radii: SIMD2(0.008, 0.016),
-                 tube: 0.0028, color: metal, segments: 20, sides: 7, spin: SIMD3(0, 0, 1))
+            let base = threeRingPoint(side) + SIMD3(0.005 * side, 0.03, -0.01)
+            let end = layout.place(SIMD3(0.17 * side, -0.36, -0.2))
+            let pts = spline([base, base + SIMD3(0.02 * side, 0.05, -0.05), base + SIMD3(0.025 * side, -0.02, -0.14),
+                              SIMD3(0.17 * side, -0.36, -0.2)].map(layout.place), steps: 5)
+            ribbon(&out, points: pts, across: pts.map { _ in layout.direction(SIMD3(1, 0, 0)) }, width: 0.025,
+                   thickness: 0.008, color: webbing)
+            ring(&out, center: end + SIMD3(0, -0.012, 0), axis: layout.direction(SIMD3(1, 0, 0)), radii: SIMD2(0.008, 0.016),
+                 tube: 0.0028, color: metal, segments: 20, sides: 7, spin: layout.direction(SIMD3(0, 0, 1)))
             ends.append(end + SIMD3(0, -0.026, 0))
         }
         return (ends[0], ends[1])
@@ -363,22 +341,37 @@ enum Gear {
 
     // MARK: - 跟着手、伞走的（每帧）
 
-    /// 开伞拉手：一个红色的软枕头（真的学员装备就是这种），背面连着钢索，钢索穿在软管里（软管是背带的一部分）。
-    /// 拉出来以后钢索从软管口露出来一截。handle 是拉手现在的位置（舞台空间），anchor 是身体原点。
-    static func handle(_ out: inout [MeshVertex], at handle: SIMD3<Float>, anchor: SIMD3<Float>, glow: Float) {
-        let rest = anchor + handleRest
-        let mouth = anchor + housingPath[0]
-        if simd_length(handle - rest) > 0.008 {
-            // 钢索：软管口 → 拉手背面，稍微往下垂一点
-            let back = handle + SIMD3(-0.02, 0.012, 0.008)
-            let mid = (mouth + back) * 0.5 + SIMD3(0, -0.006, 0)
-            tube(&out, points: spline([mouth, mid, back], steps: 6), radius: 0.0012, color: metal,
-                 material: .metal, sides: 6)
+    /// 开伞拉环：一个金属环，下半圈套着红色的橡胶握把，挂在大臂前面的布片上；背面的钢索穿进肩带上的软管。
+    /// 拉出来以后钢索从布片露出来一截。at 是拉环现在的位置（舞台空间），anchor 是身体原点。
+    static func pullRing(_ out: inout [MeshVertex], side: Float, at center: SIMD3<Float>, layout: BodyLayout,
+                         glow: Float) {
+        let rest = layout.ringRest(side)
+        let tab = layout.place(ringTab(side))
+        let up = SIMD3<Float>(0, 1, 0)
+        let facing = layout.direction(simd_normalize(SIMD3<Float>(0.45 * side, 0.05, -1)))
+        if simd_length(center - rest) > 0.008 {
+            // 钢索：布片 → 环的上沿，稍微往下垂一点
+            let top = center + up * 0.032
+            let mid = (tab + top) * 0.5 + SIMD3(0, -0.008, 0)
+            tube(&out, points: spline([tab + SIMD3(0, -0.012, 0), mid, top], steps: 6), radius: 0.0012,
+                 color: metal, material: .metal, sides: 6)
         }
-        // 枕头：Cordura 布面，四周一圈压线（uv.v 接近上下边的地方，shader 里画不出来，用略深的颜色带过）
-        pillow(&out, center: handle, axes: (SIMD3(1, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, -1)),
-               half: SIMD3(0.04, 0.022, 0.012), exponent: 0.32, color: handleRed * glow, material: .webbing,
-               segments: 28, rings: 14)
+        let a: Float = 0.034, b: Float = 0.029                 // 竖着长一点的环（像 D 形环）
+        ring(&out, center: center, axis: facing, radii: SIMD2(a, b), tube: 0.0042, color: metal,
+             segments: 36, sides: 10, spin: up)
+        // 下半圈的红色握把：粗一点的橡胶套
+        let e1 = simd_normalize(up - simd_dot(up, facing) * facing), e2 = simd_cross(facing, e1)
+        var grip: [SIMD3<Float>] = []
+        for k in 0...16 {
+            let t = Float.pi * (0.62 + 0.76 * Float(k) / 16)
+            grip.append(center + e1 * (cos(t) * a) + e2 * (sin(t) * b))
+        }
+        tube(&out, points: grip, radius: 0.0085, color: handleRed * glow, material: .rubber, sides: 14)
+        let n = grip.count
+        for (end, next) in [(grip[0], grip[1]), (grip[n - 1], grip[n - 2])] {
+            ring(&out, center: end, axis: simd_normalize(next - end), radii: SIMD2(0.0088, 0.0088), tube: 0.0012,
+                 color: housingBlack, material: .plastic, segments: 14, sides: 5)
+        }
     }
 
     /// 操纵环：一圈硬挺的织带围成的椭圆环（黄色），顶上一小块黑色的布片，操纵绳拴在布片上。

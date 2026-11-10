@@ -80,6 +80,8 @@ struct JumpTimeline {
     /// 航向（弧度）：0 = 起跳时面朝的方向，正 = 往左转
     private(set) var heading: Double = 0
     private(set) var turnRate: Double = 0
+    /// 转向的中间级（两级滞后，见 fly）
+    private var turnRateMid: Double = 0
     /// 机舱地板原点相对舞台原点的位置：你站在跳板上，飞机原点在你身后
     private(set) var planeOffset = SIMD3<Double>(0, 0, ProceduralMeshes.standOnRamp)
     /// 第一次抓住扶杆的时刻：开场的「实体化」从这时开始，结束后再过一会儿亮绿灯
@@ -261,7 +263,11 @@ struct JumpTimeline {
     private mutating func fly(_ dt: Double) {
         let both = min(brakeLeft, brakeRight)
         let targetTurn = Self.maxTurnRate * (brakeLeft - brakeRight)       // 拉左边往左转（heading 增大）
-        turnRate += (targetTurn - turnRate) * min(dt / 0.6, 1)             // 伞转起来有个过程
+        // 伞转起来、停下来都有个过程：两级一阶滞后（S 形），角加速度是慢慢起来的，不会一拉就猛地开始转。
+        // VR 里转向晕主要来自角加速度的突变，转得匀不怎么晕
+        let k = min(dt / 0.32, 1)
+        turnRateMid += (targetTurn - turnRateMid) * k
+        turnRate += (turnRateMid - turnRate) * k
         heading += turnRate * dt
         var speed = Self.canopySpeed * (1 - 0.45 * both)
         var sink = Self.canopySink * (1 - 0.25 * both) + abs(turnRate) / Self.maxTurnRate * 2.5
@@ -423,6 +429,28 @@ struct JumpTimeline {
 
     /// 你这里的雨有多大
     var rainIntensity: Double { Self.rain(at: position, altitude: altitude - scene.cloudOffset) }
+
+    /// 你是不是在那层碎积云里（0…1，粗估：和 Freefall.metal 天气图里的 inDeck 一样按 deckMask 算，高度在云底和云顶之间）。
+    /// 只用来算身上淋湿得多快；身边的雾团按真的云密度在 GPU 上算
+    var inCloudDeck: Double {
+        let d = (position - Self.deckCenter) / Self.deckAxes
+        let inDeck = Self.smoothstep((exp(-dot(d, d)) - 0.15) / 0.4)
+        let h = altitude - scene.cloudOffset
+        return inDeck * Self.smoothstep((h - 2350) / 150) * Self.smoothstep((3250 - h) / 150)
+    }
+
+    /// 你在有云的那几千米里（云层底到顶，含整体抬高的部分）：身边才可能有雾团
+    var inCloudBand: Bool {
+        let h = altitude - scene.cloudOffset
+        return h > 900 && h < 8700
+    }
+
+    /// 空气相对你的速度（舞台空间，m/s）：云和你一起随风漂，所以只是你自己速度的反方向（往下掉 → 雾往上掠）
+    var airVelocity: SIMD3<Double> {
+        let relative = SIMD3<Double>(-velocity.x, verticalSpeed, -velocity.y)
+        let c = cos(heading), s = sin(heading)
+        return SIMD3(relative.x * c - relative.z * s, relative.y, relative.x * s + relative.z * c)
+    }
 
     /// 雨相对你的速度（舞台空间，m/s）：雨往下落（顺风稍微斜一点），你掉得比它快得多，所以雨是往上走的
     var rainVelocity: SIMD3<Double> {

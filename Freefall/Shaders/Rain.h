@@ -63,6 +63,8 @@ struct RainOut {
     float4 position [[position]];
     float alpha;
     float across;      // -1..1，横过雨丝，做软边
+    float along;       // 0 头（雨滴现在的位置）… 1 尾巴
+    float sparkle;     // 这颗水珠亮不亮（大的、正好折射到亮处的闪一下）
 };
 
 /// 一根雨丝 = 一个实例的 4 个顶点（三角带）：头（雨滴现在的位置）和尾（往相对速度反方向拖一帧的距离），
@@ -74,8 +76,13 @@ vertex RainOut rainVertex(uint vid [[vertex_id]],
                           constant RainUniforms &R [[buffer(1)]]) {
     RainOut o;
     o.across = (vid & 1u) ? 1.0f : -1.0f;
+    o.along = (vid >> 1u) != 0u ? 1.0f : 0.0f;
     float size = R.box.x;
     float3 seed = float3(pcg3d(uint3(iid, iid * 7u + 3u, 0x51u))) * (1.0f / 4294967296.0f);
+    // 水珠有大有小：大多是一两毫米的小雨滴，少数三四毫米的大颗（更粗、更亮）
+    float3 seed2 = float3(pcg3d(uint3(iid * 13u + 9u, iid, 0xA7u))) * (1.0f / 4294967296.0f);
+    float drop = mix(0.0008f, 0.0038f, seed2.x * seed2.x * seed2.x);
+    o.sparkle = (0.65f + 0.7f * seed2.y) * (seed2.z > 0.93f ? 2.6f : 1.0f) * mix(0.8f, 1.5f, drop / 0.0038f);
     float3 local = (fract(seed + R.offset.xyz / size) - 0.5f) * size;
     float3 head = R.center.xyz + local;
     float3 tail = head - R.velocity.xyz * R.velocity.w;
@@ -98,12 +105,12 @@ vertex RainOut rainVertex(uint vid [[vertex_id]],
     float2 n = float2(-dir.y, dir.x);
     bool isTail = (vid >> 1u) != 0u;
     float4 c = isTail ? cb : ca;
-    // 雨滴约 2 毫米粗：画出来至少 1.4 个像素宽，细的部分折成透明度
-    float trueWidth = 0.002f * v.viewProjection[1][1] * halfVP.y / c.w;
+    // 按这颗水珠的粗细：画出来至少 1.4 个像素宽，细的部分折成透明度
+    float trueWidth = drop * v.viewProjection[1][1] * halfVP.y / c.w;
     float width = max(trueWidth, 1.4f);
     o.position = c;
     o.position.xy += n * (o.across * width * 0.5f) / halfVP * c.w;
-    o.alpha = fade * min(trueWidth / width * 2.5f, 1.0f) * (isTail ? 0.15f : 1.0f);
+    o.alpha = fade * min(trueWidth / width * 2.5f, 1.0f) * (isTail ? 0.12f : 1.0f);
     return o;
 }
 
@@ -111,9 +118,87 @@ fragment float4 rainFragment(RainOut in [[stage_in]],
                              constant FrameUniforms &F [[buffer(1)]],
                              constant AtmosphereConstants &A [[buffer(2)]],
                              constant RainUniforms &R [[buffer(3)]]) {
-    float a = in.alpha * (1.0f - in.across * in.across) * 0.6f * saturate(R.offset.w * 2.0f);
-    // 雨滴把周围的天光（在云里是白亮的云光）折射、反射过来
-    float3 radiance = A.skyIrradianceSea.rgb / PI * 2.2f + A.sunAtCloudBase.rgb * 0.03f;
+    // 头上是一颗亮的水珠，后面拖着越来越细的尾巴（运动模糊），中间一条亮芯（水珠把亮处折射过来）
+    float taper = 1.0f - 0.7f * in.along;
+    float core = saturate(1.0f - abs(in.across) / max(taper, 0.05f));
+    float head = exp(-in.along * 9.0f);
+    float a = in.alpha * (core * core * (0.6f + 0.9f * head)) * 0.55f * saturate(R.offset.w * 2.0f) * in.sparkle;
+    // 雨滴把周围的天光（在云里是白亮的云光）折射、反射过来，有一点偏蓝
+    float3 radiance = (A.skyIrradianceSea.rgb / PI * 2.2f + A.sunAtCloudBase.rgb * 0.03f) * float3(0.92f, 0.97f, 1.04f);
     float3 c = tonemap(radiance * F.exposure.x) * F.camera.z;
     return float4(c * a, 0.0f);     // 叠加上去
+}
+
+// MARK: - 身边的雾团
+
+/// 在云里往下掉：一团团雾从脚下往上嗖嗖地掠过去，云越浓越多（按这团所在地方真的云密度算，晴的地方就没有）。
+/// 一个实例 = 一个朝着眼睛、顺着相对速度拉长的方片（三角带 4 个顶点），在你周围一个盒子里循环（同雨丝）。
+/// RainUniforms 复用：offset 累计位移 + 强度，velocity 空气相对你的速度 + 拉长时长，center 你的头 + 个数，box.x 盒子边长
+struct MistOut {
+    float4 position [[position]];
+    float2 uv;           // -1..1，方片上的位置
+    float alpha;
+    float shade;         // 这团亮一点还是暗一点
+    float seed;
+};
+
+vertex MistOut mistVertex(uint vid [[vertex_id]],
+                          uint iid [[instance_id]],
+                          ushort amp [[amplification_id]],
+                          constant ViewUniforms *views [[buffer(0)]],
+                          constant RainUniforms &R [[buffer(1)]],
+                          constant FrameUniforms &F [[buffer(2)]],
+                          texture2d<float> weather [[texture(0)]],
+                          texture3d<float> baseNoise [[texture(1)]]) {
+    MistOut o;
+    float size = R.box.x;
+    float3 seed = float3(pcg3d(uint3(iid * 3u + 1u, iid * 11u + 5u, 0x7Au))) * (1.0f / 4294967296.0f);
+    float3 local = (fract(seed + R.offset.xyz / size) - 0.5f) * size;
+    float3 center = R.center.xyz + local;
+    float dist = length(local);
+    // 离脸太近的不画（贴脸难受），盒子边上的淡掉
+    float fade = smoothstep(1.5f, 4.0f, dist) * (1.0f - smoothstep(size * 0.3f, size * 0.47f, dist));
+    // 这一团所在的地方有多少云：舞台按航向转到世界，再加上你在云坐标里的位置
+    float3 w = rotateHeading(float3(center.x, 0.0f, center.z), F.heading.x, F.heading.y);
+    float3 p = float3(w.x + F.ground.x, F.camera.x + center.y, w.z + F.ground.z);
+    Weather wt = sampleWeather(p.xz, weather, F.world.y);
+    float density = cloudDensity(p, wt, baseNoise, baseNoise, false, 0.0f);
+    float a = fade * smoothstep(0.02f, 0.35f, density) * R.offset.w;
+    o.uv = float2((vid & 1u) ? 1.0f : -1.0f, (vid >> 1u) ? 1.0f : -1.0f);
+    if (a < 0.004f) {
+        o.position = float4(0.0f, 0.0f, -2.0f, 1.0f);      // 在裁剪范围外，丢掉
+        o.alpha = 0.0f;
+        o.shade = 0.0f;
+        o.seed = 0.0f;
+        return o;
+    }
+    ViewUniforms v = views[amp];
+    float3 toEye = normalize(v.cameraPosition.xyz - center);
+    float speed = length(R.velocity.xyz);
+    float3 along = speed > 0.1f ? R.velocity.xyz / speed : float3(0.0f, 1.0f, 0.0f);
+    along -= dot(along, toEye) * toEye;
+    along = length(along) > 1e-3f ? normalize(along) : normalize(cross(toEye, float3(1.0f, 0.0f, 0.0f)));
+    float3 side = normalize(cross(along, toEye));
+    float radius = mix(1.3f, 3.4f, seed.y);
+    float stretch = 1.0f + min(speed * R.velocity.w, 2.2f);
+    float3 pos = center + side * (o.uv.x * radius) + along * (o.uv.y * radius * stretch);
+    o.position = v.viewProjection * float4(pos, 1.0f);
+    o.alpha = a;
+    o.shade = 0.85f + 0.4f * seed.z;
+    o.seed = seed.x * 61.0f;
+    return o;
+}
+
+fragment float4 mistFragment(MistOut in [[stage_in]],
+                             constant FrameUniforms &F [[buffer(1)]],
+                             constant AtmosphereConstants &A [[buffer(2)]]) {
+    float r2 = dot(in.uv, in.uv);
+    if (r2 >= 1.0f || in.alpha <= 0.0f) discard_fragment();
+    // 软边 + 絮状（两层便宜的值噪声），不是一个个圆片
+    float n = revealNoise(float3(in.uv * 2.3f, in.seed)) * 0.6f + revealNoise(float3(in.uv * 5.7f, in.seed + 3.7f)) * 0.4f;
+    float a = in.alpha * smoothstep(1.0f, 0.1f, r2) * saturate(n * 1.7f - 0.3f) * 0.6f;
+    // 云里四面八方都是被云散开的光：上面亮一点、下面暗一点；有的团亮、有的暗，才看得出一团团在动
+    float3 L = A.skyIrradianceSea.rgb / PI * 0.95f + A.sunAtCloudBase.rgb * 0.03f;
+    float3 c = tonemap(L * in.shade * (0.92f + 0.12f * in.uv.y) * F.exposure.x) * F.camera.z;
+    return float4(c * a, a);
 }

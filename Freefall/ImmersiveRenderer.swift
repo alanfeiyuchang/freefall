@@ -38,6 +38,8 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var timeline: JumpTimeline { session.timeline }
     private let panel: TextPanel
     private var panelPlacer = PanelPlacer()
+    /// 头盔 HUD（开机以后提示文字也在它下沿，前面那块浮动面板只在开机以前用）
+    private let helmet: HelmetHUD
     private var lastFrameTime: CFTimeInterval?
     /// ImmersiveSpace 原点 → 舞台（跳的那一刻脚下、面朝的方向）。拿到头部位姿的第一帧定下来。
     private var stageFromOrigin: simd_float4x4?
@@ -51,6 +53,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var wasHoldingBar = false
     private var grabsHeard = 0
     private var dingSent = false
+    private var bodyYaw = BodyYaw()
     private var revealSent = false
     private var deploySent = false
     private var landingSent = false
@@ -62,7 +65,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var lastQualityChange: CFTimeInterval = 0
     private var lastStatsLog: CFTimeInterval = 0
 
-    init(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool,
+    init(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool, snapTurns: Bool,
          jumpScene: JumpScene) throws {
         self.layerRenderer = layerRenderer
         self.handsEnabled = handsEnabled && HandTrackingProvider.isSupported
@@ -79,20 +82,22 @@ final class ImmersiveRenderer: @unchecked Sendable {
                                   maxViewCount: layerRenderer.properties.viewCount,
                                   queue: queue, scene: jumpScene, gloveDirectory: Bundle.main.resourceURL)
         panel = TextPanel(device: device)
+        helmet = HelmetHUD(device: device)
         audio = DebugOptions.mute ? nil : JumpAudio()
         session = JumpSession(timeline: DebugOptions.startAltitude.map { JumpTimeline(freefallFrom: $0, scene: jumpScene) }
                                   ?? JumpTimeline(scene: jumpScene),
                               realHands: self.handsEnabled,
                               autopilot: DebugOptions.autopilot ? Autopilot(deployFeet: DebugOptions.autoDeployFeet) : nil)
+        session.snapTurns = snapTurns
     }
 
     @MainActor
     static func start(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool,
-                      scene: JumpScene) {
+                      snapTurns: Bool, scene: JumpScene) {
         let renderer: ImmersiveRenderer
         do {
             renderer = try ImmersiveRenderer(layerRenderer, handsEnabled: handsEnabled, watchOnLeft: watchOnLeft,
-                                             gloves: gloves, jumpScene: scene)
+                                             gloves: gloves, snapTurns: snapTurns, jumpScene: scene)
         } catch {
             log.error("无法创建渲染器：\(error.localizedDescription)")
             return
@@ -170,7 +175,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
             if layerRenderer.state == .invalidated {
                 Self.log.info("Layer invalidated")
                 audio?.stop()
-                let result = session.resultSummary
+                let result = session.jumpResult
                 Task { @MainActor in AppModel.shared.fallEnded(result: result) }
                 return
             } else if layerRenderer.state == .paused {
@@ -226,8 +231,15 @@ final class ImmersiveRenderer: @unchecked Sendable {
             if let r = Self.handPose(right, stageFromOrigin: stage) { hands.append(r) }
         }
 
-        // 身体（背带、拉手、操纵环）跟着头的水平位置走，高度按起跳时的眼高
-        let layout = BodyLayout(anchor: SIMD3(head.x, eyeHeight, head.z))
+        // 身体（肩带、拉环、操纵环）：朝向按头和两只手猜（伞下锁正前方）；位置跟着脖子走，
+        // 只转头的时候眼睛绕着脖子转，身体不跟着平移
+        let underCanopy = timeline.phase == .opening || timeline.phase == .canopy
+        let yaw = bodyYaw.update(head: head, headForward: headForward, hands: hands, dt: Float(dt), locked: underCanopy)
+        var flatForward = SIMD3<Float>(headForward.x, 0, headForward.z)
+        flatForward = length(flatForward) > 1e-3 ? normalize(flatForward) : SIMD3(0, 0, -1)
+        let neck = SIMD3<Float>(head.x, eyeHeight, head.z) - flatForward * 0.09
+        let bodyForward = SIMD3<Float>(-sin(yaw), 0, -cos(yaw))
+        let layout = BodyLayout(anchor: neck + bodyForward * 0.09, yaw: yaw)
         // 等对齐好头部朝向再开始（第一帧之前时间不走）
         if stageFromOrigin != nil {
             let (began, touches) = pinches.withLock { s -> (Int, [PinchState.Touch]) in
@@ -244,16 +256,20 @@ final class ImmersiveRenderer: @unchecked Sendable {
         uniforms.camera = SIMD4(stageToAltitude, Float(timeline.time), Float(timeline.brightness), 0)
         uniforms.ground = SIMD4(Float(timeline.position.x), Float(timeline.landShift.x),
                                 Float(timeline.position.y), Float(timeline.landShift.y))
-        // 转弯时四周压暗（转向是世界绕着你转）
+        // 转弯时视野四周收窄压暗（转向是世界绕着你转，余光里的转动最容易晕）；分段转向不连续转，不用压
         let turning = Float(min(abs(timeline.turnRate) / JumpTimeline.maxTurnRate, 1))
-        uniforms.heading = SIMD4(Float(cos(timeline.heading)), Float(sin(timeline.heading)), turning * 0.55, 0)
+        let heading = session.displayHeading
+        uniforms.heading = SIMD4(Float(cos(heading)), Float(sin(heading)), session.snapTurns ? 0 : turning * 0.85, 0)
         // 高度表：有手部追踪就戴在选好的那只手腕上（手放下时看不到，抬手才看）；没有就放在前下方
         let watchHand = hands.first(where: { $0.isLeft == watchOnLeft })
         uniforms.placeAltimeter(feet: timeline.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand,
                                 alarm: timeline.alarmLevel, gloved: gloves)
         if handsEnabled && watchHand == nil { uniforms.hudUp.w = 0 }
         let objects = session.objects(layout: layout, hands: hands, watchOnLeft: watchOnLeft, gloves: gloves, head: head)
-        panel.set(session.hint)
+        let hudState = session.hudState
+        let hudPanels = helmet.update(hudState, head: stageFromDevice)
+        var hudDirty = helmet.dirty
+        panel.set(hudPanels.isEmpty ? session.hint : "")
         let panelDraw = panel.texture.map {
             (texture: $0, uniforms: panelPlacer.place(head: head, forward: headForward, dt: Float(dt),
                                                       width: $0.width, height: $0.height))
@@ -320,7 +336,9 @@ final class ImmersiveRenderer: @unchecked Sendable {
                              rateMap: rateMap,
                              objects: objects,
                              panel: panelDraw,
+                             hud: hudPanels, hudDirty: hudDirty,
                              group: textureIndex)
+                hudDirty = []           // mip 只生成一次
             }
 
             drawable.encodePresent(commandBuffer: commandBuffer)
@@ -330,16 +348,26 @@ final class ImmersiveRenderer: @unchecked Sendable {
         frame.endSubmission()
 
         adjustQuality(now: now)
+        updateRealHands()
         updateAudio()
         if timeline.isOver, !ended {
             ended = true
             audio?.stop()
-            let result = session.resultSummary
+            let result = session.jumpResult
             Task { @MainActor in AppModel.shared.fallEnded(result: result) }
         }
     }
 
     // MARK: - 声音
+
+    /// 戴手套时，握住扶杆（手套开始长出来）以后把真手藏起来
+    private var handsHiddenSent = false
+
+    private func updateRealHands() {
+        guard gloves, handsEnabled, !handsHiddenSent, timeline.barGrabbedTime != nil else { return }
+        handsHiddenSent = true
+        Task { @MainActor in AppModel.shared.realHandsHidden = true }
+    }
 
     private func updateAudio() {
         guard let audio else { return }
@@ -376,8 +404,12 @@ final class ImmersiveRenderer: @unchecked Sendable {
             }
         }
         let underCanopy = t.phase == .opening || t.phase == .canopy
-        // 开场还在房间里：没有发动机、没有风；飞机长出来的那几秒里慢慢起来
-        let cabinLevel = t.phase == .cabin ? Float(t.revealProgress) : 1
+        // 开场还在房间里：没有发动机、没有风。握住扶杆以后很快响起来，但先是闷的（像隔着墙），
+        // 飞机长出来的那几秒里慢慢变清楚
+        let p = Float(t.revealProgress)
+        let rise = min(p / 0.4, 1)
+        let cabinLevel = t.phase == .cabin ? rise * rise * (3 - 2 * rise) : 1
+        audioParams.muffle = t.phase == .cabin ? 1 - p * p * (3 - 2 * p) : 0
         audioParams.speed = Float(t.windSpeed) * cabinLevel
         audioParams.gain = Float(t.brightness)
         audioParams.engine = (t.leftRampTime == nil ? 1 : Float(25 / (25 + t.planeDistance))) * cabinLevel

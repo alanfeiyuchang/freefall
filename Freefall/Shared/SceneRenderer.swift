@@ -67,7 +67,7 @@ final class SceneRenderer: @unchecked Sendable {
     private let terrainPipeline: MTLRenderPipelineState
     /// 开场实体化那几秒用的管线（片元着色器带遮罩，会丢弃还没出现的片元）：天空海面、地形、网格
     private let revealPipelines: (scene: MTLRenderPipelineState, terrain: MTLRenderPipelineState,
-                                  mesh: MTLRenderPipelineState)
+                                  mesh: MTLRenderPipelineState, glove: MTLRenderPipelineState)
     private let terrainDepthPipeline: MTLRenderPipelineState
     /// 没有地形时绑给云层 pass 的占位深度
     private let emptyTerrainDepth: MTLTexture
@@ -112,6 +112,7 @@ final class SceneRenderer: @unchecked Sendable {
     private var lineBufferIndex = 0
     private static let maxLines = 512
     private let panelPipeline: MTLRenderPipelineState
+    private let helmetHudPipeline: MTLRenderPipelineState
     /// 背带和表带的胶囊，每帧重写；GPU 可能还在读前几帧的，轮流用
     private var coneBuffers: [MTLBuffer] = []
     private var coneBufferIndex = 0
@@ -121,6 +122,7 @@ final class SceneRenderer: @unchecked Sendable {
     /// 只做深度测试、不写深度（雨丝：被伞、手挡住，但不挡别的）
     private let testDepth: MTLDepthStencilState
     private let rainPipeline: MTLRenderPipelineState
+    private let mistPipeline: MTLRenderPipelineState
 
 
     /// 没有 rate map 时绑给 shader 的占位缓冲（shader 不会读它）
@@ -214,7 +216,9 @@ final class SceneRenderer: @unchecked Sendable {
             terrain: try renderPipeline("terrainVertex", "terrainFragment", colors: [colorFormat], depth: depthFormat,
                                         blend: false, reveal: true),
             mesh: try renderPipeline("meshVertex", "objectFragment", colors: [colorFormat], depth: depthFormat,
-                                     blend: false, reveal: true))
+                                     blend: false, reveal: true),
+            glove: try renderPipeline("gloveVertex", "gloveFragment", colors: [colorFormat], depth: depthFormat,
+                                      blend: false, reveal: true))
         let depthOnly = MTLRenderPipelineDescriptor()
         depthOnly.label = "terrain depth"
         depthOnly.vertexFunction = try function("terrainDepthVertex")
@@ -266,6 +270,8 @@ final class SceneRenderer: @unchecked Sendable {
         rainDescriptor.maxVertexAmplificationCount = maxViewCount
         rainDescriptor.inputPrimitiveTopology = .triangle
         rainPipeline = try device.makeRenderPipelineState(descriptor: rainDescriptor)
+        mistPipeline = try renderPipeline("mistVertex", "mistFragment", colors: [colorFormat], depth: depthFormat,
+                                          blend: true)
 
         let plane = ProceduralMeshes.plane()
         planeVertexCount = plane.count
@@ -286,6 +292,8 @@ final class SceneRenderer: @unchecked Sendable {
                                        options: .storageModeShared)!
         panelPipeline = try renderPipeline("panelVertex", "panelFragment", colors: [colorFormat],
                                            depth: depthFormat, blend: true)
+        helmetHudPipeline = try renderPipeline("panelVertex", "helmetHudFragment", colors: [colorFormat],
+                                               depth: depthFormat, blend: true)
         for _ in 0..<8 {
             coneBuffers.append(device.makeBuffer(length: MemoryLayout<RoundCone>.stride * Self.maxCones,
                                                  options: .storageModeShared)!)
@@ -477,7 +485,13 @@ final class SceneRenderer: @unchecked Sendable {
                 rateMap: MTLRasterizationRateMap?,
                 objects: SceneObjects = SceneObjects(),
                 panel: (texture: MTLTexture, uniforms: PanelUniforms)? = nil,
+                hud: [HelmetHUD.Panel] = [], hudDirty: [MTLTexture] = [],
                 group: Int = 0) {
+        // 头盔 HUD 的贴图刚重画过的，先生成 mip（发光取模糊的那几级）
+        if !hudDirty.isEmpty, let blit = commandBuffer.makeBlitCommandEncoder() {
+            for t in hudDirty { blit.generateMipmaps(for: t) }
+            blit.endEncoding()
+        }
         let viewCount = views.count
         var views = views
         var frame = complete(frame)
@@ -634,6 +648,20 @@ final class SceneRenderer: @unchecked Sendable {
 
         encodeObjects(enc, objects: objects, views: &views, frame: &frame, revealing: revealing)
 
+        // 身边的雾团（在雨丝后面画：雨丝是叠加上去的亮线）
+        if var mist = objects.mist {
+            enc.setRenderPipelineState(mistPipeline)
+            enc.setDepthStencilState(testDepth)
+            enc.setVertexBytes(&views, length: MemoryLayout<ViewUniforms>.stride * viewCount, index: 0)
+            enc.setVertexBytes(&mist, length: MemoryLayout<RainUniforms>.stride, index: 1)
+            enc.setVertexBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 2)
+            enc.setVertexTexture(weather, index: 0)
+            enc.setVertexTexture(baseNoise, index: 1)
+            enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
+            enc.setFragmentBuffer(atmosphereConstants, offset: 0, index: 2)
+            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: Int(mist.center.w))
+        }
+
         if var rain = objects.rain {
             let count = Int(rain.center.w * min(rain.offset.w, 1))
             if count > 0 {
@@ -670,6 +698,18 @@ final class SceneRenderer: @unchecked Sendable {
             enc.setFragmentBytes(&u, length: MemoryLayout<PanelUniforms>.stride, index: 1)
             enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 2)
             enc.setFragmentTexture(panel.texture, index: 0)
+            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+        // 头盔 HUD：最后画，只测深度不写（手伸到它前面会挡住它）
+        for p in hud {
+            var u = p.uniforms
+            enc.setRenderPipelineState(helmetHudPipeline)
+            enc.setDepthStencilState(testDepth)
+            enc.setVertexBytes(&views, length: MemoryLayout<ViewUniforms>.stride * viewCount, index: 0)
+            enc.setVertexBytes(&u, length: MemoryLayout<PanelUniforms>.stride, index: 1)
+            enc.setFragmentBytes(&u, length: MemoryLayout<PanelUniforms>.stride, index: 1)
+            enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 2)
+            enc.setFragmentTexture(p.texture, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
         enc.endEncoding()
@@ -823,7 +863,7 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setFragmentTexture(skyViewLUT, index: 0)      // 金属、塑料反射的天空
 
         func uniforms(_ model: simd_float4x4) -> ObjectUniforms {
-            ObjectUniforms(model: model, params: SIMD4(objects.jumpLightGreen ? 1 : 0, objects.inCabin, 0, 0))
+            ObjectUniforms(model: model, params: SIMD4(objects.jumpLightGreen ? 1 : 0, objects.inCabin, objects.wetness, 0))
         }
         func draw(_ buffer: MTLBuffer, count: Int, model: simd_float4x4) {
             var u = uniforms(model)
@@ -836,8 +876,8 @@ final class SceneRenderer: @unchecked Sendable {
         }
 
         if let plane = objects.planeTransform { draw(planeMesh, count: planeVertexCount, model: plane) }
-        if let anchor = objects.harnessAnchor { draw(harnessMesh, count: harnessVertexCount, model: translation(anchor)) }
-        if let anchor = objects.risersAnchor { draw(risersMesh, count: risersVertexCount, model: translation(anchor)) }
+        if let model = objects.harnessTransform { draw(harnessMesh, count: harnessVertexCount, model: model) }
+        if let model = objects.risersTransform { draw(risersMesh, count: risersVertexCount, model: model) }
 
         if !objects.meshVertices.isEmpty {
             let count = min(objects.meshVertices.count, Self.maxMeshVertices)
@@ -868,7 +908,7 @@ final class SceneRenderer: @unchecked Sendable {
         // 手套：按这只手的关节算 27 个蒙皮矩阵，GPU 上蒙皮
         if let gloves, !objects.gloveHands.isEmpty {
             var u = uniforms(matrix_identity_float4x4)
-            enc.setRenderPipelineState(glovePipeline)
+            enc.setRenderPipelineState(revealing ? revealPipelines.glove : glovePipeline)
             enc.setDepthStencilState(nearerDepth)
             enc.setVertexBytes(&views, length: viewsLength, index: 1)
             enc.setFragmentBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 3)

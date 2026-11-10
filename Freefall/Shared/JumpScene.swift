@@ -19,7 +19,31 @@ enum JumpScene: Int, CaseIterable, Sendable, Identifiable {
         }
     }
 
-    /// 开始窗口里的一句话介绍
+    /// 资源文件名里用的名字（开始窗口的卡片截图 card_<key>.jpg，render-check 的 card 镜头渲的）
+    var key: String {
+        switch self {
+        case .atoll: "atoll"
+        case .grassland: "grassland"
+        case .alpine: "alpine"
+        case .snow: "snow"
+        case .glacier: "glacier"
+        case .volcano: "volcano"
+        }
+    }
+
+    /// 卡片上画的危险（要躲开的东西），SF Symbols 名字
+    var hazardSymbols: [String] {
+        switch self {
+        case .atoll: ["water.waves"]
+        case .grassland: ["water.waves", "tree.fill"]
+        case .alpine: ["mountain.2.fill", "tree.fill"]
+        case .snow: ["mountain.2.fill"]
+        case .glacier: ["snowflake", "water.waves"]
+        case .volcano: ["flame.fill", "smoke.fill"]
+        }
+    }
+
+    /// 开始窗口里的一句话介绍（看着卡片时弹出来）
     var blurb: String {
         switch self {
         case .atoll: "潟湖里一片白沙洲。别落进水里"

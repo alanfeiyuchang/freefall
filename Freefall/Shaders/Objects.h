@@ -1,5 +1,6 @@
 #pragma once
 #include "Common.h"
+#include "Noise.h"
 #include "Atmosphere.h"
 
 // 场景里的实体：飞机（货舱内部 + 外壳）、伞衣、伞绳和背带、手腕上的表带和高度表、前方高度表面板（没有手部追踪时）。
@@ -24,7 +25,17 @@ struct MeshVertex {
 #define MATERIAL_METAL 7       // 金属（3 环、连接环、扣眼、卡扣、钢索、表圈）
 #define MATERIAL_PLASTIC 8     // 硬塑料（钢索软管、表壳）
 #define MATERIAL_RUBBER 9      // 橡胶（表带）
-#define MATERIAL_BAR 10        // 舱门边的扶杆：开场在你的房间里只有它
+#define MATERIAL_BAR 10        // 舱门边的扶杆（喷黄漆的钢管）：开场在你的房间里只有它（连同下面两样）
+#define MATERIAL_BAR_GRIP 11   // 扶杆中段的黑色橡胶握把
+#define MATERIAL_BAR_METAL 12  // 扶杆两头镀锌的套筒、法兰、螺栓
+// 机舱（ProceduralMeshes.swift）：花纹按机身坐标现算，打光和装备同一套，再加舱顶四盏夜灯
+#define MATERIAL_QUILT 13      // 绗缝的隔热垫
+#define MATERIAL_PAINTED 14    // 喷漆的金属（加强框、支架、门、作动筒、管线）
+#define MATERIAL_ALUMINUM 15   // 裸金属（滚轮、钢索、座椅管架、系留环、铰链），反照率当 F0
+#define MATERIAL_TREAD 16      // 地板和跳板（防滑涂层、拼缝、螺钉、系留环的凹坑、跳板的防滑棱、尾端警示条）
+#define MATERIAL_HAZARD 17     // 黄黑警示条
+#define MATERIAL_WINDOW 18     // 舷窗：透出去看到天
+#define MATERIAL_SEAT 19       // 红色尼龙编织带的座椅
 
 struct ObjectUniforms {
     float4x4 model;      // 物体 → 舞台
@@ -41,6 +52,7 @@ struct RoundCone {
 struct ObjectOut {
     float4 position [[position]];
     float3 stagePos;
+    float3 objectPos;          // 物体空间（机舱的花纹按机身坐标画）
     float3 normal;
     float4 color;
     float interior;
@@ -58,6 +70,7 @@ vertex ObjectOut meshVertex(uint vid [[vertex_id]],
     ObjectOut o;
     o.position = views[amp].viewProjection * p;
     o.stagePos = p.xyz;
+    o.objectPos = v.position.xyz;
     o.normal = (O.model * float4(v.normal.xyz, 0.0f)).xyz;
     o.color = v.color;
     o.interior = v.normal.w;
@@ -107,6 +120,7 @@ vertex ObjectOut roundConeVertex(uint vid [[vertex_id]],
     ObjectOut o;
     o.position = views[amp].viewProjection * float4(p, 1.0f);
     o.stagePos = p;
+    o.objectPos = p;
     o.normal = offset;
     o.color = c.color;
     o.interior = O.params.y;
@@ -159,6 +173,11 @@ struct GearSurface {
     float sheen;          // 尼龙的绒光
     float occlusion;      // 环境光遮蔽（只影响天光和反射）
     float interior;       // 在机舱里的程度
+    float3 cabinE;        // 机舱里夜灯的照度（装备、手套按室内程度给一个平均值；机舱表面另算点光源，这里只放反射来的那点）
+    float sun;            // 太阳照不照得到（0…1，不含伞衣的影子）：装备按室内程度估，机舱表面按射线出机身的地方算
+    float wet;            // 淋湿的程度 0…1：布变深、表面一层水膜（更光滑、反光更强）
+    float bead;           // 这一点在一颗水珠上的程度 0…1（手套上），beadR 离水珠中心多远（÷ 半径）
+    float beadR;
 };
 
 /// 装备和手套共用的打光：太阳（伞衣的影子、舱里挡掉）、天光（贴着胸口朝里的一面被身体挡掉）、
@@ -166,6 +185,14 @@ struct GearSurface {
 static inline float3 shadeGear(GearSurface s, float3 V, float3 dnx, float3 dny,
                                constant FrameUniforms &F, constant AtmosphereConstants &A,
                                texture2d<float> skyLUT) {
+    if (s.wet > 0.0f) {
+        // 湿了：织物吸了水颜色变深，表面一层水膜，绒光没了
+        s.albedo *= 1.0f - 0.38f * s.wet;
+        s.roughness = mix(s.roughness, 0.18f, 0.6f * s.wet);
+        s.specScale = mix(s.specScale, 1.0f, 0.7f * s.wet);
+        s.F0 = max(s.F0, float3(0.02f * s.wet));
+        s.sheen *= 1.0f - s.wet;
+    }
     float3 N = s.normal;
     float3 L = stageSunDirection(F);
     float altitude = F.camera.x + s.position.y;
@@ -174,7 +201,7 @@ static inline float3 shadeGear(GearSurface s, float3 V, float3 dnx, float3 dny,
     float3 skyE = A.skyIrradianceSea.rgb * (0.55f + 0.45f * N.y) + groundL * PI * saturate(-N.y) * 0.5f;
     const float3 cabinRed = float3(0.05f, 0.0045f, 0.0035f);
     float dl = 1.0f - s.interior;
-    float3 sunVis = canopyShadow(s.position, L, F) * (dl * dl);
+    float3 sunVis = canopyShadow(s.position, L, F) * s.sun;
     // 贴着胸口的东西，朝里的一面（+Z 朝着身体）看到的是自己的身体而不是天空
     float2 torso = F.bodyShadow.xz + float2(0.0f, 0.06f);
     float nearTorso = F.bodyShadow.w * smoothstep(0.32f, 0.16f, length(s.position.xz - torso));
@@ -203,7 +230,7 @@ static inline float3 shadeGear(GearSurface s, float3 V, float3 dnx, float3 dny,
     env = mix(cabinRed * 0.2f / PI, env, dl * dl);
     float3 specEnv = env * envBRDF(s.F0, s.roughness, NdotV) * s.specScale * s.occlusion;
 
-    float3 diffuse = s.albedo / PI * (sunE * sunVis * NdotL + sky * (0.12f + 0.88f * dl) + cabinRed * s.interior);
+    float3 diffuse = s.albedo / PI * (sunE * sunVis * NdotL + sky * (0.12f + 0.88f * dl) + s.cabinE);
     float3 radiance = diffuse + sunE * sunVis * spec + specEnv;
     if (s.sheen > 0.0f) {
         // 尼龙的绒光：掠射角上一层发灰的柔光（黑色织带的轮廓靠它）
@@ -211,6 +238,325 @@ static inline float3 shadeGear(GearSurface s, float3 V, float3 dnx, float3 dny,
         radiance += rim * 0.1f * s.sheen * mix(s.albedo, float3(0.5f), 0.5f) / PI
                   * (sunE * sunVis * saturate(dot(N, L) + 0.3f) * 0.5f + sky);
     }
+    if (s.bead > 0.0f) {
+        // 水珠像一颗小透镜：边上一圈暗（折射看到的是更深处，接触的地方还有一圈影子），
+        // 中间是天空和太阳的一个很亮的小倒影（球面上总有一点把它们反射进眼睛）
+        float rim = smoothstep(0.45f, 1.0f, s.beadR);
+        radiance *= 1.0f - 0.5f * rim * s.bead;
+        float glint = exp(-s.beadR * s.beadR * 9.0f);
+        float3 skyAbove = skyViewLookup(skyLUT, normalize(float3(0.15f, 1.0f, 0.1f)), F.sunDirection.xyz, camR, false);
+        radiance += s.bead * glint * (sunE * sunVis * 0.05f + skyAbove * 0.6f + env * 0.4f);
+    }
+    return radiance;
+}
+
+// MARK: - 机舱
+
+/// 舱顶的四盏红色夜灯（ProceduralMeshes.lampZ / lampY 要一样）：点光源，灯罩朝下，侧面也漏一点
+constant float CABIN_LAMP_Z[4] = { -2.275f, 0.475f, 3.225f, 5.975f };
+#define CABIN_LAMP_Y 2.685f
+#define CABIN_LAMP_I float3(0.3f, 0.034f, 0.026f)
+
+/// 四盏夜灯照到这一点的漫反射 + GGX 高光（加在 shadeGear 的结果上）
+static inline float3 cabinLamps(float3 P, float3 N, float3 V, float3 albedo, float3 F0, float roughness,
+                                float specScale, constant ObjectUniforms &O) {
+    float a = roughness * roughness;
+    float a2 = max(a * a, 0.002f);
+    float NdotV = max(dot(N, V), 1e-3f);
+    float3 sum = float3(0.0f);
+    for (int i = 0; i < 4; i++) {
+        float3 lp = (O.model * float4(0.0f, CABIN_LAMP_Y, CABIN_LAMP_Z[i], 1.0f)).xyz;
+        float3 d = lp - P;
+        float d2 = max(dot(d, d), 0.05f);
+        float3 L = d * rsqrt(d2);
+        float NdotL = saturate(dot(N, L));
+        if (NdotL <= 0.0f) continue;
+        float down = saturate(L.y);
+        float3 E = CABIN_LAMP_I * ((0.06f + 0.94f * down * sqrt(down)) * NdotL / d2);
+        float3 H = normalize(L + V);
+        float m = 1.0f - saturate(dot(V, H));
+        float3 Fs = F0 + (1.0f - F0) * (m * m) * (m * m) * m;
+        sum += E * (albedo / PI + Fs * ggx(saturate(dot(N, H)), NdotV, NdotL, a2, roughness) * specScale);
+    }
+    return sum;
+}
+
+/// 射线和机身圆柱（半径 1.75 米，轴沿 z）的两个交点；尾段的截面圆心往后越来越高，按交点附近的圆心迭代
+static inline float2 fuselageHits(float3 p, float3 L, bool farSide) {
+    float cy = 1.05f, t = 0.0f;
+    float a = dot(L.xy, L.xy);
+    for (int i = 0; i < 3; i++) {
+        float2 o = float2(p.x, p.y - cy);
+        float b = dot(o, L.xy), c = dot(o, o) - 1.75f * 1.75f;
+        float disc = b * b - a * c;
+        if (disc <= 0.0f) return float2(-1.0f, 0.0f);
+        t = (-b + (farSide ? 1.0f : -1.0f) * sqrt(disc)) / a;
+        cy = 1.05f + max(-4.5f - (p.z + L.z * t), 0.0f) * 0.18f;
+    }
+    return float2(t, cy);
+}
+
+/// 机身在这里有没有壳（>0 有，单位米，离敞口的边多远）：货舱段（z > -4.5）一圈都是封死的，
+/// 尾段只有上半截（0.6π ~ 1.4π），再往后（z < -8.6）整个敞开
+static inline float fuselageCover(float3 q, float cy) {
+    if (q.z > -4.5f) return 1.0f;
+    if (q.z < -8.6f) return q.z + 8.6f;
+    float phi = atan2(q.x, cy - q.y);
+    if (phi < 0.0f) phi += 2.0f * PI;
+    return min(min(phi - 0.6f * PI, 1.4f * PI - phi) * 1.75f, q.z + 8.6f);
+}
+
+/// 太阳照不照得到机舱里的这一点（机身坐标）：朝太阳射一条线，看它从哪儿出机身。
+/// 只有尾段下面敞开的两侧和最后面的开口能透进来；地板、跳板挡住往下的光。边上软 3 厘米
+static inline float cabinSunVisibility(float3 p, float3 L) {
+    if (L.y < 0.0f) {
+        float3 f = p + L * (-p.y / L.y);
+        if (p.y > 0.002f && f.z > -8.0f && abs(f.x) < 1.4f) return 0.0f;
+    }
+    if (dot(L.xy, L.xy) < 1e-6f) return L.z < 0.0f ? 1.0f : 0.0f;
+    float cy0 = 1.05f + max(-4.5f - p.z, 0.0f) * 0.18f;
+    bool outside = length(float2(p.x, p.y - cy0)) > 1.75f;
+    if (outside) {
+        // 在机身圆柱外面（跳板两边）：射线可能从敞开的那侧穿进来，再从顶上出去
+        float2 entry = fuselageHits(p, L, false);
+        if (entry.x <= 0.0f) return 1.0f;
+        float coverIn = fuselageCover(p + L * entry.x, entry.y);
+        if (coverIn > 0.03f) return 0.0f;
+    }
+    float2 exitHit = fuselageHits(p, L, true);
+    if (exitHit.x <= 0.0f) return 1.0f;
+    return 1.0f - smoothstep(-0.03f, 0.03f, fuselageCover(p + L * exitHit.x, exitHit.y));
+}
+
+/// 隔热垫的高度（0…1）：一块块毯子（弧向 0.62 米、z 向在两个加强框之间，边上收进去），
+/// 毯子上菱形的绗缝（边长约 9 厘米，鼓起来的枕头形）。q = (弧长, z)，或者隔板上的 (x, y)
+static inline float quiltHeight(float2 q, thread float &pillow) {
+    float2 cell = float2(0.62f, 0.55f);
+    float2 f = fract((q - float2(0.0f, -4.2f)) / cell);
+    float2 edgeDist = min(f, 1.0f - f) * cell;
+    float edge = smoothstep(0.0f, 0.07f, min(edgeDist.x, edgeDist.y));
+    float2 g = fract(float2(q.x + q.y, q.x - q.y) / 0.13f);
+    pillow = sqrt(max(sin(PI * g.x) * sin(PI * g.y), 0.0f));
+    return (0.35f + 0.65f * pillow) * edge;
+}
+
+/// 座椅编织带的高度：5 厘米宽的带子一横一竖地压着编（篮纹），c 是座面上（或靠背上）的二维坐标（米）
+static inline float weaveHeight(float2 c) {
+    float2 gw = c / 0.05f;
+    float2 f = fract(gw);
+    int2 cellI = int2(floor(gw));
+    bool along = ((cellI.x + cellI.y) & 1) == 0;
+    float across = along ? f.x : f.y, lengthwise = along ? f.y : f.x;
+    return pow(max(sin(PI * across), 0.0f), 0.35f) * (0.55f + 0.45f * sin(PI * lengthwise));
+}
+
+/// 黄黑斜条（0 黄 1 黑），t 是沿条纹法向的坐标（条宽 = 1），fw 是一个像素有多宽（同样单位）
+static inline float hazardStripe(float t, float fw) {
+    float d = abs(fract(t) - 0.5f) * 2.0f;          // 0 在黑条中间 … 1 在黄条中间
+    return 1.0f - smoothstep(0.5f - fw, 0.5f + fw, d);
+}
+
+/// 机舱里的表面：按材质给反照率、粗糙度、凹凸（机身坐标里现算），然后和装备同一套光
+/// （太阳只照得到舱门附近、天光往里衰减），再加四盏夜灯。舷窗另算（透出去是天）。
+static inline float3 shadeCabin(int material, float3 albedo, float3 Po, float3 P, float3 N, float3 V,
+                                float interior, float footprint, float3 dnx, float3 dny,
+                                constant FrameUniforms &F, constant AtmosphereConstants &A,
+                                texture2d<float> skyLUT, constant ObjectUniforms &O) {
+    if (material == MATERIAL_WINDOW) {
+        // 视线穿过玻璃：天（低于地平线是太阳照着的云海），玻璃有一点发绿；掠射角上反射舱里暗红的光
+        float3 Vw = rotateHeading(-V, F.heading.x, F.heading.y);
+        float altitude = F.camera.x + P.y;
+        float camR = ATM_BOTTOM + max(altitude, 1.0f) * 0.001f;
+        float3 sky = skyViewLookup(skyLUT, normalize(float3(Vw.x, max(Vw.y, 0.002f), Vw.z)), F.sunDirection.xyz,
+                                   camR, false);
+        float3 deck = (A.sunAtCloudTop.rgb * saturate(F.sunDirection.y) * 0.85f + A.skyIrradianceSea.rgb * 0.6f) / PI;
+        float3 outside = mix(sky, deck, smoothstep(-0.01f, -0.08f, Vw.y));
+        float m = 1.0f - saturate(dot(N, V));
+        float fres = 0.04f + 0.96f * (m * m) * (m * m) * m;
+        float3 inside = float3(0.05f, 0.0045f, 0.0035f) * (0.3f / PI);
+        return outside * float3(0.86f, 0.9f, 0.88f) * (1.0f - fres) + inside * fres;
+    }
+    float3x3 rot = float3x3(O.model[0].xyz, O.model[1].xyz, O.model[2].xyz);
+    float3 No = transpose(rot) * N;              // 机身坐标里的法线（朝着看的人）
+    float roughness = 0.5f, specScale = 0.8f, sheen = 0.0f, metallic = 0.0f, occlusion = 1.0f;
+    float3 base = albedo;
+    float3 grad = float3(0.0f);                  // 机身坐标里高度场的梯度：法线 = N - 梯度的切向部分
+    float n1 = revealNoise(Po * 5.0f), n2 = revealNoise(Po * 21.0f + 3.0f);
+
+    if (material == MATERIAL_QUILT) {
+        float2 q; float3 T1, T2;
+        if (abs(No.z) > 0.7f) {                  // 前端隔板：平面
+            q = Po.xy; T1 = float3(1.0f, 0.0f, 0.0f); T2 = float3(0.0f, 1.0f, 0.0f);
+        } else {                                 // 舱壁：截面上的弧长和 z（尾段的截面圆心往后越来越高）
+            float cy = 1.05f + max(-4.5f - Po.z, 0.0f) * 0.18f;
+            float phi = atan2(Po.x, cy - Po.y);
+            if (phi < 0.0f) phi += 2.0f * PI;        // 接缝放在地板下面看不到的地方
+            q = float2(phi * 1.75f, Po.z);
+            T1 = float3(cos(phi), sin(phi), 0.0f); T2 = float3(0.0f, 0.0f, 1.0f);
+        }
+        float pillow, p1, p2;
+        const float eps = 0.003f, depth = 0.012f;
+        float h = quiltHeight(q, pillow);
+        float hs = (quiltHeight(q + float2(eps, 0.0f), p1) - h) / eps;
+        float hz = (quiltHeight(q + float2(0.0f, eps), p2) - h) / eps;
+        float detail = saturate(0.13f / (footprint * 8.0f) - 0.5f);
+        grad = (hs * T1 + hz * T2) * depth * detail;
+        occlusion = mix(1.0f, mix(0.5f, 1.0f, h) * mix(0.75f, 1.0f, pillow), detail);
+        // 每块毯子旧得不一样，越往下越脏
+        float2 blanket = floor((q - float2(0.0f, -4.2f)) / float2(0.62f, 0.55f));
+        float tone = revealHash(float3(blanket, 1.0f));
+        base *= (0.86f + 0.24f * tone) * mix(float3(1.0f), float3(0.96f, 1.03f, 0.97f), revealHash(float3(blanket, 7.0f)));
+        base *= 0.78f + 0.22f * smoothstep(0.0f, 0.9f, Po.y);
+        roughness = 0.9f; specScale = 0.2f; sheen = 0.6f;
+    } else if (material == MATERIAL_PAINTED) {
+        base *= 0.86f + 0.2f * n1 + 0.08f * n2;
+        roughness = 0.38f + 0.3f * n2;
+    } else if (material == MATERIAL_ALUMINUM) {
+        metallic = 1.0f;
+        roughness = 0.26f + 0.16f * n2;
+        base *= 0.9f + 0.12f * n1;
+    } else if (material == MATERIAL_HAZARD) {
+        float t = (Po.x + Po.y + Po.z) / 0.1f;
+        float black = hazardStripe(t, footprint / 0.1f * 1.5f);
+        base = mix(base, float3(0.022f, 0.022f, 0.024f), black);
+        float chip = smoothstep(0.66f, 0.72f, revealNoise(Po * 38.0f)) * smoothstep(0.3f, 0.7f, n1);
+        base = mix(base, float3(0.2f, 0.2f, 0.21f), chip);
+        roughness = mix(0.5f, 0.32f, chip);
+        metallic = chip * 0.6f;
+    } else if (material == MATERIAL_TREAD) {
+        roughness = 0.8f; specScale = 0.6f;
+        float detail = saturate(0.02f / (footprint * 6.0f) - 0.5f);
+        // 防滑颗粒（几毫米的斑点），中间过道走得多，磨得亮一点、滑一点
+        float grit = revealNoise(Po * 160.0f);
+        base *= 1.0f + (grit - 0.5f) * 0.35f * detail;
+        float aisle = 1.0f - smoothstep(0.25f, 0.65f, abs(Po.x));
+        float wear = aisle * (0.55f + 0.45f * n1);
+        base *= 1.0f + 0.4f * wear;
+        roughness -= 0.28f * wear;
+        if (Po.z > -4.5f) {
+            // 货舱地板：拼缝（x = -1、0、1，z 每 0.5 米），拼缝两边每 10 厘米一颗沉头螺钉，拼缝交叉处是系留环的凹坑
+            float2 c = float2(Po.x, Po.z + 4.2f);
+            float2 nearest = round(c / float2(1.0f, 0.5f)) * float2(1.0f, 0.5f);
+            float2 rel = c - nearest;
+            float seamD = min(abs(rel.x), abs(rel.y));
+            float seam = 1.0f - smoothstep(0.0015f, 0.0015f + footprint * 1.5f, seamD);
+            base *= 1.0f - 0.65f * seam;
+            float r = length(rel);
+            bool hasRing = abs(nearest.x) <= 1.0f && nearest.y > -0.1f && nearest.y < 12.1f;
+            float2 s1 = float2(abs(rel.x) - 0.022f, (fract(rel.y / 0.1f) - 0.5f) * 0.1f);
+            float2 s2 = float2((fract(rel.x / 0.1f) - 0.5f) * 0.1f, abs(rel.y) - 0.022f);
+            float screw = (1.0f - smoothstep(0.0032f, 0.0032f + footprint * 1.2f, min(length(s1), length(s2))))
+                        * detail * (hasRing ? smoothstep(0.065f, 0.08f, r) : 1.0f);
+            base = mix(base, float3(0.17f, 0.17f, 0.18f), screw);
+            roughness = mix(roughness, 0.35f, screw);
+            if (hasRing) {
+                float cup = 1.0f - smoothstep(0.046f, 0.046f + footprint * 1.5f, r);
+                base = mix(base, float3(0.018f, 0.018f, 0.02f), cup * 0.9f);
+                occlusion = mix(1.0f, 0.45f, cup);
+                float rim = exp(-pow((r - 0.047f) / 0.0035f, 2.0f));
+                float2 dir = r > 1e-4f ? rel / r : float2(0.0f);
+                grad.xz += dir * rim * 0.7f;
+            }
+        } else {
+            // 跳板：每 12 厘米一道横着的防滑棱（顶上磨得发亮），尾端 18 厘米宽的黄黑警示条
+            float w = fract((Po.z + 8.0f) / 0.12f);
+            float ridge = smoothstep(0.0f, 0.06f, w) * (1.0f - smoothstep(0.2f, 0.26f, w));
+            float slope = (smoothstep(0.0f, 0.06f, w + 0.02f) - smoothstep(0.0f, 0.06f, w)) * (w < 0.1f ? 1.0f : 0.0f)
+                        - (smoothstep(0.2f, 0.26f, w + 0.02f) - smoothstep(0.2f, 0.26f, w)) * (w > 0.15f ? 1.0f : 0.0f);
+            float ridgeDetail = saturate(0.12f / (footprint * 8.0f) - 0.5f);
+            grad.z += slope / (0.02f * 0.12f) * 0.004f * ridgeDetail;
+            base *= 1.0f + 0.45f * ridge * ridgeDetail;
+            roughness -= 0.2f * ridge * ridgeDetail;
+            if (Po.z < -7.82f) {
+                float black = hazardStripe((Po.x + Po.z) / 0.09f, footprint / 0.09f * 1.5f);
+                float3 stripe = mix(float3(0.6f, 0.42f, 0.02f), float3(0.022f), black);
+                float chip = smoothstep(0.62f, 0.7f, revealNoise(Po * 30.0f)) * (0.5f + 0.5f * n1);
+                base = mix(stripe, float3(0.16f, 0.16f, 0.17f), chip);
+                roughness = mix(0.5f, 0.35f, chip);
+            }
+        }
+    } else {                                     // MATERIAL_SEAT：红色尼龙编织带
+        bool pan = abs(No.y) > 0.6f;
+        float2 c = pan ? Po.xz : Po.yz;
+        const float eps = 0.002f, depth = 0.003f;
+        float h = weaveHeight(c);
+        float ha = (weaveHeight(c + float2(eps, 0.0f)) - h) / eps;
+        float hb = (weaveHeight(c + float2(0.0f, eps)) - h) / eps;
+        float detail = saturate(0.05f / (footprint * 6.0f) - 0.5f);
+        grad = (pan ? float3(ha, 0.0f, hb) : float3(0.0f, ha, hb)) * depth * detail;
+        occlusion = mix(1.0f, 0.55f + 0.45f * h, detail);
+        float strap = revealHash(float3(floor(c / 0.05f), 3.0f));
+        base *= 0.88f + 0.2f * strap * detail + 0.1f * n1;
+        // 每 0.5 米一个座位，中间一道黑色的分隔带
+        float divider = abs(fract((Po.z + 2.4f) / 0.5f + 0.5f) - 0.5f) * 0.5f;
+        base = mix(base, float3(0.025f, 0.02f, 0.02f), 1.0f - smoothstep(0.016f, 0.016f + footprint * 1.5f, divider));
+        roughness = 0.72f; specScale = 0.4f; sheen = 1.0f;
+    }
+
+    float3 g = rot * grad;
+    g -= dot(g, N) * N;
+    float3 Nb = normalize(N - g);
+    GearSurface s;
+    s.position = P;
+    s.normal = Nb;
+    s.albedo = base * (1.0f - metallic);
+    s.F0 = mix(float3(0.04f), base, metallic);
+    s.roughness = roughness;
+    s.specScale = specScale;
+    s.sheen = sheen;
+    s.occlusion = occlusion * 0.7f;               // 尾段顶上有壳：天光只从两侧和后面进来
+    s.interior = interior;
+    s.cabinE = float3(0.05f, 0.0045f, 0.0035f) * 0.25f * interior;     // 夜灯在舱里来回反射的那点光
+    s.sun = cabinSunVisibility(Po, transpose(rot) * stageSunDirection(F));
+    s.wet = 0.0f;
+    s.bead = 0.0f;
+    s.beadR = 1.0f;
+    float3 radiance = shadeGear(s, V, dnx, dny, F, A, skyLUT);
+    return radiance + cabinLamps(P, Nb, V, s.albedo, s.F0, roughness, specScale, O) * occlusion;
+}
+
+/// 扶杆：喷黄漆的钢管、黑色橡胶握把、镀锌件。在你的房间里时按屋里的光（顶上一盏柔和的灯 + 四周墙的反光），
+/// 飞机在它周围长出来以后换成机舱里的光
+static inline float3 shadeBar(int material, float3 albedo, float3 P, float3 N, float3 V, float interior,
+                              float3 dnx, float3 dny, constant FrameUniforms &F, constant AtmosphereConstants &A,
+                              texture2d<float> skyLUT, constant ObjectUniforms &O) {
+    float metallic = material == MATERIAL_BAR_METAL ? 1.0f : 0.0f;
+    GearSurface s;
+    s.position = P;
+    s.normal = N;
+    s.albedo = albedo * (1.0f - metallic);
+    s.F0 = mix(float3(material == MATERIAL_BAR_GRIP ? 0.035f : 0.045f), albedo, metallic);
+    s.roughness = material == MATERIAL_BAR ? 0.3f : (material == MATERIAL_BAR_GRIP ? 0.6f : 0.32f);
+    s.specScale = 1.0f;
+    s.sheen = 0.0f;
+    s.occlusion = 0.7f;
+    s.interior = interior;
+    s.cabinE = float3(0.05f, 0.0045f, 0.0035f) * 0.25f * interior;
+    float3x3 rot = float3x3(O.model[0].xyz, O.model[1].xyz, O.model[2].xyz);
+    s.sun = cabinSunVisibility(transpose(rot) * (P - O.model[3].xyz), transpose(rot) * stageSunDirection(F));
+    s.wet = 0.0f;
+    s.bead = 0.0f;
+    s.beadR = 1.0f;
+    float3 cabin = shadeGear(s, V, dnx, dny, F, A, skyLUT)
+                 + cabinLamps(P, N, V, s.albedo, s.F0, s.roughness, s.specScale, O);
+
+    // 房间：顶上偏后一盏柔和的灯（高光宽一点），四周墙的反光当成均匀的灰
+    const float3 roomE = float3(0.5f, 0.49f, 0.46f);
+    float3 Lr = normalize(float3(0.25f, 1.0f, 0.4f));
+    float NdotL = saturate(dot(N, Lr));
+    float NdotV = max(dot(N, V), 1e-3f);
+    float rough = max(s.roughness, 0.42f);
+    float a = rough * rough;
+    float3 H = normalize(Lr + V);
+    float m = 1.0f - saturate(dot(V, H));
+    float3 Fs = s.F0 + (1.0f - s.F0) * (m * m) * (m * m) * m;
+    float3 room = s.albedo / PI * roomE * (0.6f + 0.4f * N.y)
+                + Fs * ggx(saturate(dot(N, H)), NdotV, NdotL, a * a, rough) * NdotL * roomE * 0.9f
+                + roomE * (0.32f / PI) * envBRDF(s.F0, s.roughness, NdotV);
+    float roomMix = F.reveal.w < 0.0f ? 1.0f : 1.0f - smoothstep(0.4f, 3.0f, F.reveal.w);
+    float3 radiance = mix(cabin, room, roomMix);
+    // 还没握住的时候慢慢一明一暗，提示去握
+    if (F.reveal.w < 0.0f) radiance *= 1.0f + 0.3f * (0.5f + 0.5f * sin(F.camera.y * 3.5f));
     return radiance;
 }
 
@@ -228,14 +574,16 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
     float3 dpx = dfdx(in.stagePos), dpy = dfdy(in.stagePos);
     float2 duvx = dfdx(in.uv), duvy = dfdy(in.uv);
     float3 dnx = dfdx(N), dny = dfdy(N);
+    float footprint = max(max(length(dpx), length(dpy)), 1e-6f);     // 一个像素在表面上多大（米）
     // 太阳在世界坐标里；伞下转向是世界绕着你转，舞台里的东西要按航向反过来转一下太阳
     float3 L = stageSunDirection(F);
     int material = int(in.color.a + 0.5f);
+    bool isBar = material >= MATERIAL_BAR && material <= MATERIAL_BAR_METAL;
     float3 albedo = in.color.rgb;
     float daylight = 1.0f - in.interior;
     // 开场：还没实体化的地方丢掉（深度留 0，系统透出你的房间）；扶杆和替身手一直在
     float2 reveal = float2(1.0f, 0.0f);
-    if (revealActive && material != MATERIAL_BAR && material != MATERIAL_SOFT) {
+    if (revealActive && !isBar && material != MATERIAL_SOFT) {
         reveal = revealAt(in.stagePos, F);
         if (reveal.x < 0.5f) discard_fragment();
     }
@@ -248,16 +596,11 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
     const float3 cabinRed = float3(0.05f, 0.0045f, 0.0035f);   // 货舱里的红色夜灯（照度）
 
     float3 radiance;
-    if (material == MATERIAL_BAR) {
-        // 扶杆：在你的房间里时按屋里柔和的灯光打（上亮下暗），飞机在它周围长出来以后换成机舱里的光
-        float3 E = sunE * saturate(dot(N, L)) * daylight * daylight
-                 + skyE * (0.12f + 0.88f * daylight)
-                 + cabinRed * in.interior;
-        float3 room = float3(0.5f, 0.49f, 0.46f) * (0.6f + 0.4f * N.y);
-        float roomMix = F.reveal.w < 0.0f ? 1.0f : 1.0f - smoothstep(0.4f, 3.0f, F.reveal.w);
-        radiance = albedo * mix(E, room, roomMix) / PI;
-        // 还没握住的时候慢慢一明一暗，提示去握
-        if (F.reveal.w < 0.0f) radiance *= 1.0f + 0.3f * (0.5f + 0.5f * sin(F.camera.y * 3.5f));
+    if (isBar) {
+        radiance = shadeBar(material, albedo, in.stagePos, N, V, in.interior, dnx, dny, F, A, skyLUT, O);
+    } else if (material >= MATERIAL_QUILT) {
+        radiance = shadeCabin(material, albedo, in.objectPos, in.stagePos, N, V, in.interior, footprint, dnx, dny,
+                              F, A, skyLUT, O);
     } else if (material == MATERIAL_EMISSIVE) {
         radiance = albedo;
     } else if (material == MATERIAL_LAMP_RED) {
@@ -269,6 +612,11 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
         GearSurface g;
         g.position = in.stagePos;
         g.interior = O.params.y;
+        g.cabinE = cabinRed * O.params.y;
+        g.sun = (1.0f - O.params.y) * (1.0f - O.params.y);
+        g.wet = material == MATERIAL_METAL ? 0.0f : O.params.z;
+        g.bead = 0.0f;
+        g.beadR = 1.0f;
         g.occlusion = 1.0f;
         g.sheen = 0.0f;
         g.specScale = 1.0f;
@@ -349,6 +697,21 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
 
 // MARK: - 手套（Shared/Glove.swift：苹果示例的手套，按手部追踪的关节蒙皮）
 
+/// 手套上的水珠：按绑定姿势里的位置（跟着手套走、大小是真的毫米）在 7 毫米的格子里撒，越湿越多。
+/// x：在水珠上的程度（边上软），y：离水珠中心多远 ÷ 半径
+static inline float2 waterBead(float3 p, float wet) {
+    if (wet <= 0.01f) return float2(0.0f, 1.0f);
+    const float cell = 0.007f;
+    float3 c = floor(p / cell);
+    uint3 h = pcg3d(uint3(int3(c) + 4096));
+    float3 r3 = float3(h) * (1.0f / 4294967296.0f);
+    if (r3.x > wet * 0.75f) return float2(0.0f, 1.0f);
+    float3 center = (c + 0.35f + 0.3f * float3(r3.y, r3.z, fract(r3.x * 37.0f))) * cell;
+    float radius = 0.0009f + 0.0014f * fract(r3.y * 17.0f + r3.z * 3.0f);
+    float d = length(p - center) / radius;
+    return float2(1.0f - smoothstep(0.82f, 1.0f, d), d);
+}
+
 struct GloveVertex {
     packed_float3 position;   // 绑定姿势（米）
     float u;
@@ -361,6 +724,7 @@ struct GloveVertex {
 struct GloveOut {
     float4 position [[position]];
     float3 stagePos;
+    float3 bindPos;            // 绑定姿势里的位置（米）：水珠贴着手套长，跟着手套动
     float3 normal;
     float2 uv;
     uint viewIndex [[flat]];
@@ -378,6 +742,7 @@ vertex GloveOut gloveVertex(uint vid [[vertex_id]],
     GloveOut o;
     o.position = views[amp].viewProjection * p;
     o.stagePos = p.xyz;
+    o.bindPos = float3(v.position);
     o.normal = (m * float4(float3(v.normal), 0.0f)).xyz;
     o.uv = float2(v.u, v.v);
     o.viewIndex = amp;
@@ -401,6 +766,12 @@ fragment float4 gloveFragment(GloveOut in [[stage_in]],
     float3 dpx = dfdx(in.stagePos), dpy = dfdy(in.stagePos);
     float2 duvx = dfdx(in.uv), duvy = dfdy(in.uv);
     float3 Ng = dot(n0, V) < 0.0f ? -n0 : n0;     // 袖口里面
+    // 开场：手套也跟着飞机一起长出来（在房间里看到的是真手）
+    float2 reveal = float2(1.0f, 0.0f);
+    if (revealActive) {
+        reveal = revealAt(in.stagePos, F);
+        if (reveal.x < 0.5f) discard_fragment();
+    }
     // 法线贴图：切线方向用屏幕导数现推（Schüler 的 cotangent frame），不用存切线
     float3 T = cross(dpy, Ng) * duvx.x + cross(Ng, dpx) * duvy.x;
     float3 B = cross(dpy, Ng) * duvx.y + cross(Ng, dpx) * duvy.y;
@@ -421,9 +792,17 @@ fragment float4 gloveFragment(GloveOut in [[stage_in]],
     g.sheen = 0.6f;
     g.occlusion = mat.g;
     g.interior = O.params.y;
+    g.cabinE = float3(0.05f, 0.0045f, 0.0035f) * O.params.y;
+    g.sun = (1.0f - O.params.y) * (1.0f - O.params.y);
+    g.wet = O.params.z;
+    float2 bead = waterBead(in.bindPos, O.params.z);
+    float beadFade = saturate(0.0016f / (max(length(dfdx(in.stagePos)), length(dfdy(in.stagePos))) * 2.0f) - 0.5f);
+    g.bead = bead.x * beadFade;
+    g.beadR = bead.y;
     float3 radiance = shadeGear(g, V, dnx, dny, F, A, skyLUT);
     float3 c = tonemap(radiance * F.exposure.x) * F.camera.z;
-    return float4(c, F.reveal.w < 0.0f ? F.camera.z : 1.0f);
+    c += REVEAL_GLOW_COLOR * reveal.y * F.camera.z;
+    return float4(c, 1.0f);
 }
 
 // MARK: - 绳子（伞绳、刹车绳）

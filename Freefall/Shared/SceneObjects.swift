@@ -46,10 +46,10 @@ struct SceneObjects {
     var inCabin: Float = 0
     /// 每帧重建的网格（舞台空间）：伞衣（布料模拟）、滑块、拉手、操纵环、表、落地后垂下来的伸缩带
     var meshVertices: [MeshVertex] = []
-    /// 背带（Gear.harness，身体坐标）平移到哪：身体原点 BodyLayout.anchor；nil 不画
-    var harnessAnchor: SIMD3<Float>?
+    /// 背带（Gear.harness，身体坐标）→ 舞台：BodyLayout.transform（跟着身体的位置和朝向）；nil 不画
+    var harnessTransform: simd_float4x4?
     /// 伸缩带、连接环、导向环（Gear.risers）：开伞以后、落地以前
-    var risersAnchor: SIMD3<Float>?
+    var risersTransform: simd_float4x4?
     /// 绳子：伞绳、刹车绳
     var lines: [LineSegment] = []
     /// 离屏测试里代替真手的手（不戴手套时）
@@ -58,6 +58,10 @@ struct SceneObjects {
     var gloveHands: [HandPose] = []
     /// 身边的雨丝（不下雨是 nil）
     var rain: RainUniforms?
+    /// 身边往上掠过的雾团（不在有云的高度是 nil；格式同雨丝，见 Rain.h 的 mistVertex）
+    var mist: RainUniforms?
+    /// 手套、袖子、背带淋湿的程度 0…1（ObjectUniforms.params.z）
+    var wetness: Float = 0
     /// 地形（环礁没有）
     var terrain: TerrainFrame?
     /// 伞衣的影子（FrameUniforms.canopyCenter / Span / Chord）；没开伞是 nil
@@ -102,13 +106,15 @@ struct SceneObjects {
         o.meshVertices.reserveCapacity(24_000)
 
         // 背带（含拉手口袋、钢索软管）：落地以前一直在，低头看得到。出了舱门身体才在阳光下投影子
-        if timeline.phase != .done { o.harnessAnchor = anchor }
-        if timeline.phase != .cabin { o.bodyTop = anchor + SIMD3(0, 0.1, 0.05) }
+        if timeline.phase != .done { o.harnessTransform = layout.transform }
+        if timeline.phase != .cabin { o.bodyTop = layout.place(SIMD3(0, 0.1, 0.05)) }
 
-        // 开伞拉手：报警时一闪一闪；被拉出来以后连着一截钢索，松手就扔掉了
-        if let handle = input.interaction.handle, timeline.phase.rawValue <= JumpTimeline.Phase.opening.rawValue {
+        // 开伞拉环（左右大臂各一个）：报警时红色握把一闪一闪；拉出来的那个连着一截钢索，松手就扔掉了
+        if timeline.phase != .done {
             let glow: Float = timeline.alarmLevel > 0 ? 1 + 1.6 * max(0, sin(Float(timeline.time) * 12)) : 1
-            Gear.handle(&o.meshVertices, at: handle, anchor: anchor, glow: glow)
+            for (i, ring) in input.interaction.rings.enumerated() {
+                if let ring { Gear.pullRing(&o.meshVertices, side: i == 0 ? -1 : 1, at: ring, layout: layout, glow: glow) }
+            }
         }
 
         // 伞衣：布料模拟的网格 + 滑块；伞绳、伸缩带、刹车绳和两个操纵环
@@ -119,7 +125,7 @@ struct SceneObjects {
             let attachments = cloth.lineAttachments
             if landed {
                 // 落地以后伞绳松了：伸缩带从 3 环垂到胸前，伞绳从那里拖到地上，再拖到塌在地上的伞衣
-                let (leftEnd, rightEnd) = Gear.slackRisers(&o.meshVertices, anchor: anchor)
+                let (leftEnd, rightEnd) = Gear.slackRisers(&o.meshVertices, layout: layout)
                 for (point, isLeft) in attachments {
                     let end = isLeft ? leftEnd : rightEnd
                     let onGround = SIMD3<Float>(point.x * 0.35 + end.x * 0.65, 0.02, min(point.z * 0.4, -0.35))
@@ -127,11 +133,11 @@ struct SceneObjects {
                     o.lines.append(LineSegment(onGround, end, radius: lineRadius, color: Gear.lineWhite))
                 }
             } else {
-                o.risersAnchor = anchor
+                o.risersTransform = layout.transform
                 // 滑块：一块方布，四个角的扣眼各穿一组伞绳。开伞时它顶在伞衣下面，伞衣张开时沿着伞绳滑下来，减缓张开的冲击
                 let s = Float(min(max(((timeline.sinceDeploy ?? 0) - 1.0) / 2.2, 0), 1))
-                let joins = (left: (Gear.lineJoin(-1, front: true) + Gear.lineJoin(-1, front: false)) * 0.5 + anchor,
-                             right: (Gear.lineJoin(1, front: true) + Gear.lineJoin(1, front: false)) * 0.5 + anchor)
+                let joins = (left: layout.place((Gear.lineJoin(-1, front: true) + Gear.lineJoin(-1, front: false)) * 0.5),
+                             right: layout.place((Gear.lineJoin(1, front: true) + Gear.lineJoin(1, front: false)) * 0.5))
                 let grommets = sliderGrommets(attachments: attachments, links: (joins.left, joins.right),
                                               slide: s * s * (3 - 2 * s))
                 // 伞绳：挂点 → 滑块的扣眼（A、B 排走前面的扣眼，C、D 排走后面的）→ 前 / 后伸缩带的连接环。
@@ -139,12 +145,12 @@ struct SceneObjects {
                 for (k, (point, isLeft)) in attachments.enumerated() {
                     let front = k % 4 < 2
                     let g = grommets.map { $0[(isLeft ? 0 : 1) + (front ? 0 : 2)] }
-                    let link = anchor + Gear.lineJoin(isLeft ? -1 : 1, front: front)
+                    let link = layout.place(Gear.lineJoin(isLeft ? -1 : 1, front: front))
                     o.lines.append(LineSegment(point, g ?? link, radius: lineRadius, color: Gear.lineWhite))
                 }
                 if let grommets {
                     for (i, g) in grommets.enumerated() {
-                        let link = anchor + Gear.lineJoin(i % 2 == 0 ? -1 : 1, front: i < 2)
+                        let link = layout.place(Gear.lineJoin(i % 2 == 0 ? -1 : 1, front: i < 2))
                         o.lines.append(LineSegment(g, link, radius: 0.0026, color: Gear.lineWhite * 0.92))
                     }
                     Gear.slider(&o.meshVertices, grommets: grommets)
@@ -160,7 +166,7 @@ struct SceneObjects {
                         }
                         let tab = holder.map { Gear.heldToggle(&o.meshVertices, hand: $0) }
                             ?? Gear.toggle(&o.meshVertices, center: toggle, toward: anchor)
-                        let guide = anchor + Gear.guideRingPoint(side)
+                        let guide = layout.place(Gear.guideRingPoint(side))
                         let rear = grommets?[side < 0 ? 2 : 3]
                         let mean = points.reduce(SIMD3<Float>(0, 0, 0), +) / Float(points.count)
                         let cascade = mean + ((rear ?? guide) - mean) * 0.35
@@ -180,7 +186,7 @@ struct SceneObjects {
             if input.gloves {
                 o.gloveHands.append(hand)
                 // 肩膀：眼睛往下 24 厘米、往外 19 厘米、稍微往后
-                let shoulder = anchor + SIMD3((hand.isLeft ? -1 : 1) * 0.19, -0.24, 0.05)
+                let shoulder = layout.place(SIMD3((hand.isLeft ? -1 : 1) * 0.19, -0.24, 0.05))
                 Gear.sleeve(&o.meshVertices, hand: hand, shoulder: shoulder)
             } else if input.proxyHands {
                 o.roundCones += proxyHandCones(hand)

@@ -41,8 +41,10 @@ if let v = env["STEP"], let x = Float(v) { renderer.settings.cloudStep = x }
 if let v = env["CLOUDSCALE"], let x = Float(v) { renderer.settings.cloudScale = x }
 
 let eyeHeight: Float = 1.6
-let layout = BodyLayout(anchor: SIMD3(0, eyeHeight, 0))
+/// BODYYAW=度：身体朝左转多少（测装备跟着身体转）
+let layout = BodyLayout(anchor: SIMD3(0, eyeHeight, 0), yaw: (Float(env["BODYYAW"] ?? "0") ?? 0) * .pi / 180)
 let textPanel = TextPanel(device: device)
+var helmet = HelmetHUD(device: device)
 var panelPlacer = PanelPlacer()
 
 /// 右手系、reverse-Z、无穷远平面（和 CompositorServices 一样：近平面深度 1，无穷远 0）
@@ -142,8 +144,9 @@ func hands(_ pose: Hands, _ session: JumpSession) -> [HandPose] {
         return [grip(left: false, at: barPoint + SIMD3(-0.035, 0, 0.02), forward: SIMD3(0.25, -0.1, -1),
                      palm: SIMD3(1, 0, 0), curl: pose == .bar ? 1.5 : 0.35)]
     case .handle:
-        let h = session.interaction.handle ?? layout.handleRest
-        return [grip(left: false, at: h, forward: SIMD3(-0.4, -0.2, -1), palm: SIMD3(0, -0.3, 1), curl: 1.5)]
+        // 左手伸过胸前抓右大臂上的拉环
+        let h = session.interaction.rings[1] ?? layout.ringRest(1)
+        return [grip(left: true, at: h, forward: SIMD3(0.75, 0.15, -0.6), palm: SIMD3(-0.15, 0.1, 1), curl: 1.5)]
     case .toggles:
         let t = session.interaction.toggles ?? layout.toggleRest
         return [grip(left: true, at: t.0, forward: SIMD3(0.3, 1, -0.2), palm: SIMD3(1, 0, 0), curl: 1.5),
@@ -249,7 +252,8 @@ func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [
     frame.camera = SIMD4(altitude - eyeHeight, Float(t.time), Float(t.brightness), 0)
     frame.ground = SIMD4(Float(t.position.x), Float(t.landShift.x), Float(t.position.y), Float(t.landShift.y))
     let turning = Float(min(abs(t.turnRate) / JumpTimeline.maxTurnRate, 1))
-    frame.heading = SIMD4(Float(cos(t.heading)), Float(sin(t.heading)), turning * 0.55, 0)
+    let heading = session.displayHeading
+    frame.heading = SIMD4(Float(cos(heading)), Float(sin(heading)), session.snapTurns ? 0 : turning * 0.85, 0)
     let watchHand = handPoses.first(where: { $0.isLeft == watchOnLeft })
     frame.placeAltimeter(feet: t.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand, alarm: t.alarmLevel,
                          gloved: useGloves)
@@ -260,7 +264,10 @@ func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [
     if env["NOLINES"] != nil { objects.lines = [] }
     if env["NOMESH"] != nil { objects.meshVertices = [] }
     if env["NOSHADOW"] != nil { objects.canopyShadow = nil; objects.bodyTop = nil }
-    textPanel.set(showPanel ? session.hint : "")
+    var headMatrix = head
+    headMatrix.columns.3 = SIMD4(eyeOffset.x, eyeHeight + eyeOffset.y, eyeOffset.z, 1)
+    let hudPanels = env["NOHUD"] != nil ? [] : helmet.update(session.hudState, head: headMatrix)
+    textPanel.set(showPanel && hudPanels.isEmpty && env["NOHUD"] == nil ? session.hint : "")
     let forward = (head * SIMD4<Float>(0, 0, -1, 0)).xyz
     let panel = textPanel.texture.map {
         (texture: $0, uniforms: panelPlacer.place(head: SIMD3(0, eyeHeight, 0), forward: forward, dt: 1.0 / 90,
@@ -271,7 +278,8 @@ func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [
     renderer.encodeSky(cb, altitude: altitude)
     let vp = MTLViewport(originX: 0, originY: 0, width: Double(width), height: Double(height), znear: 0, zfar: 1)
     renderer.encode(cb, views: views, viewports: [vp, vp], frame: frame, colorTexture: color, depthTexture: depth,
-                    renderTargetArrayLength: 2, rateMap: nil, objects: objects, panel: panel)
+                    renderTargetArrayLength: 2, rateMap: nil, objects: objects, panel: panel,
+                    hud: hudPanels, hudDirty: helmet.dirty)
     cb.commit()
     cb.waitUntilCompleted()
     if let error = cb.error { print("GPU 错误：\(error)") }
@@ -330,6 +338,8 @@ struct Shot {
     var eye: SIMD3<Float>?
     /// 背对太阳看（自己的影子在前面），再往左转多少度（正对着影子时会被右边的伸缩带挡住），pitch 照用
     var lookAwayFromSun: Float?
+    /// 只按靶的方向转（yaw），pitch 照用
+    var faceTarget = false
 }
 
 /// 背对太阳的朝向（度）：太阳在世界坐标里，舞台按航向转
@@ -345,8 +355,8 @@ let alarmFeet = { (feet: Int) in at { $0.altitudeFeet <= feet } }
 
 /// 装备近景：背带、拉手、3 环、伸缩带、操纵环、滑块、表；快落地时地上自己的影子
 let gearShots: [Shot] = [
-    Shot(name: "x1_chest", session: { alarmFeet(3600) }, yaw: 0, pitch: -68, fovY: 62),
-    Shot(name: "x2_handle_pull", session: { alarmFeet(3300) }, yaw: -12, pitch: -60, hands: .handle, fovY: 55),
+    Shot(name: "x1_ring", session: { alarmFeet(3600) }, yaw: -52, pitch: -42, fovY: 50),
+    Shot(name: "x2_handle_pull", session: { alarmFeet(3300) }, yaw: -38, pitch: -40, hands: .handle, fovY: 70),
     Shot(name: "x3_risers", session: { deployed(12) }, yaw: 0, pitch: 48, fovY: 75),
     Shot(name: "x4_toggle", session: { deployed(12) }, yaw: -61, pitch: -13, fovY: 30),
     Shot(name: "x5_three_ring", session: { deployed(12) }, yaw: -78, pitch: -50, fovY: 40),
@@ -377,7 +387,24 @@ let revealShots: [Shot] = [
     Shot(name: "v7_ready", session: { at { $0.time >= 8.6 } }, yaw: -22, pitch: -4, fovY: 90),
 ]
 
-let atollShots: [Shot] = revealShots + [
+/// 开始窗口里选关卡片的截图（每关一张，NOHUD=1 跑，裁成竖的）：伞下朝着靶飞，看得到地平线
+let cardShots: [Shot] = [
+    Shot(name: "card", session: { deployed(16) }, yaw: 0, pitch: -16, fovY: 72, faceTarget: true),
+]
+
+/// 机舱里（实体化完了以后）：扶杆近景、往机头看、地板、舱壁、座椅、跳板、舱顶
+let cabinShots: [Shot] = [
+    Shot(name: "cab1_back", session: { at { $0.time >= 8.6 } }, yaw: 180, pitch: -8, fovY: 90),
+    Shot(name: "cab2_bar", session: { at { $0.time >= 8.6 } }, yaw: -66, pitch: -12, fovY: 45),
+    Shot(name: "cab3_floor", session: { at { $0.time >= 8.6 } }, yaw: 170, pitch: -45, fovY: 80),
+    Shot(name: "cab4_left_wall", session: { at { $0.time >= 8.6 } }, yaw: 100, pitch: 5, fovY: 80),
+    Shot(name: "cab5_seats", session: { at { $0.time >= 8.6 } }, yaw: 150, pitch: -10, fovY: 80, eye: SIMD3(0.3, 0, 5)),
+    Shot(name: "cab6_ramp", session: { at { $0.time >= 8.6 } }, yaw: 0, pitch: -35, fovY: 80),
+    Shot(name: "cab7_ceiling", session: { at { $0.time >= 8.6 } }, yaw: 180, pitch: 35, fovY: 90),
+    Shot(name: "cab8_bar_room", session: { at { $0.time >= 1.5 } }, yaw: -66, pitch: -12, fovY: 45),
+]
+
+let atollShots: [Shot] = revealShots + cabinShots + cardShots + [
     Shot(name: "d1_door_start", session: { at { $0.time >= 1.5 } }, yaw: 0, pitch: -12),
     Shot(name: "d2_bar_reach", session: { at { $0.time >= 1.5 } }, yaw: -48, pitch: -16, hands: .barOpen, fovY: 80),
     Shot(name: "d3_holding_bar", session: { at { $0.holdingBar && $0.time >= 3.5 } }, yaw: -30, pitch: 4,
@@ -393,12 +420,17 @@ let atollShots: [Shot] = revealShots + [
     Shot(name: "g3_watch_right", session: { freefall(6500) }, yaw: -22, pitch: -38, hands: .watchRight, fovY: 22,
          watchOnLeft: false),
     Shot(name: "f3_below_deck", session: { freefall(2100) }, yaw: 0, pitch: -40, hands: .arch),
+    Shot(name: "w1_wet_glove", session: { at { $0.phase == .freefall && $0.altitude < 2100 } }, yaw: 22, pitch: -38,
+         hands: .watch, fovY: 26),
+    Shot(name: "w2_wet_glove_wide", session: { at { $0.phase == .freefall && $0.altitude < 2100 } }, yaw: 15, pitch: -30,
+         hands: .watch, fovY: 60),
+    Shot(name: "w3_mist_down", session: { freefall(2900) }, yaw: 0, pitch: -50, hands: .arch, fovY: 80),
     Shot(name: "r1_rain_in_deck", session: { freefall(2800) }, yaw: 0, pitch: -25),
     Shot(name: "r2_rain_below", session: { freefall(2050) }, yaw: 20, pitch: -12),
     Shot(name: "r3_rain_curtains", session: { deployed(8) }, yaw: 0, pitch: 0, fovY: 80, lookAtRain: 2000),
     Shot(name: "r4_rain_from_above", session: { freefall(4300) }, yaw: 0, pitch: 0, fovY: 80, lookAtRain: 1500),
     Shot(name: "f4_alarm_watch", session: { alarmFeet(3400) }, yaw: 0, pitch: -50, hands: .watch, fovY: 60),
-    Shot(name: "f5_handle", session: { alarmFeet(3300) }, yaw: -10, pitch: -62, hands: .handle, fovY: 80),
+    Shot(name: "f5_handle", session: { alarmFeet(3300) }, yaw: -30, pitch: -45, hands: .handle, fovY: 80),
     Shot(name: "o1_bag", session: { deployed(0.4) }, yaw: 0, pitch: 72, fovY: 90),
     Shot(name: "o2_lines", session: { deployed(0.9) }, yaw: 0, pitch: 72, fovY: 90),
     Shot(name: "o3_inflate", session: { deployed(1.6) }, yaw: 0, pitch: 70, fovY: 90),
@@ -425,7 +457,7 @@ let atollShots: [Shot] = revealShots + [
 
 
 /// 地形场景的镜头：高空俯瞰、穿过云层、报警时、开伞后看靶、看两边的山、低空、落地
-let terrainShots: [Shot] = revealShots + [
+let terrainShots: [Shot] = revealShots + cardShots + [
     Shot(name: "t1_door", session: { at { $0.time >= 1.5 } }, yaw: 0, pitch: -14),
     Shot(name: "t2_high_down", session: { freefallAbove(5500) }, yaw: 0, pitch: -55, fovY: 80),
     Shot(name: "t3_high_horizon", session: { freefallAbove(5500) }, yaw: 30, pitch: -12, fovY: 80),
@@ -525,10 +557,12 @@ if mode == "shots" || mode == "all" {
     for shot in shots where filter.isEmpty || shot.name.contains(filter) {
         renderer.resetHistory()
         panelPlacer = PanelPlacer()
+        helmet = HelmetHUD(device: device)       // 每个镜头重开：HUD 按时间节流重画，时间一样会留着上一个镜头的读数
         let session = shot.session()
         let h = hands(shot.hands, session)
         var yaw = shot.yaw, pitch = shot.pitch
         if shot.lookAtTarget { (yaw, pitch) = lookAtTarget(session.timeline) }
+        if shot.faceTarget { yaw = lookAtTarget(session.timeline).0 }
         if let offset = shot.lookAwayFromSun { yaw = yawAwayFromSun(session.timeline) + offset }
         if let h = shot.lookAtRain {
             (yaw, pitch) = look(atCloud: JumpTimeline.deckCenter, altitude: h, from: session.timeline)
@@ -625,8 +659,8 @@ if mode == "hands" || mode == "all" {
     // 还没报警就去拉：拉不动
     var reach: Float = 0
     func handleHand(_ pull: Float, _ curl: Float) -> [HandPose] {
-        let p = layout.handleRest + normalize(SIMD3<Float>(0.3, 0.1, -1)) * pull
-        return [grip(left: false, at: p, forward: SIMD3(-0.4, -0.2, -1), palm: SIMD3(0, -0.3, 1), curl: curl)]
+        let p = layout.ringRest(1) + normalize(SIMD3<Float>(0.45, -0.1, -0.9)) * pull
+        return [grip(left: true, at: p, forward: SIMD3(0.75, 0.15, -0.6), palm: SIMD3(-0.15, 0.1, 1), curl: curl)]
     }
     step(0.3) { handleHand(0, 0.35) }
     step(0.3) { handleHand(0, 1.5) }
