@@ -91,9 +91,9 @@ kernel void generateWeather(texture2d<float, access::write> out [[texture(0)]],
     top = max(top, sqrt(saturate(1.0f - (dTower / 2100.0f) * (dTower / 2100.0f))) * 0.88f);
     columnar = max(columnar, tower);
 
-    // 正下方一层碎积云：大约 3,200 → 2,400 米，你会穿过它
-    float dDeck = length(xz - float2(150.0f, -100.0f));
-    float deck = exp(-(dDeck * dDeck) / (1700.0f * 1700.0f));
+    // 左后方一层碎积云：大约 3,200 → 2,400 米，你会从它的边上穿过去；开伞后往靶飞就离开它的下面，着陆区是晴的
+    float dDeck = length(xz - float2(-600.0f, 550.0f));
+    float deck = exp(-(dDeck * dDeck) / (1100.0f * 1100.0f));
     float inDeck = smoothstep(0.15f, 0.55f, deck);
     coverage = max(coverage, deck * 0.72f);
     top = mix(top, 0.24f, inDeck);
@@ -319,7 +319,7 @@ fragment CloudOut cloudFreshFragment(VOut in [[stage_in]],
     float2 pixel = floor(in.position.xy) * 2.0f + TU.pattern.xy;
     float2 physical = (pixel + 0.5f) / F.clouds.x;
     float2 screen = screenPosition(physical, in.viewIndex, F.camera.w > 0.5f, rateMap);
-    Ray r = viewRay(screen, views[in.viewIndex], F.camera.x);
+    Ray r = worldRay(screen, views[in.viewIndex], F);
 
     CloudMaps maps;
     maps.base = baseTex;
@@ -379,9 +379,11 @@ fragment CloudOut cloudResolveFragment(VOut in [[stage_in]],
     // 这个像素在世界里看到的点（舞台坐标），投到上一帧
     float2 physical = (float2(pixel) + 0.5f) / F.clouds.x;
     float2 screen = screenPosition(physical, layer, F.camera.w > 0.5f, rateMap);
+    // 舞台 → 世界（这一帧的位置和航向）→ 上一帧的舞台：你掉了多少、滑了多少、转了多少都算进去
     Ray r = viewRay(screen, views[layer], 0.0f);
-    float3 p = r.origin + r.direction * (depthKm * 1000.0f);
-    p += TU.motion.xyz;                 // 你掉了多少、往哪边滑了多少，上一帧舞台里的同一点就差多少
+    float3 stagePoint = r.origin + r.direction * (depthKm * 1000.0f);
+    float3 world = rotateHeading(stagePoint, cos(TU.now.w), sin(TU.now.w)) + TU.now.xyz;
+    float3 p = rotateHeading(world - TU.prev.xyz, cos(TU.prev.w), -sin(TU.prev.w));
     float4 clip = prevViews[layer].viewProjection * float4(p, 1.0f);
     float2 ndc = clip.xy / max(clip.w, 1e-6f);
     float2 prevScreen = prevViews[layer].viewport.xy
@@ -511,7 +513,7 @@ fragment SceneOut sceneFragment(VOut in [[stage_in]],
                                 texture2d<float> atollMap [[texture(5)]],
                                 texture3d<float> waveNoise [[texture(6)]]) {
     float2 screen = screenPosition(in.position.xy, in.viewIndex, F.camera.w > 0.5f, rateMap);
-    Ray r = viewRay(screen, views[in.viewIndex], F.camera.x);
+    Ray r = worldRay(screen, views[in.viewIndex], F);
     float3 rd = r.direction;
     float3 sunDir = F.sunDirection.xyz;
     float ch = max(r.origin.y, 1.0f);
@@ -529,37 +531,64 @@ fragment SceneOut sceneFragment(VOut in [[stage_in]],
         // 一个像素在海面上盖多大（米）：斜着看拉长
         float footprint = t * 0.0011f / max(-rd.y, 0.05f);
         float residual;
-        float2 slope = waveSlope(xz + F.ground.xz, F.camera.y, footprint, waveNoise, residual);
+        // 地面坐标 = 云坐标 + F.ground.yw（机舱里地面不跟飞机走，见 JumpTimeline.landShift）
+        float2 g = xz + F.ground.xz + F.ground.yw;
+        float2 slope = waveSlope(g, F.camera.y, footprint, waveNoise, residual);
         float3 sphereN = float3(xz.x / EARTH_R, 1.0f, xz.y / EARTH_R);
         float3 N = normalize(sphereN + float3(-slope.x, 0.0f, -slope.y));
         float od = cloudShadow.sample(linearRepeat, (xz + F.ground.xz) / WEATHER_TILE + 0.5f, level(0)).r;
+        // 着陆区几百米内不落云影（阳光从云缝里照下来）：云相对地面的位置取决于你在舱里等了多久，靶不能碰巧在阴影里
+        od *= smoothstep(300.0f, 650.0f, length(g - TARGET_CENTER));
         float shadow = exp(-od * F.clouds.z * 0.5f);
 
         // 水下的颜色：深海往上散出来的光 + 浅处的白沙底（红光被水吸收得最快，越浅越青绿）
         float3 waterAlbedo = float3(0.004f, 0.017f, 0.034f);
-        float land = 0.0f, vegetation = 0.0f, surf = 0.0f;
-        float2 atollUV = (xz + F.ground.xz - ATOLL_CENTER) / ATOLL_SIZE + 0.5f;
+        float land = 0.0f, vegetation = 0.0f, surf = 0.0f, depth = 1000.0f;
+        float detail = waveNoise.sample(linearRepeat, float3(g.x / 40.0f, 0.37f, g.y / 40.0f), level(0)).g;
+        float2 atollUV = (g - ATOLL_CENTER) / ATOLL_SIZE + 0.5f;
         if (all(atollUV > 0.0f) && all(atollUV < 1.0f)) {
             float4 atoll = sampleBicubic(atollMap, atollUV);
-            float depth = ATOLL_MAX_DEPTH * atoll.g * atoll.g;
-            const float3 absorption = float3(0.45f, 0.065f, 0.035f);   // 每米
-            waterAlbedo += float3(0.55f, 0.6f, 0.55f) * exp(-2.0f * absorption * depth);
+            depth = ATOLL_MAX_DEPTH * atoll.g * atoll.g;
             // 环礁图一格 7.8 米，低空近看边缘是糊的：用细节噪声把沙洲、植被、浪花的边打碎
-            float2 g = xz + F.ground.xz;
-            float detail = waveNoise.sample(linearRepeat, float3(g.x / 40.0f, 0.37f, g.y / 40.0f), level(0)).g;
             float canopyNoise = waveNoise.sample(linearRepeat, float3(g.x / 13.0f, 0.71f, g.y / 13.0f), level(0)).r;
             float jitter = (detail - 0.55f) * 0.5f;
             land = smoothstep(0.38f, 0.62f, atoll.r + jitter);
             vegetation = smoothstep(0.35f, 0.65f, atoll.b + jitter * 1.3f) * (0.75f + 0.5f * canopyNoise);
             surf = saturate(atoll.a * (1.0f + jitter * 2.0f));
         }
+        // 着陆的白沙洲（和 LandingZone.atoll 一致）：外面一圈浅水，越近越浅
+        float2 sd = g - SANDBAR_CENTER;
+        float2 sl = float2(sd.x * SANDBAR_COS + sd.y * SANDBAR_SIN, -sd.x * SANDBAR_SIN + sd.y * SANDBAR_COS);
+        float sandEdge = (length(sl / SANDBAR_AXES) - 1.0f) * SANDBAR_AXES.y + (detail - 0.55f) * 16.0f;
+        float sandbar = smoothstep(1.5f, -1.5f, sandEdge);
+        depth = min(depth, max(sandEdge, 0.0f) * 0.045f + 0.15f);
+        land = max(land, sandbar);
+        vegetation *= 1.0f - sandbar;
+        surf *= 1.0f - sandbar;
+        if (depth < 900.0f) {
+            const float3 absorption = float3(0.45f, 0.065f, 0.035f);   // 每米
+            waterAlbedo += float3(0.55f, 0.6f, 0.55f) * exp(-2.0f * absorption * depth);
+        }
         float3 surface = oceanShade(N, rd, sunDir, shadow, 0.006f + residual, waterAlbedo, A, skySeaLUT);
         if (land + surf > 0.0f) {
             // 沙洲和白浪：漫反射（沙滩、椰林、浪花）
             float3 E = A.sunAtSea.rgb * shadow * saturate(dot(sphereN, sunDir)) + A.skyIrradianceSea.rgb;
-            // 沙滩；椰林一团一团深浅不一（树冠之间有阴影）
+            // 沙滩近看有细纹（风吹出来的沙纹），水边一圈湿沙颜色深
+            float ripple = waveNoise.sample(linearRepeat, float3(g.x / 2.5f, 0.53f, g.y / 2.5f), level(0)).r;
+            float wet = sandbar * smoothstep(-6.0f, 0.0f, sandEdge);
+            float3 sand = float3(0.66f, 0.6f, 0.48f) * (0.9f + 0.2f * ripple) * (1.0f - 0.35f * wet);
+            // 椰林一团一团深浅不一（树冠之间有阴影）
             float3 forest = float3(0.07f, 0.15f, 0.045f) * (0.6f + 0.8f * saturate(vegetation - 0.25f));
-            float3 landAlbedo = mix(float3(0.62f, 0.56f, 0.44f), forest, saturate(vegetation * 1.3f));
+            float3 landAlbedo = mix(sand, forest, saturate(vegetation * 1.3f));
+            // 靶：铺在沙上的一大块布，同心圆红白相间，中间黄色的靶心
+            float r = length(g - TARGET_CENTER);
+            float ring = fract(r / 4.0f);
+            float aa = max(fwidth(r) / 4.0f, 1e-4f);
+            float stripe = smoothstep(0.5f - aa, 0.5f + aa, ring);
+            float3 targetColor = mix(float3(0.62f, 0.06f, 0.045f), float3(0.78f), stripe);
+            targetColor = mix(float3(0.85f, 0.65f, 0.06f), targetColor, smoothstep(TARGET_BULLSEYE - aa * 4.0f, TARGET_BULLSEYE + aa * 4.0f, r));
+            float onTarget = smoothstep(TARGET_RADIUS + aa * 4.0f, TARGET_RADIUS - aa * 4.0f, r) * sandbar;
+            landAlbedo = mix(landAlbedo, targetColor, onTarget);
             surface = mix(surface, landAlbedo * E / PI, land);
             surface = mix(surface, float3(0.75f) * E / PI, surf * (1.0f - land));
         }
@@ -574,6 +603,11 @@ fragment SceneOut sceneFragment(VOut in [[stage_in]],
     color = color * cloud.a + cloud.rgb;
 
     color = acesFitted(color * F.exposure.x) * F.camera.z;
+    // 伞下转弯时视野四周压暗一圈（转向是世界绕你转，暗边能明显减轻晕）
+    if (F.heading.z > 0.001f) {
+        float2 uv = (screen - views[in.viewIndex].viewport.xy) / views[in.viewIndex].viewport.zw - 0.5f;
+        color *= 1.0f - F.heading.z * smoothstep(0.22f, 0.55f, length(uv));
+    }
     // 8 位输出前抖动半个色阶，天空渐变不出色带。在 √ 空间里抖（近似 sRGB 曲线，比 pow 便宜得多）
     float3 g = sqrt(color) + (ign(in.position.xy + 17.0f) - 0.5f) / 255.0f;
     SceneOut o;
@@ -666,6 +700,48 @@ fragment float4 hudFragment(HudOut in [[stage_in]],
     float background = watch ? 1.0f : 0.42f;               // 表盘是实心的黑表面（透明的话透出来的是天，不是手腕）
     float alpha = max(panel * background, max(max(text, arc), rim * 0.5f)) * opacity;
     const float3 orange = float3(1.0f, 0.42f, 0.08f);
-    float3 rgb = (text + rim * (watch ? 0.35f : 0.5f) * (1.0f - text) + arc * orange * (1.0f - text)) * opacity;
+    // 报警：可以开伞时表盘底色橙色闪，低于决断高度红色急闪
+    float3 face = float3(0.0f);
+    if (F.hudStyle.z > 0.5f) {
+        float rate = F.hudStyle.z > 1.5f ? 9.0f : 3.0f;
+        float blink = step(0.0f, sin(F.camera.y * rate * 2.0f * PI));
+        face = (F.hudStyle.z > 1.5f ? float3(0.75f, 0.03f, 0.02f) : float3(0.8f, 0.3f, 0.02f)) * blink * panel;
+    }
+    float3 rgb = (face * (1.0f - text) + text + rim * (watch ? 0.35f : 0.5f) * (1.0f - text)
+                  + arc * orange * (1.0f - text)) * opacity;
     return float4(rgb, alpha);
+}
+
+// MARK: - 提示文字面板
+
+vertex HudOut panelVertex(uint vid [[vertex_id]],
+                          ushort amp [[amplification_id]],
+                          constant ViewUniforms *views [[buffer(0)]],
+                          constant PanelUniforms &P [[buffer(1)]]) {
+    float2 corner = float2(vid & 1, vid >> 1);
+    float3 pos = P.center.xyz + P.right.xyz * ((corner.x - 0.5f) * P.center.w)
+               + P.up.xyz * ((corner.y - 0.5f) * P.right.w);
+    HudOut o;
+    o.position = views[amp].viewProjection * float4(pos, 1.0f);
+    o.uv = float2(corner.x, 1.0f - corner.y);
+    o.viewIndex = amp;
+    return o;
+}
+
+fragment float4 panelFragment(HudOut in [[stage_in]],
+                              constant PanelUniforms &P [[buffer(1)]],
+                              constant FrameUniforms &F [[buffer(2)]],
+                              texture2d<float> text [[texture(0)]]) {
+    float aspect = P.center.w / P.right.w;
+    float2 p = in.uv * float2(aspect, 1.0f);
+    float2 halfSize = float2(aspect, 1.0f) * 0.5f;
+    const float radius = 0.3f;
+    float2 q = abs(p - halfSize) - (halfSize - radius);
+    float sd = length(max(q, 0.0f)) + min(max(q.x, q.y), 0.0f) - radius;
+    float aa = max(fwidth(sd), 1e-4f);
+    float panel = saturate(0.5f - sd / aa);
+    float4 t = text.sample(linearClamp, in.uv, level(0));          // 预乘过的白字
+    float opacity = P.up.w * F.camera.z;
+    float alpha = max(panel * 0.55f, t.a) * opacity;
+    return float4(t.rgb * opacity, alpha);
 }

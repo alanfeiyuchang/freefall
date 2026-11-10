@@ -65,9 +65,11 @@ final class SceneRenderer: @unchecked Sendable {
     private let linePipeline: MTLRenderPipelineState
     private let planeMesh: MTLBuffer
     private let planeVertexCount: Int
-    private let canopyMesh: MTLBuffer
-    private let canopyVertexCount: Int
-    private let canopyAttachments: [SIMD3<Float>]
+    /// 伞衣网格每帧由布料模拟重建：GPU 可能还在读前几帧的，轮流用几块
+    private var canopyBuffers: [MTLBuffer] = []
+    private var canopyBufferIndex = 0
+    private static let maxCanopyVertices = 8000
+    private let panelPipeline: MTLRenderPipelineState
     /// 背带和表带的胶囊，每帧重写；GPU 可能还在读前几帧的，轮流用
     private var coneBuffers: [MTLBuffer] = []
     private var coneBufferIndex = 0
@@ -166,13 +168,13 @@ final class SceneRenderer: @unchecked Sendable {
         planeVertexCount = plane.count
         planeMesh = device.makeBuffer(bytes: plane, length: MemoryLayout<MeshVertex>.stride * plane.count,
                                       options: .storageModeShared)!
-        let canopy = ProceduralMeshes.canopy()
-        canopyVertexCount = canopy.vertices.count
-        canopyMesh = device.makeBuffer(bytes: canopy.vertices,
-                                       length: MemoryLayout<MeshVertex>.stride * canopy.vertices.count,
-                                       options: .storageModeShared)!
-        canopyAttachments = canopy.attachments
-        for _ in 0..<4 {
+        for _ in 0..<8 {
+            canopyBuffers.append(device.makeBuffer(length: MemoryLayout<MeshVertex>.stride * Self.maxCanopyVertices,
+                                                   options: .storageModeShared)!)
+        }
+        panelPipeline = try renderPipeline("panelVertex", "panelFragment", colors: [colorFormat],
+                                           depth: depthFormat, blend: true)
+        for _ in 0..<8 {
             coneBuffers.append(device.makeBuffer(length: MemoryLayout<RoundCone>.stride * Self.maxCones,
                                                  options: .storageModeShared)!)
         }
@@ -291,8 +293,7 @@ final class SceneRenderer: @unchecked Sendable {
         var current = 0
         var frameIndex: UInt32 = 0
         var previousViews: [ViewUniforms]?
-        var previousStageToAltitude: Float = 0
-        var previousGround = SIMD2<Float>(0, 0)
+        var previousState = SIMD4<Float>(0, 0, 0, 0)
         var previousRateMap: MTLBuffer?
 
         init(device: MTLDevice, width: Int, height: Int, layers: Int) {
@@ -342,6 +343,7 @@ final class SceneRenderer: @unchecked Sendable {
                 renderTargetArrayLength: Int,
                 rateMap: MTLRasterizationRateMap?,
                 objects: SceneObjects = SceneObjects(),
+                panel: (texture: MTLTexture, uniforms: PanelUniforms)? = nil,
                 group: Int = 0) {
         let viewCount = views.count
         var views = views
@@ -363,10 +365,9 @@ final class SceneRenderer: @unchecked Sendable {
         let p = Self.pattern[Int(history.frameIndex % 4)]
         let hasHistory = history.previousViews?.count == viewCount
         temporal.pattern = SIMD4(p.x, p.y, Float(history.frameIndex % 1024), hasHistory ? 1 : 0)
-        temporal.motion = SIMD4(frame.ground.x - history.previousGround.x,
-                                frame.camera.x - history.previousStageToAltitude,
-                                frame.ground.z - history.previousGround.y,
-                                history.previousRateMap != nil ? 1 : 0)
+        temporal.motion = SIMD4(0, 0, 0, history.previousRateMap != nil ? 1 : 0)
+        temporal.now = SIMD4(frame.ground.x, frame.camera.x, frame.ground.z, atan2(frame.heading.y, frame.heading.x))
+        temporal.prev = hasHistory ? history.previousState : temporal.now
         var previousViews = history.previousViews ?? views
         let previousRateBuffer = history.previousRateMap ?? emptyRateMapBuffer
         let readIndex = history.current, writeIndex = 1 - history.current
@@ -435,8 +436,7 @@ final class SceneRenderer: @unchecked Sendable {
         history.current = writeIndex
         history.frameIndex &+= 1
         history.previousViews = views
-        history.previousStageToAltitude = frame.camera.x
-        history.previousGround = SIMD2(frame.ground.x, frame.ground.z)
+        history.previousState = temporal.now
         history.previousRateMap = rateMap == nil ? nil : rateBuffer
 
         // 3. 天空、海面，合成云层；4. 高度表
@@ -481,6 +481,17 @@ final class SceneRenderer: @unchecked Sendable {
             enc.setFragmentTexture(glyphAtlas, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
+        if let panel {
+            var u = panel.uniforms
+            enc.setRenderPipelineState(panelPipeline)
+            enc.setDepthStencilState(nearerDepth)
+            enc.setVertexBytes(&views, length: MemoryLayout<ViewUniforms>.stride * viewCount, index: 0)
+            enc.setVertexBytes(&u, length: MemoryLayout<PanelUniforms>.stride, index: 1)
+            enc.setFragmentBytes(&u, length: MemoryLayout<PanelUniforms>.stride, index: 1)
+            enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 2)
+            enc.setFragmentTexture(panel.texture, index: 0)
+            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
         enc.endEncoding()
     }
 
@@ -508,24 +519,25 @@ final class SceneRenderer: @unchecked Sendable {
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: planeVertexCount)
         }
 
-        if let canopy = objects.canopyTransform {
-            var u = uniforms(canopy)
+        if !objects.canopyVertices.isEmpty {
+            let count = min(objects.canopyVertices.count, Self.maxCanopyVertices)
+            let buffer = canopyBuffers[canopyBufferIndex]
+            canopyBufferIndex = (canopyBufferIndex + 1) % canopyBuffers.count
+            objects.canopyVertices.withUnsafeBytes { raw in
+                buffer.contents().copyMemory(from: raw.baseAddress!, byteCount: MemoryLayout<MeshVertex>.stride * count)
+            }
+            var u = uniforms(matrix_identity_float4x4)
             enc.setRenderPipelineState(meshPipeline)
-            enc.setVertexBuffer(canopyMesh, offset: 0, index: 0)
+            enc.setVertexBuffer(buffer, offset: 0, index: 0)
             enc.setVertexBytes(&views, length: viewsLength, index: 1)
             enc.setVertexBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 2)
             enc.setFragmentBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 3)
-            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: canopyVertexCount)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: count)
+        }
 
-            // 伞绳：每个挂点连到同侧背带的上端
-            var points: [SIMD4<Float>] = []
-            points.reserveCapacity(canopyAttachments.count * 2)
-            for a in canopyAttachments {
-                let p = canopy * SIMD4(a, 1)
-                let link = a.x < 0 ? objects.canopyLinks.0 : objects.canopyLinks.1
-                points.append(p)
-                points.append(SIMD4(link, 1))
-            }
+        if !objects.lines.isEmpty {
+            // 伞绳、刹车绳、钢索：一像素宽的线（一次最多 4 KB 的顶点）
+            var points = Array(objects.lines.prefix(250))
             enc.setRenderPipelineState(linePipeline)
             enc.setVertexBytes(&points, length: MemoryLayout<SIMD4<Float>>.stride * points.count, index: 0)
             enc.setVertexBytes(&views, length: viewsLength, index: 1)

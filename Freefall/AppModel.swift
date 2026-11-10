@@ -7,17 +7,24 @@ final class AppModel {
     static let shared = AppModel()
 
     var isFalling = false
-    /// 允许了手部追踪：高度表戴在左手腕上（不允许就放在前下方）
+    /// 允许了手部追踪：用真手抓扶杆、拉开伞拉手、拉操纵环，高度表戴在手腕上（不允许就用捏合手势，高度表放在前下方）
     var handsAllowed = false
+    /// 高度表戴在左手腕还是右手腕（记住上次的选择）
+    var watchOnLeft: Bool = UserDefaults.standard.object(forKey: "watchOnLeft") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(watchOnLeft, forKey: "watchOnLeft") }
+    }
+    /// 上一跳的结果（落地后回到开始窗口时显示）
+    var lastResult: String?
 
     /// 开始窗口关掉以后就没有视图能拿到这两个环境动作了，所以先存下来，落完时用。
     var openWindow: OpenWindowAction?
     var dismissImmersiveSpace: DismissImmersiveSpaceAction?
 
     /// 落完（淡出结束），或者用户按数码表冠提前退出（渲染层失效）时调用。
-    func fallEnded() {
+    func fallEnded(result: String?) {
         guard isFalling else { return }
         isFalling = false
+        if let result { lastResult = result }
         openWindow?(id: StartView.windowID)
         Task { await dismissImmersiveSpace?() }
     }

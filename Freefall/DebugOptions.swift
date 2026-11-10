@@ -11,6 +11,7 @@ import simd
 ///   参数值不能写负数：UserDefaults 会把 `-30` 当成下一个参数名，所以每个方向各用一个正数参数。
 /// - `-startAltitude <米>`：跳过机舱，从这个高度直接开始自由落体
 /// - `-timeScale <倍>`：时间快进
+/// - `-autopilot YES`：自动跳（模拟器里没有手）：几秒后抓杆、松手，到 `-autoDeploy <英尺>`（默认 3000）拉伞，伞下飞向靶
 enum DebugOptions {
 #if DEBUG || targetEnvironment(simulator)
     static let autoEnter = UserDefaults.standard.bool(forKey: "autoEnter")
@@ -21,6 +22,9 @@ enum DebugOptions {
         ? UserDefaults.standard.double(forKey: "startAltitude") : nil
     static let timeScale = UserDefaults.standard.object(forKey: "timeScale") != nil
         ? UserDefaults.standard.double(forKey: "timeScale") : 1
+    static let autopilot = UserDefaults.standard.bool(forKey: "autopilot")
+    static let autoDeployFeet = UserDefaults.standard.object(forKey: "autoDeploy") != nil
+        ? UserDefaults.standard.double(forKey: "autoDeploy") : 3000
 #else
     static let autoEnter = false
     static let mute = false
@@ -28,6 +32,8 @@ enum DebugOptions {
     static let yaw: Float = 0
     static let startAltitude: Double? = nil
     static let timeScale: Double = 1
+    static let autopilot = false
+    static let autoDeployFeet: Double = 3000
 #endif
 
     /// 叠在头部朝向上的旋转（只在模拟器里有用：那里的头不会动）

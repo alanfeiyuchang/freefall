@@ -80,6 +80,11 @@ enum ProceduralMeshes {
     /// 跳板铰链（货舱地板到这里结束，往后是放平的跳板）
     static let rampHinge: Float = -4.5
     static let rampEnd: Float = -8.0
+    /// 开局你站在跳板上、离跳板末端 2.2 米：飞机原点在你身后这么远（米）
+    static let standOnRamp: Double = 5.8
+    /// 舱门边的竖扶杆（舞台坐标：你右手边 55 厘米、往前 25 厘米），抓住它游戏开始，松手就跳
+    static let barStage = SIMD2<Float>(0.55, -0.25)
+    static let barBottom: Float = 0.25, barTop: Float = 2.3
 
     /// 类似 C-130 的运输机。坐标：原点在你起跳时站的地板上；-Z 朝机尾（舱门、你面朝的方向），+Z 朝机头，y 向上。
     static func plane() -> [MeshVertex] {
@@ -160,6 +165,16 @@ enum ProceduralMeshes {
         m.vertex(rFloor, SIMD3(0, 0, -1), bulkhead, .diffuse)
         // 收在顶上的上舱门
         m.box(SIMD3(-1.15, 2.55, -7.6), SIMD3(1.15, 2.62, -4.7), color: insulation)
+        // 舱门边的黄色竖扶杆，和门口上方的一组跳伞灯（抓住扶杆变绿）
+        let barX = barStage.x, barZ = barStage.y - Float(standOnRamp)
+        m.box(SIMD3(barX - 0.02, barBottom - 0.25, barZ - 0.02), SIMD3(barX + 0.02, barTop + 0.3, barZ + 0.02),
+              color: SIMD3(0.62, 0.48, 0.04))
+        for y: Float in [barBottom - 0.25, barTop + 0.26] {
+            m.box(SIMD3(barX - 0.05, y, barZ - 0.05), SIMD3(barX + 0.05, y + 0.04, barZ + 0.05), color: SIMD3(0.2, 0.2, 0.21))
+        }
+        m.box(SIMD3(-0.32, 2.3, -6.75), SIMD3(0.32, 2.52, -6.62), color: SIMD3(0.03, 0.03, 0.03))
+        m.box(SIMD3(-0.25, 2.34, -6.62), SIMD3(-0.05, 2.48, -6.58), color: SIMD3(0.7, 0.025, 0.012), material: .lampRed)
+        m.box(SIMD3(0.05, 2.34, -6.62), SIMD3(0.25, 2.48, -6.58), color: SIMD3(0.01, 0.55, 0.05), material: .lampGreen)
 
         // ---- 外壳（出舱以后回头看到的飞机）----
         m.interiorAt = { _ in 0 }
@@ -188,71 +203,6 @@ enum ProceduralMeshes {
         m.box(SIMD3(-8.0, 3.35, -12.6), SIMD3(8.0, 3.55, -9.6), color: SIMD3(0.36, 0.38, 0.38))
         m.box(SIMD3(-0.16, 3.5, -12.9), SIMD3(0.16, 10.5, -9.0), color: SIMD3(0.36, 0.38, 0.38))
         return m.vertices
-    }
-
-    // MARK: - 伞衣
-
-    /// 九个气室的冲压翼伞：展长 8.4 米、弦长 3 米。坐标：前缘朝 -Z，y 向上，原点在伞衣中央的下表面附近。
-    /// 返回网格和伞绳在伞衣下表面的挂点（10 道肋 × 前后 4 排）。
-    static func canopy() -> (vertices: [MeshVertex], attachments: [SIMD3<Float>]) {
-        let span: Float = 8.4, chord: Float = 3.0, cells = 9
-        let spanSteps = cells * 6, chordSteps = 18
-        let palette: [SIMD3<Float>] = [
-            SIMD3(0.05, 0.10, 0.32), SIMD3(0.85, 0.22, 0.05), SIMD3(0.82, 0.82, 0.80),
-            SIMD3(0.85, 0.22, 0.05), SIMD3(0.82, 0.82, 0.80), SIMD3(0.85, 0.22, 0.05),
-            SIMD3(0.82, 0.82, 0.80), SIMD3(0.85, 0.22, 0.05), SIMD3(0.05, 0.10, 0.32),
-        ]
-        func thickness(_ s: Float) -> Float {      // NACA 四位数翼型的厚度分布（相对厚度 15%）
-            let r = s.squareRoot()
-            return 5 * 0.15 * chord * (0.2969 * r - 0.126 * s - 0.3516 * s * s + 0.2843 * s * s * s - 0.1015 * s * s * s * s)
-        }
-        func point(_ x: Float, _ s: Float, upper: Bool) -> SIMD3<Float> {
-            let cellPos = (x / span + 0.5) * Float(cells)
-            let bulge = 0.05 * sin(.pi * (cellPos - floor(cellPos)))      // 每个气室鼓起来，肋的地方凹进去
-            let t = thickness(s)
-            let y = upper ? t * 1.3 + bulge * (1 - s * 0.6) : -t * 0.3 - bulge * 0.6 * (1 - s * 0.5)
-            let arc = -(x * x) / (2 * 7.0)                                 // 展向是一条弧，翼尖往下垂
-            return SIMD3(x, y + arc, -chord / 2 + s * chord)
-        }
-        func xs(_ i: Int) -> Float { -span / 2 + span * Float(i) / Float(spanSteps) }
-        func ss(_ j: Int) -> Float { (1 - cos(.pi * Float(j) / Float(chordSteps))) / 2 }   // 前缘附近密一些
-        func normal(_ i: Int, _ j: Int, upper: Bool) -> SIMD3<Float> {
-            let i0 = max(i - 1, 0), i1 = min(i + 1, spanSteps), j0 = max(j - 1, 0), j1 = min(j + 1, chordSteps)
-            let ts = point(xs(i1), ss(j), upper: upper) - point(xs(i0), ss(j), upper: upper)
-            let tc = point(xs(i), ss(j1), upper: upper) - point(xs(i), ss(j0), upper: upper)
-            let n = normalize(cross(tc, ts))
-            return upper ? n : -n
-        }
-        var m = MeshBuilder()
-        for i in 0..<spanSteps {
-            let color = palette[min(i / 6, cells - 1)]
-            for upper in [true, false] {
-                for j in 0..<chordSteps {
-                    m.quad(point(xs(i), ss(j), upper: upper), point(xs(i + 1), ss(j), upper: upper),
-                           point(xs(i + 1), ss(j + 1), upper: upper), point(xs(i), ss(j + 1), upper: upper),
-                           normals: (normal(i, j, upper: upper), normal(i + 1, j, upper: upper),
-                                     normal(i + 1, j + 1, upper: upper), normal(i, j + 1, upper: upper)),
-                           color: color, material: .fabric)
-                }
-            }
-        }
-        // 两头的翼尖封口
-        for i in [0, spanSteps] {
-            let color = palette[i == 0 ? 0 : cells - 1]
-            for j in 0..<chordSteps {
-                m.quad(point(xs(i), ss(j), upper: true), point(xs(i), ss(j + 1), upper: true),
-                       point(xs(i), ss(j + 1), upper: false), point(xs(i), ss(j), upper: false),
-                       color: color, material: .fabric)
-            }
-        }
-        var attachments: [SIMD3<Float>] = []
-        for rib in 0...cells {
-            let x = -span / 2 + span * Float(rib) / Float(cells)
-            for s: Float in [0.05, 0.30, 0.55, 0.85] {
-                attachments.append(point(x, s, upper: false))
-            }
-        }
-        return (m.vertices, attachments)
     }
 }
 

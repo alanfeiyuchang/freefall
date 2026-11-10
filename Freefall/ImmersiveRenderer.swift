@@ -8,7 +8,8 @@ import SwiftUI
 
 // 渲染循环的骨架来自 Bubble Dream（再往上是 MetalSplatter 的 visionOS 示例，MIT，© Sean Cier）。
 
-/// 每帧：推进时间线 → 拿头和左手腕的位姿 → 天空视图表 → 每个 drawable 画云层 + 天空海面 + 飞机 / 伞 / 表带 + 高度表。
+/// 每帧：拿头和手的位姿 → 手的抓握 / 捏合推动时间线、伞衣布料 → 天空视图表 →
+/// 每个 drawable 画云层 + 天空海面 + 飞机 / 伞 / 背带 / 表带 + 高度表 + 提示文字。
 final class ImmersiveRenderer: @unchecked Sendable {
     private static let log = Logger(subsystem: "com.feiyuchang.freefall", category: "Renderer")
     private static let maxFramesInFlight = 3
@@ -23,13 +24,18 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private let arSession = ARKitSession()
     private let worldTracking = WorldTrackingProvider()
     private let handTracking = HandTrackingProvider()
+    /// 允许了手部追踪：用真手抓；否则用系统的捏合手势操作
     private let handsEnabled: Bool
+    private let watchOnLeft: Bool
     private let inFlight = DispatchSemaphore(value: maxFramesInFlight)
     private let audio: JumpAudio?
-    /// 捏手指（任意位置）：绿灯亮了就跳。系统手势在主线程上来，渲染线程每帧取走
-    private let pinched = OSAllocatedUnfairLock(initialState: false)
+    /// 系统捏合手势：主线程上来，渲染线程每帧取
+    private let pinches = OSAllocatedUnfairLock(initialState: PinchState())
 
-    private var timeline: JumpTimeline
+    private let session: JumpSession
+    private var timeline: JumpTimeline { session.timeline }
+    private let panel: TextPanel
+    private var panelPlacer = PanelPlacer()
     private var lastFrameTime: CFTimeInterval?
     /// ImmersiveSpace 原点 → 舞台（跳的那一刻脚下、面朝的方向）。拿到头部位姿的第一帧定下来。
     private var stageFromOrigin: simd_float4x4?
@@ -37,9 +43,15 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var eyeHeight = fallbackEyeHeight
     private var ended = false
     private var frameCount = 0
+
+    // 声音：一次性的事件按状态变化触发
+    private var audioParams = JumpAudio.Params()
+    private var wasHoldingBar = false
+    private var grabsHeard = 0
     private var dingSent = false
     private var deploySent = false
-    private var audioParams = JumpAudio.Params()
+    private var landingSent = false
+    private var resultSent = false
 
     /// 最近每帧的 GPU 耗时（毫秒），command buffer 完成时写入
     private let gpuTimes = OSAllocatedUnfairLock(initialState: [Double]())
@@ -47,9 +59,10 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var lastQualityChange: CFTimeInterval = 0
     private var lastStatsLog: CFTimeInterval = 0
 
-    init(_ layerRenderer: LayerRenderer, handsEnabled: Bool) throws {
+    init(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool) throws {
         self.layerRenderer = layerRenderer
         self.handsEnabled = handsEnabled && HandTrackingProvider.isSupported
+        self.watchOnLeft = watchOnLeft
         device = layerRenderer.device
         queue = device.makeCommandQueue()!
         guard let library = device.makeDefaultLibrary() else {
@@ -60,22 +73,39 @@ final class ImmersiveRenderer: @unchecked Sendable {
                                   depthFormat: layerRenderer.configuration.depthFormat,
                                   maxViewCount: layerRenderer.properties.viewCount,
                                   queue: queue)
+        panel = TextPanel(device: device)
         audio = DebugOptions.mute ? nil : JumpAudio()
-        timeline = DebugOptions.startAltitude.map { JumpTimeline(freefallFrom: $0) } ?? JumpTimeline()
+        session = JumpSession(timeline: DebugOptions.startAltitude.map { JumpTimeline(freefallFrom: $0) } ?? JumpTimeline(),
+                              realHands: self.handsEnabled,
+                              autopilot: DebugOptions.autopilot ? Autopilot(deployFeet: DebugOptions.autoDeployFeet) : nil)
     }
 
     @MainActor
-    static func start(_ layerRenderer: LayerRenderer, handsEnabled: Bool) {
+    static func start(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool) {
         let renderer: ImmersiveRenderer
         do {
-            renderer = try ImmersiveRenderer(layerRenderer, handsEnabled: handsEnabled)
+            renderer = try ImmersiveRenderer(layerRenderer, handsEnabled: handsEnabled, watchOnLeft: watchOnLeft)
         } catch {
             log.error("无法创建渲染器：\(error.localizedDescription)")
             return
         }
-        layerRenderer.onSpatialEvent = { [pinched = renderer.pinched] events in
-            if events.contains(where: { $0.phase == .active }) {
-                pinched.withLock { $0 = true }
+        layerRenderer.onSpatialEvent = { [pinches = renderer.pinches] events in
+            // 事件不是 Sendable，先拆成简单的值再进锁
+            let updates = events.map { event in
+                (id: event.id.hashValue, isLeft: event.chirality == .left,
+                 y: event.inputDevicePose?.pose3D.position.y ?? 0, active: event.phase == .active)
+            }
+            pinches.withLock { s in
+                for u in updates {
+                    if u.active {
+                        var touch = s.touches[u.id] ?? PinchState.Touch(isLeft: u.isLeft, startY: u.y)
+                        if s.touches[u.id] == nil { s.began += 1 }
+                        touch.pull = max(0, touch.startY - u.y)
+                        s.touches[u.id] = touch
+                    } else {
+                        s.touches[u.id] = nil
+                    }
+                }
             }
         }
         Task(executorPreference: RendererTaskExecutor.shared) {
@@ -132,7 +162,8 @@ final class ImmersiveRenderer: @unchecked Sendable {
             if layerRenderer.state == .invalidated {
                 Self.log.info("Layer invalidated")
                 audio?.stop()
-                Task { @MainActor in AppModel.shared.fallEnded() }
+                let result = session.resultSummary
+                Task { @MainActor in AppModel.shared.fallEnded(result: result) }
                 return
             } else if layerRenderer.state == .paused {
                 layerRenderer.waitUntilRunning()
@@ -153,13 +184,6 @@ final class ImmersiveRenderer: @unchecked Sendable {
         let now = CACurrentMediaTime()
         let dt = lastFrameTime.map { min(now - $0, 0.1) } ?? 0
         lastFrameTime = now
-        if pinched.withLock({ let p = $0; $0 = false; return p }) {
-            timeline.requestExit()
-        }
-        // 等对齐好头部朝向再开始（第一帧之前时间不走）
-        if stageFromOrigin != nil {
-            timeline.step(dt * DebugOptions.timeScale)
-        }
         frame.endUpdate()
 
         guard let timing = frame.predictTiming() else { return }
@@ -179,12 +203,14 @@ final class ImmersiveRenderer: @unchecked Sendable {
         if stageFromOrigin == nil, deviceAnchor != nil || Self.isSimulator {
             stageFromOrigin = Self.stage(facing: originFromDevice).inverse
             eyeHeight = ((stageFromOrigin ?? matrix_identity_float4x4) * originFromDevice).columns.3.y
+            session.setEyeHeight(eyeHeight)
         }
         let stage = stageFromOrigin ?? matrix_identity_float4x4
         let stageFromDevice = stage * originFromDevice
-        let headY = stageFromDevice.columns.3.y
+        let head = stageFromDevice.columns.3.xyz
+        let headForward = -stageFromDevice.columns.2.xyz
 
-        // 手：按这一帧显示的时刻预测，表才跟得上手腕
+        // 手：按这一帧显示的时刻预测，抓杆、表才跟得上手
         var hands: [HandPose] = []
         if handsEnabled, handTracking.state == .running {
             let (left, right) = handTracking.handAnchors(at: presentation.timeInterval)
@@ -192,15 +218,38 @@ final class ImmersiveRenderer: @unchecked Sendable {
             if let r = Self.handPose(right, stageFromOrigin: stage) { hands.append(r) }
         }
 
+        // 身体（背带、拉手、操纵环）跟着头的水平位置走，高度按起跳时的眼高
+        let layout = BodyLayout(anchor: SIMD3(head.x, eyeHeight, head.z))
+        // 等对齐好头部朝向再开始（第一帧之前时间不走）
+        if stageFromOrigin != nil {
+            let (began, touches) = pinches.withLock { s -> (Int, [PinchState.Touch]) in
+                let b = s.began
+                s.began = 0
+                return (b, Array(s.touches.values))
+            }
+            session.step(dt: dt * DebugOptions.timeScale, hands: hands, pinchesBegan: began, touches: touches,
+                         layout: layout)
+        }
+
         var uniforms = FrameUniforms()
         let stageToAltitude = Float(timeline.altitude) - eyeHeight
         uniforms.camera = SIMD4(stageToAltitude, Float(timeline.time), Float(timeline.brightness), 0)
-        uniforms.ground = SIMD4(Float(timeline.position.x), 0, Float(timeline.position.y), 0)
-        // 高度表：有手部追踪就只戴在左手腕上（手放下时看不到，抬手才看）；没有就放在前下方
-        let leftHand = hands.first(where: { $0.isLeft })
-        uniforms.placeAltimeter(feet: timeline.altitudeFeet, eyeHeight: eyeHeight, leftHand: leftHand)
-        if handsEnabled && leftHand == nil { uniforms.hudUp.w = 0 }
-        let objects = SceneObjects.make(timeline: timeline, eyeHeight: eyeHeight, hands: hands)
+        uniforms.ground = SIMD4(Float(timeline.position.x), Float(timeline.landShift.x),
+                                Float(timeline.position.y), Float(timeline.landShift.y))
+        // 转弯时四周压暗（转向是世界绕着你转）
+        let turning = Float(min(abs(timeline.turnRate) / JumpTimeline.maxTurnRate, 1))
+        uniforms.heading = SIMD4(Float(cos(timeline.heading)), Float(sin(timeline.heading)), turning * 0.55, 0)
+        // 高度表：有手部追踪就戴在选好的那只手腕上（手放下时看不到，抬手才看）；没有就放在前下方
+        let watchHand = hands.first(where: { $0.isLeft == watchOnLeft })
+        uniforms.placeAltimeter(feet: timeline.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand,
+                                alarm: timeline.alarmLevel)
+        if handsEnabled && watchHand == nil { uniforms.hudUp.w = 0 }
+        let objects = session.objects(layout: layout, hands: hands, watchOnLeft: watchOnLeft)
+        panel.set(session.hint)
+        let panelDraw = panel.texture.map {
+            (texture: $0, uniforms: panelPlacer.place(head: head, forward: headForward, dt: Float(dt),
+                                                      width: $0.width, height: $0.height))
+        }
 
 #if DEBUG || targetEnvironment(simulator)
         frameCount += 1
@@ -215,7 +264,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
             }
             drawable.deviceAnchor = deviceAnchor
             if index == 0 {
-                scene.encodeSky(commandBuffer, altitude: stageToAltitude + headY)
+                scene.encodeSky(commandBuffer, altitude: stageToAltitude + head.y)
             }
             if index == drawables.count - 1 {
                 let semaphore = inFlight
@@ -262,6 +311,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
                              renderTargetArrayLength: layerRenderer.configuration.layout == .layered ? viewIndices.count : 1,
                              rateMap: rateMap,
                              objects: objects,
+                             panel: panelDraw,
                              group: textureIndex)
             }
 
@@ -276,22 +326,53 @@ final class ImmersiveRenderer: @unchecked Sendable {
         if timeline.isOver, !ended {
             ended = true
             audio?.stop()
-            Task { @MainActor in AppModel.shared.fallEnded() }
+            let result = session.resultSummary
+            Task { @MainActor in AppModel.shared.fallEnded(result: result) }
         }
     }
 
+    // MARK: - 声音
+
     private func updateAudio() {
         guard let audio else { return }
-        let engine: Float = timeline.leftRampTime == nil ? 1 : Float(25 / (25 + timeline.planeDistance))
-        let ding = timeline.greenLight && !dingSent
-        let deploy = timeline.deployTime != nil && !deploySent
-        if ding { dingSent = true }
-        if deploy { deploySent = true }
-        audioParams.speed = Float(timeline.windSpeed)
-        audioParams.gain = Float(timeline.brightness)
-        audioParams.engine = engine
-        if ding { audioParams.dings += 1 }
-        if deploy { audioParams.deploys += 1 }
+        let t = timeline
+        if t.holdingBar && !wasHoldingBar { audioParams.grabs += 1 }
+        wasHoldingBar = t.holdingBar
+        audioParams.grabs += session.grabs - grabsHeard        // 抓住拉手、操纵环
+        grabsHeard = session.grabs
+        if t.barGrabbedTime != nil && !dingSent {          // 绿灯
+            dingSent = true
+            audioParams.dings += 1
+        }
+        if t.deployTime != nil && !deploySent {            // 拉手撕开 + 开伞
+            deploySent = true
+            audioParams.rips += 1
+            audioParams.deploys += 1
+        }
+        if let landedTime = t.landedTime, let outcome = t.outcome {
+            if !landingSent {
+                landingSent = true
+                switch outcome {
+                case .crashed: audioParams.crashes += 1
+                case .water: audioParams.splashes += 1
+                default: audioParams.thuds += 1
+                }
+            }
+            if !resultSent, t.time - landedTime > 0.7 {
+                resultSent = true
+                if t.won { audioParams.wins += 1 } else { audioParams.fails += 1 }
+            }
+        }
+        let underCanopy = t.phase == .opening || t.phase == .canopy
+        audioParams.speed = Float(t.windSpeed)
+        audioParams.gain = Float(t.brightness)
+        audioParams.engine = t.leftRampTime == nil ? 1 : Float(25 / (25 + t.planeDistance))
+        audioParams.alarm = t.alarmLevel
+        audioParams.canopy = underCanopy ? 1 : 0
+        // 海浪和海鸥：伞下离地 300 米以内渐渐听到，落地以后最响
+        let near = Float(min(max((300 - t.heightAboveGround) / 250, 0), 1))
+        audioParams.ambience = t.phase == .landed || t.phase == .done ? 1 : near
+        audioParams.turn = Float(min(abs(t.turnRate) / JumpTimeline.maxTurnRate, 1))
         audio.update(audioParams)
     }
 

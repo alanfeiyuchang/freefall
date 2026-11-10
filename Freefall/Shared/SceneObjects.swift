@@ -42,21 +42,35 @@ struct SceneObjects {
     /// 飞机 → 舞台（nil 不画：太远了）
     var planeTransform: simd_float4x4?
     var jumpLightGreen = false
-    /// 还在机舱里的程度（表带和背带的光照）
+    /// 还在机舱里的程度（背带、表带的光照）
     var inCabin: Float = 0
-    /// 伞衣 → 舞台（nil 还没开伞）
-    var canopyTransform: simd_float4x4?
-    /// 伞绳汇到的两个点（左右背带的上端）
-    var canopyLinks = (SIMD3<Float>(0, 0, 0), SIMD3<Float>(0, 0, 0))
-    /// 背带、表带（离屏测试里还有代替真手的手）
+    /// 伞衣（布料模拟出来的网格，舞台空间；空 = 还没开伞）
+    var canopyVertices: [MeshVertex] = []
+    /// 线：伞绳、刹车绳、拉手的钢索（每两个点一段，舞台空间）
+    var lines: [SIMD4<Float>] = []
+    /// 背带、拉手、操纵环、表带（离屏测试里还有代替真手的手）
     var roundCones: [RoundCone] = []
 
     static let strapColor = SIMD3<Float>(0.035, 0.035, 0.04)
     static let webbingColor = SIMD3<Float>(0.09, 0.09, 0.1)
     static let skinColor = SIMD3<Float>(0.42, 0.27, 0.2)
+    static let handleColor = SIMD3<Float>(0.62, 0.05, 0.035)
+    static let toggleColor = SIMD3<Float>(0.75, 0.55, 0.03)
 
-    static func make(timeline: JumpTimeline, eyeHeight: Float, hands: [HandPose],
-                     proxyHands: Bool = false) -> SceneObjects {
+    struct Input {
+        var timeline: JumpTimeline
+        var eyeHeight: Float
+        var layout: BodyLayout
+        var interaction: Interaction
+        var cloth: CanopyCloth?
+        var hands: [HandPose]
+        /// 高度表戴在哪只手上
+        var watchOnLeft = true
+        var proxyHands = false
+    }
+
+    static func make(_ input: Input) -> SceneObjects {
+        let timeline = input.timeline
         var o = SceneObjects()
         o.jumpLightGreen = timeline.greenLight
         o.inCabin = Float(timeline.inCabin)
@@ -64,30 +78,119 @@ struct SceneObjects {
             let offset = timeline.planeOffset
             o.planeTransform = translation(SIMD3(Float(offset.x), Float(offset.y), Float(offset.z)))
         }
+        let layout = input.layout
 
-        let open = Float(timeline.canopyOpen)
-        if open > 0 {
-            // 伞衣在头顶上方 4 米、略靠前，前缘朝 -Z 往下压 8°。张开过程：从一小团变大、升高、鼓起来
-            let lift = 1.6 + 2.5 * open
-            let spanScale = 0.15 + 0.85 * open, chordScale = 0.35 + 0.65 * open, inflate = 0.3 + 0.7 * open
-            o.canopyTransform = translation(SIMD3(0, eyeHeight + lift, -0.9))
-                * simd_float4x4(simd_quatf(angle: -8 * .pi / 180, axis: SIMD3(1, 0, 0)))
-                * scale(SIMD3(spanScale, inflate, chordScale))
-            // 背带：从肩膀往上到伞绳汇合的连接环
-            let leftShoulder = SIMD3<Float>(-0.17, eyeHeight - 0.22, 0.04)
-            let rightShoulder = SIMD3<Float>(0.17, eyeHeight - 0.22, 0.04)
-            let leftLink = SIMD3<Float>(-0.21, eyeHeight + 0.38, -0.06)
-            let rightLink = SIMD3<Float>(0.21, eyeHeight + 0.38, -0.06)
-            o.canopyLinks = (leftLink, rightLink)
-            o.roundCones.append(RoundCone(leftShoulder, 0.008, leftLink, 0.006, webbingColor))
-            o.roundCones.append(RoundCone(rightShoulder, 0.008, rightLink, 0.006, webbingColor))
+        // 背带：两条肩带 + 胸带。落地以前一直在（低头看得到）
+        if timeline.phase != .done {
+            let (ls, rs) = layout.shoulders
+            let a = layout.anchor
+            o.roundCones.append(RoundCone(ls, 0.012, a + SIMD3(-0.13, -0.66, -0.12), 0.012, webbingColor))
+            o.roundCones.append(RoundCone(rs, 0.012, a + SIMD3(0.13, -0.66, -0.12), 0.012, webbingColor))
+            o.roundCones.append(RoundCone(a + SIMD3(-0.14, -0.4, -0.13), 0.01, a + SIMD3(0.14, -0.4, -0.13), 0.01,
+                                          webbingColor))
         }
 
-        for hand in hands {
-            if proxyHands { o.roundCones += proxyHandCones(hand) }
-            if hand.isLeft { o.roundCones += watchStrap(hand) }
+        // 开伞拉手：报警时一闪一闪；被拉出来以后连着一截钢索
+        if let handle = input.interaction.handle, timeline.phase.rawValue <= JumpTimeline.Phase.opening.rawValue {
+            let glow: Float = timeline.alarmLevel > 0 ? 1 + 1.6 * max(0, sin(Float(timeline.time) * 12)) : 1
+            o.roundCones.append(RoundCone(handle - SIMD3(0.035, 0, 0), 0.016, handle + SIMD3(0.035, 0, 0), 0.016,
+                                          handleColor * glow))
+            if input.interaction.handlePulled || distance(handle, layout.handleRest) > 0.02 {
+                o.lines.append(SIMD4(layout.handleRest, 1))
+                o.lines.append(SIMD4(handle, 1))
+            }
+        }
+
+        // 伞衣：布料模拟的网格 + 滑块；伞绳、背带、刹车绳和两个操纵环
+        if let cloth = input.cloth, cloth.active, timeline.outcome != .crashed {
+            cloth.buildMesh(into: &o.canopyVertices)
+            let landed = timeline.phase == .landed || timeline.phase == .done
+            let (ls, rs) = layout.shoulders
+            // 落地以后伞绳松了：背带上端垂到肩膀前面，伞绳从地上拖过来
+            let (leftLink, rightLink) = landed ? (ls + SIMD3(0.02, 0.1, -0.08), rs + SIMD3(-0.02, 0.1, -0.08))
+                                               : layout.links
+            o.roundCones.append(RoundCone(ls, 0.0065, leftLink, 0.005, webbingColor))
+            o.roundCones.append(RoundCone(rs, 0.0065, rightLink, 0.005, webbingColor))
+            let attachments = cloth.lineAttachments
+            // 滑块：一块方布，四个角的扣眼各穿一组伞绳。开伞时它顶在伞衣下面，伞衣张开时沿着伞绳滑下来，减缓张开的冲击
+            let s = Float(min(max(((timeline.sinceDeploy ?? 0) - 1.0) / 2.2, 0), 1))
+            let grommets = landed ? nil : sliderGrommets(attachments: attachments, links: (leftLink, rightLink),
+                                                         slide: s * s * (3 - 2 * s))
+            for (k, (point, isLeft)) in attachments.enumerated() {
+                let link = isLeft ? leftLink : rightLink
+                o.lines.append(SIMD4(point, 1))
+                if landed {
+                    // 挂点 → 拖在地上 → 脚前面 → 背带
+                    let onGround = SIMD3<Float>(point.x * 0.35 + link.x * 0.65, 0.02, min(point.z * 0.4, -0.35))
+                    o.lines.append(SIMD4(onGround, 1))
+                    o.lines.append(SIMD4(onGround, 1))
+                } else if let grommets {
+                    // 伞绳：挂点 → 滑块的扣眼（每道肋的 A、B 排走前面的扣眼，C、D 排走后面的）→ 背带上端
+                    let g = grommets[(isLeft ? 0 : 1) + (k % 4 < 2 ? 0 : 2)]
+                    o.lines.append(SIMD4(g, 1))
+                    o.lines.append(SIMD4(g, 1))
+                }
+                o.lines.append(SIMD4(link, 1))
+            }
+            if let grommets { appendSlider(to: &o.canopyVertices, grommets: grommets) }
+            if let toggles = input.interaction.toggles, !landed {
+                // 刹车绳也穿过后面的扣眼
+                let brakes = cloth.brakeAttachments
+                for (points, toggle, back) in [(brakes.left, toggles.0, grommets?[2]), (brakes.right, toggles.1, grommets?[3])] {
+                    for p in points {
+                        o.lines.append(SIMD4(p, 1))
+                        if let back {
+                            o.lines.append(SIMD4(back, 1))
+                            o.lines.append(SIMD4(back, 1))
+                        }
+                        o.lines.append(SIMD4(toggle, 1))
+                    }
+                }
+                o.roundCones += toggleLoop(at: toggles.0)
+                o.roundCones += toggleLoop(at: toggles.1)
+            }
+        }
+
+        for hand in input.hands {
+            if input.proxyHands { o.roundCones += proxyHandCones(hand) }
+            if hand.isLeft == input.watchOnLeft { o.roundCones += watchStrap(hand) }
         }
         return o
+    }
+
+    /// 操纵环：一个黄色的小圈，竖着挂
+    static func toggleLoop(at center: SIMD3<Float>) -> [RoundCone] {
+        let n = 10, r: Float = 0.032
+        var points: [SIMD3<Float>] = []
+        for i in 0..<n {
+            let t = 2 * Float.pi * Float(i) / Float(n)
+            points.append(center + SIMD3(cos(t) * r, sin(t) * r * 1.3, 0))
+        }
+        return (0..<n).map { RoundCone(points[$0], 0.007, points[($0 + 1) % n], 0.007, toggleColor) }
+    }
+
+    /// 滑块四个扣眼的位置：[左前, 右前, 左后, 右后]。滑块是一块 0.7 × 0.55 米的布，从伞绳汇在伞衣下面的地方
+    /// 滑到背带上端上方一米左右（真的滑块会一直滑到连接环上，在头顶上挡住看伞衣的视线，这里停高一点）。
+    static func sliderGrommets(attachments: [(SIMD3<Float>, Bool)], links: (SIMD3<Float>, SIMD3<Float>),
+                               slide: Float) -> [SIMD3<Float>]? {
+        guard !attachments.isEmpty else { return nil }
+        let top = attachments.reduce(SIMD3<Float>(0, 0, 0)) { $0 + $1.0 } / Float(attachments.count)
+        let bottom = (links.0 + links.1) * 0.5 + SIMD3(0, 0.95, 0)
+        let center = top + (bottom - top) * slide
+        let x = normalize(links.1 - links.0) * 0.35
+        let z = SIMD3<Float>(0, 0, 0.275)
+        return [center - x - z, center + x - z, center - x + z, center + x + z]
+    }
+
+    static func appendSlider(to vertices: inout [MeshVertex], grommets g: [SIMD3<Float>]) {
+        let n = normalize(cross(g[1] - g[0], g[2] - g[0]))
+        let color = SIMD3<Float>(0.06, 0.06, 0.07)        // 深色，和伞衣的颜色分得开
+        // uv 给 shader 画缝线：四周一圈加强带
+        let uv: [SIMD2<Float>] = [SIMD2(0, 0), SIMD2(0.7, 0), SIMD2(0, 0.55), SIMD2(0.7, 0.55)]
+        for idx in [0, 1, 3, 0, 3, 2] {
+            vertices.append(MeshVertex(position: SIMD4(g[idx], uv[idx].x + 0.2), normal: SIMD4(n, uv[idx].y + 0.03),
+                                       color: SIMD4(color, MeshMaterial.fabric.rawValue)))
+        }
     }
 
     /// 离屏测试里代替真手：每节手指一段胶囊，手掌是从手腕扇形散开的几段，再加一截前臂。肤色。
@@ -123,13 +226,13 @@ struct SceneObjects {
                                                towardElbow: SIMD3<Float>) {
         let fw = h[.forearmWrist], wrist = h[.wrist]
         let towardElbow = normalize(h[.forearmArm] - fw)
-        // 左手：食指根 → 小指根 叉乘出来的是手背方向（右手是手心，这里只给左手用）
-        var back = normalize(cross(h[.indexKnuckle] - wrist, h[.littleKnuckle] - wrist))
+        // 食指根 → 小指根 叉乘：左手得到手背方向，右手得到手心方向（要反过来）
+        var back = normalize(cross(h[.indexKnuckle] - wrist, h[.littleKnuckle] - wrist)) * (h.isLeft ? 1 : -1)
         back = normalize(back - dot(back, towardElbow) * towardElbow)
         return (fw + towardElbow * 0.03, back, cross(towardElbow, back), towardElbow)
     }
 
-    /// 表带：绕手腕一圈的椭圆环（手腕横截面是扁的：宽约 6 厘米、厚约 4 厘米）。
+    /// 表带：绕手腕一圈的椭圆环（手腕横截面是扁的：宽约 6 厘米、厚约 4 厘米，环比手腕再大一圈）。
     /// 系统按深度合成真手：环在手腕前面的半圈露出来，转到手腕后面的半圈被手挡住，看起来就是戴在手上。
     static func watchStrap(_ h: HandPose) -> [RoundCone] {
         let f = wristFrame(h)
@@ -137,19 +240,21 @@ struct SceneObjects {
         var points: [SIMD3<Float>] = []
         for i in 0..<n {
             let t = 2 * Float.pi * Float(i) / Float(n)
-            points.append(f.center + f.side * (0.031 * cos(t)) + f.back * (0.022 * sin(t)))
+            points.append(f.center + f.side * (0.039 * cos(t)) + f.back * (0.031 * sin(t)))
         }
-        return (0..<n).map { RoundCone(points[$0], 0.0045, points[($0 + 1) % n], 0.0045, strapColor, .soft) }
+        return (0..<n).map { RoundCone(points[$0], 0.0055, points[($0 + 1) % n], 0.0055, strapColor, .soft) }
     }
 
-    /// 左手腕上的高度表：表盘在表带上方、手背那一侧（离皮肤约 1 厘米，深度在手前面，真手不会盖住它）。
-    /// 3 点钟指向手，表面朝手背外。返回 (中心, 右, 上, 直径)。
+    /// 左手腕上的高度表：表盘在表带上方、手背那一侧（离皮肤约 2 厘米，深度在手前面，真手不会盖住它）。
+    /// 第一版离手腕太近，真机上被手腕「切」掉一块，所以表带圈和表盘都往外放了、表也做大了。
+    /// 表面朝手背外。左手：3 点钟指向手；右手反过来（3 点钟指向手肘），这样抬起哪只手看，字都是正的。
+    /// 返回 (中心, 右, 上, 直径)。
     static func watchPlacement(_ h: HandPose) -> (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>, Float) {
         let f = wristFrame(h)
-        let center = f.center + f.back * 0.0285
-        let right = -f.towardElbow
+        let center = f.center + f.back * 0.043
+        let right = h.isLeft ? -f.towardElbow : f.towardElbow
         let up = cross(f.back, right)
-        return (center, right, up, 0.042)
+        return (center, right, up, 0.056)
     }
 }
 
@@ -164,15 +269,15 @@ func scale(_ s: SIMD3<Float>) -> simd_float4x4 {
 }
 
 extension FrameUniforms {
-    /// 高度表：追踪到左手就戴在左手腕上（圆表盘），否则是起跳时头前下方的一块面板。
-    mutating func placeAltimeter(feet: Int, eyeHeight: Float, leftHand: HandPose?) {
+    /// 高度表：追踪到戴表的那只手就戴在手腕上（圆表盘），否则是起跳时头前下方的一块面板。
+    mutating func placeAltimeter(feet: Int, eyeHeight: Float, watchHand: HandPose?, alarm: Int) {
         hudGlyphs = FrameUniforms.glyphs(feet: feet)
-        if let leftHand {
-            let (center, right, up, size) = SceneObjects.watchPlacement(leftHand)
+        if let watchHand {
+            let (center, right, up, size) = SceneObjects.watchPlacement(watchHand)
             hudCenter = SIMD4(center, size)
             hudRight = SIMD4(right, size)
             hudUp = SIMD4(up, 1)
-            hudStyle = SIMD4(1, min(max(Float(feet) / 30000, 0), 1), 0, 0)
+            hudStyle = SIMD4(1, min(max(Float(feet) / 30000, 0), 1), Float(alarm), 0)
         } else {
             let center = SIMD3<Float>(0, eyeHeight - 0.30, -0.50)
             let toEye = normalize(SIMD3<Float>(0, eyeHeight, 0) - center)
@@ -180,7 +285,7 @@ extension FrameUniforms {
             hudCenter = SIMD4(center, 0.15)
             hudRight = SIMD4(right, 0.05)
             hudUp = SIMD4(cross(toEye, right), 1)
-            hudStyle = SIMD4(0, 0, 0, 0)
+            hudStyle = SIMD4(0, 0, Float(alarm), 0)
         }
     }
 }

@@ -14,22 +14,32 @@ struct ViewUniforms {
 };
 
 struct FrameUniforms {
-    float4 sunDirection;     // xyz 指向太阳（世界坐标，朝向和舞台一致）
+    float4 sunDirection;     // xyz 指向太阳（世界坐标）
     float4 camera;           // x 舞台 y 加上它 = 海拔（米），y 时间（秒），z 画面亮度（淡入淡出），w 有注视点 rate map
-    float4 ground;           // xz 你在云 / 海面坐标里的水平位置（米；云坐标原点 = 天气图中心），yw 未用
+    float4 ground;           // xz 你在云坐标里的水平位置（米；云坐标原点 = 天气图中心），yw 地面坐标 - 云坐标
     float4 clouds;           // x 云层 pass 的分辨率比例，y 步长倍数（越大越省），z 消光系数（每米），w 覆盖率偏移
     float4 exposure;         // x 曝光，yzw 未用
     float4 hudCenter;        // 高度表中心（舞台空间），w 宽（米）
     float4 hudRight;         // 右方向，w 高（米）
     float4 hudUp;            // 上方向，w 不透明度
     uint4 hudGlyphs;         // 高度数字的字形，每字节一个（0-9 数字、10 逗号、255 结束）
-    float4 hudStyle;         // x 样式（0 前方面板，1 手腕表盘），y 表盘外圈弧的比例（高度 / 30,000 ft）
+    float4 hudStyle;         // x 样式（0 前方面板，1 手腕表盘），y 表盘外圈弧的比例（高度 / 30,000 ft），z 报警（0/1/2）
+    float4 heading;          // x cos 航向，y sin 航向（舞台 → 世界绕 y 轴转），z 转弯时的暗边强度，w 未用
+};
+
+/// 提示文字面板（舞台空间里的一块板）
+struct PanelUniforms {
+    float4 center;           // xyz 中心，w 宽（米）
+    float4 right;            // xyz 右方向，w 高（米）
+    float4 up;               // xyz 上方向，w 不透明度
 };
 
 /// 云的时间累积（见 Freefall.metal 的 cloudResolveFragment）
 struct TemporalUniforms {
     float4 pattern;          // xy 这一帧重算的是 2×2 块里的哪个像素，z 帧序号，w 历史有效（0/1）
-    float4 motion;           // xyz 这一帧到上一帧你在云坐标里的位移（x、海拔、z；舞台坐标要加的量），w 有上一帧的 rate map
+    float4 motion;           // w 有上一帧的 rate map，xyz 未用
+    float4 now;              // 这一帧：x、z 你在云坐标里的位置，y 舞台 → 海拔的偏移，w 航向（弧度）
+    float4 prev;             // 上一帧，同上
 };
 
 struct AtmosphereConstants {
@@ -89,6 +99,20 @@ static inline Ray viewRay(float2 screenXY, constant ViewUniforms &v, float stage
     r.origin = v.cameraPosition.xyz;
     r.direction = normalize(p.xyz - r.origin);
     r.origin.y += stageToAltitude;
+    return r;
+}
+
+/// 舞台方向 → 世界方向：绕 y 轴转航向（转向是世界绕你转）
+static inline float3 rotateHeading(float3 v, float c, float s) {
+    return float3(v.x * c + v.z * s, v.y, -v.x * s + v.z * c);
+}
+
+/// 世界里的视线：舞台视线转到世界朝向（原点只差几厘米的眼睛偏移，一起转）
+static inline Ray worldRay(float2 screenXY, constant ViewUniforms &v, constant FrameUniforms &F) {
+    Ray r = viewRay(screenXY, v, F.camera.x);
+    r.direction = rotateHeading(r.direction, F.heading.x, F.heading.y);
+    float3 o = rotateHeading(float3(r.origin.x, 0.0f, r.origin.z), F.heading.x, F.heading.y);
+    r.origin = float3(o.x, r.origin.y, o.z);
     return r;
 }
 

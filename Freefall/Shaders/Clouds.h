@@ -25,6 +25,15 @@
 #define ATOLL_SIZE 16000.0f
 #define ATOLL_MAX_DEPTH 60.0f
 
+// 着陆的白沙洲和靶（必须和 Swift 的 LandingZone.atoll 一致：中心、半轴、朝向 0.5 弧度、靶心、半径）
+#define SANDBAR_CENTER float2(405.0f, -640.0f)
+#define SANDBAR_AXES float2(170.0f, 95.0f)
+#define SANDBAR_COS 0.87758f
+#define SANDBAR_SIN 0.47943f
+#define TARGET_CENTER float2(380.0f, -620.0f)
+#define TARGET_RADIUS 20.0f
+#define TARGET_BULLSEYE 3.0f
+
 struct Weather { float coverage; float base; float top; float columnar; };
 
 static inline Weather sampleWeather(float2 xz, texture2d<float> weather) {

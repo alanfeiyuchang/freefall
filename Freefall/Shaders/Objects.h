@@ -37,6 +37,7 @@ struct ObjectOut {
     float3 normal;
     float4 color;
     float interior;
+    float2 uv;                 // 伞布：展向、弦向坐标（米），画缝线用
     uint viewIndex [[flat]];
 };
 
@@ -53,6 +54,7 @@ vertex ObjectOut meshVertex(uint vid [[vertex_id]],
     o.normal = (O.model * float4(v.normal.xyz, 0.0f)).xyz;
     o.color = v.color;
     o.interior = v.normal.w;
+    o.uv = float2(v.position.w, v.normal.w);
     o.viewIndex = amp;
     return o;
 }
@@ -101,6 +103,7 @@ vertex ObjectOut roundConeVertex(uint vid [[vertex_id]],
     o.normal = offset;
     o.color = c.color;
     o.interior = O.params.y;
+    o.uv = float2(0.0f);
     o.viewIndex = amp;
     return o;
 }
@@ -114,7 +117,8 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
     float3 V = normalize(eye - in.stagePos);
     float3 N = normalize(in.normal);
     if (dot(N, V) < 0.0f) N = -N;                 // 两面都画（舱壁、伞衣）
-    float3 L = F.sunDirection.xyz;
+    // 太阳在世界坐标里；伞下转向是世界绕着你转，舞台里的东西要按航向反过来转一下太阳
+    float3 L = rotateHeading(F.sunDirection.xyz, F.heading.x, -F.heading.y);
     int material = int(in.color.a + 0.5f);
     float3 albedo = in.color.rgb;
     float daylight = 1.0f - in.interior;
@@ -134,7 +138,25 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
     } else if (material == MATERIAL_FABRIC) {
         // 正面挨太阳照；背面看过去是透过来的光（尼龙伞布很薄，逆光下整片发亮）
         float lit = saturate(dot(N, L)), through = saturate(-dot(N, L));
-        radiance = albedo / PI * (sunE * (lit + 0.45f * through) + skyE);
+        // 缝线：每个气室之间的承重肋（挂伞绳，几层布加加强带，透光最少），气室中间还有一道不承重的肋；
+        // 弦向每 0.6 米一道拼缝。从下面逆光看，就是一格一格的暗线
+        const float cellWidth = 8.4f / 9.0f;
+        float u = in.uv.x, v = in.uv.y;
+        float du = abs(fract(u / cellWidth + 0.5f) - 0.5f) * cellWidth;
+        float dh = abs(fract(u / cellWidth) - 0.5f) * cellWidth;
+        float dv = abs(fract(v / 0.6f + 0.5f) - 0.5f) * 0.6f;
+        float fu = max(fwidth(u), 1e-4f), fv = max(fwidth(v), 1e-4f);
+        float rib = 1.0f - smoothstep(0.015f, 0.015f + fu * 1.5f, du);
+        float halfRib = 1.0f - smoothstep(0.008f, 0.008f + fu * 1.5f, dh);
+        float seam = 1.0f - smoothstep(0.006f, 0.006f + fv * 1.5f, dv);
+        float layers = 1.0f - 0.6f * rib - 0.3f * halfRib - 0.25f * seam;
+        // 尼龙有一层柔和的光泽
+        float3 H = normalize(L + V);
+        float sheen = pow(saturate(dot(N, H)), 24.0f) * 0.12f;
+        // 透过来的光被染成布的颜色（尼龙对自己颜色的光透得最多），所以逆光的伞衣颜色更浓、更亮
+        float3 transmitted = albedo * sqrt(albedo) * 1.6f * through * layers;
+        radiance = albedo / PI * (sunE * lit * (0.85f + 0.15f * layers) + skyE) + sunE * transmitted / PI
+                 + sunE * sheen * lit;
     } else {
         // 太阳只照得到舱门附近（室内程度低的地方）；天光往里衰减得慢一些；越往里红灯越明显
         float3 E = sunE * saturate(dot(N, L)) * daylight * daylight

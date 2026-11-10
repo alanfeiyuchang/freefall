@@ -1,11 +1,15 @@
 // 离屏渲染检查（在 Mac 上跑，不开窗口、不出声、不用戴头显）：
 // 用和 Vision Pro 一样的方式——2 层纹理数组 + vertex amplification——跑 SceneRenderer，
-// 按时间线上的几个时刻和朝向出图，按真机分辨率量 GPU 耗时，或者把整段跳伞渲成预览帧。
+// 用 app 里同一套 JumpSession（自动驾驶抓杆、松手、拉伞、转向）跑到某个时刻和朝向出图，按真机分辨率量 GPU 耗时，
+// 或者把整段跳伞渲成预览帧。
 //
-//     tools/render-check/run.sh [输出目录] [shots|perf|seq|film|maps|all] [只画名字里含这个的镜头]
+//     tools/render-check/run.sh [输出目录] [shots|perf|seq|film|maps|sim|hands|all] [只画名字里含这个的镜头]
+//
+//   sim    不出图：自动驾驶在不同高度开伞各跳一次，打印结果（太晚开伞要摔、正常开伞要能飞进靶）
+//   hands  不出图：用合成的手走真手的抓握逻辑（抓杆、松手、提前拉、报警后拉伞、拉操纵环转向），打印每一步
 //
 // 出图只存左眼（右眼只差 6.4 cm 视差）。perf 的数字是 M 系列 Mac 的，真机（M2 Vision Pro，GPU 10 核）大约要乘 4。
-// 手部追踪和透视只有真机有，这里用合成的关节姿态（syntheticHand）摆手，画两只肤色的手代替真手，检查表戴得对不对。
+// 手部追踪和透视只有真机有，这里用合成的关节姿态（syntheticHand）摆手，画肤色的手代替真手。
 
 import CoreGraphics
 import Foundation
@@ -32,6 +36,9 @@ if let v = env["STEP"], let x = Float(v) { renderer.settings.cloudStep = x }
 if let v = env["CLOUDSCALE"], let x = Float(v) { renderer.settings.cloudScale = x }
 
 let eyeHeight: Float = 1.6
+let layout = BodyLayout(anchor: SIMD3(0, eyeHeight, 0))
+let textPanel = TextPanel(device: device)
+var panelPlacer = PanelPlacer()
 
 /// 右手系、reverse-Z、无穷远平面（和 CompositorServices 一样：近平面深度 1，无穷远 0）
 func projection(fovY: Float, aspect: Float, near: Float) -> simd_float4x4 {
@@ -60,7 +67,7 @@ func makeArray(_ format: MTLPixelFormat, width: Int, height: Int, shared: Bool) 
 
 // MARK: - 合成的手
 
-/// 按手腕位置、手指朝向、手心朝向摆一只放松微屈的手（27 个关节，顺序同 HandJoint）。
+/// 按手腕位置、手指朝向、手心朝向摆一只手（27 个关节，顺序同 HandJoint）。curl 0.3 放松微屈，1.5 握拳。
 func syntheticHand(left: Bool, wrist: SIMD3<Float>, forward: SIMD3<Float>, palm: SIMD3<Float>,
                    curl: Float = 0.28) -> HandPose {
     let F = normalize(forward)
@@ -100,29 +107,97 @@ func syntheticHand(left: Bool, wrist: SIMD3<Float>, forward: SIMD3<Float>, palm:
     return HandPose(joints: j, isLeft: left)
 }
 
-enum Hands { case none, arch, watch }
+/// 让一只手「握住」某一点：手心中心（手腕往中指根 55%）落在这一点，手指朝 forward 方向
+func grip(left: Bool, at point: SIMD3<Float>, forward: SIMD3<Float>, palm: SIMD3<Float>, curl: Float) -> HandPose {
+    let wrist = point - normalize(forward) * 0.053
+    return syntheticHand(left: left, wrist: wrist, forward: forward, palm: palm, curl: curl)
+}
 
-/// 自由落体的「弓身」姿势：两手在头两侧前方；看表：左手横在胸前、手心朝下（表面朝上）
-func hands(_ pose: Hands) -> [HandPose] {
+enum Hands { case none, arch, watch, watchRight, barOpen, bar, handle, toggles }
+
+/// 摆手：弓身（两手在头两侧）、看表（手横在胸前）、握扶杆、抓拉手、抓操纵环
+func hands(_ pose: Hands, _ session: JumpSession) -> [HandPose] {
     let archLeft = syntheticHand(left: true, wrist: SIMD3(-0.33, eyeHeight - 0.1, -0.36),
                                  forward: SIMD3(-0.35, 0.22, -1), palm: SIMD3(0, -1, -0.3))
     let archRight = syntheticHand(left: false, wrist: SIMD3(0.33, eyeHeight - 0.1, -0.36),
                                   forward: SIMD3(0.35, 0.22, -1), palm: SIMD3(0, -1, -0.3))
+    let bar = session.timeline.bar
+    let barPoint = SIMD3<Float>(bar.x, eyeHeight - 0.22, bar.z)
     switch pose {
     case .none: return []
     case .arch: return [archLeft, archRight]
     case .watch:
         return [syntheticHand(left: true, wrist: SIMD3(-0.07, eyeHeight - 0.3, -0.32),
                               forward: SIMD3(1, 0.12, 0.08), palm: SIMD3(0, -1, 0.15))]
+    case .watchRight:
+        return [syntheticHand(left: false, wrist: SIMD3(0.07, eyeHeight - 0.3, -0.32),
+                              forward: SIMD3(-1, 0.12, 0.08), palm: SIMD3(0, -1, 0.15))]
+    case .barOpen, .bar:
+        // 右手从侧面握住竖杆：手指朝前绕过杆，手心朝右（朝着杆）
+        return [grip(left: false, at: barPoint + SIMD3(-0.035, 0, 0.02), forward: SIMD3(0.25, -0.1, -1),
+                     palm: SIMD3(1, 0, 0), curl: pose == .bar ? 1.5 : 0.35)]
+    case .handle:
+        let h = session.interaction.handle ?? layout.handleRest
+        return [grip(left: false, at: h, forward: SIMD3(-0.4, -0.2, -1), palm: SIMD3(0, -0.3, 1), curl: 1.5)]
+    case .toggles:
+        let t = session.interaction.toggles ?? layout.toggleRest
+        return [grip(left: true, at: t.0, forward: SIMD3(0.3, 1, -0.2), palm: SIMD3(1, 0, 0), curl: 1.5),
+                grip(left: false, at: t.1, forward: SIMD3(-0.3, 1, -0.2), palm: SIMD3(-1, 0, 0), curl: 1.5)]
     }
+}
+
+// MARK: - 跑模拟
+
+func autoSession(from timeline: JumpTimeline = JumpTimeline(), deployFeet: Double = 3000) -> JumpSession {
+    let s = JumpSession(timeline: timeline, realHands: true, autopilot: Autopilot(deployFeet: deployFeet))
+    s.setEyeHeight(eyeHeight)
+    return s
+}
+
+/// 按 90 Hz 往前跑，直到 stop 返回 true（或者跳完）
+func run(_ session: JumpSession, until stop: (JumpTimeline) -> Bool) {
+    while !stop(session.timeline), !session.timeline.isOver {
+        session.step(dt: 1.0 / 90, hands: [], layout: layout)
+    }
+}
+
+func run(_ session: JumpSession, for seconds: Double) {
+    let end = session.timeline.time + seconds
+    run(session) { $0.time >= end }
+}
+
+/// 从机舱开始自动跳，跑到某个状态
+func at(deployFeet: Double = 3000, _ stop: (JumpTimeline) -> Bool) -> JumpSession {
+    let s = autoSession(deployFeet: deployFeet)
+    run(s, until: stop)
+    return s
+}
+
+func freefall(_ altitude: Double) -> JumpSession { autoSession(from: JumpTimeline(freefallFrom: altitude)) }
+
+/// 某个时刻之后过了多少秒（还没到是 -1）
+func since(_ moment: Double?, _ t: JumpTimeline) -> Double { moment.map { t.time - $0 } ?? -1 }
+
+/// 开伞后多少秒
+func deployed(_ seconds: Double) -> JumpSession { at { ($0.sinceDeploy ?? -1) >= seconds } }
+
+/// 看向靶的朝向（度）
+func lookAtTarget(_ t: JumpTimeline) -> (yaw: Float, pitch: Float) {
+    let d = t.scene.target - t.groundPosition
+    let c = cos(t.heading), s = sin(t.heading)
+    let local = SIMD2(d.x * c - d.y * s, d.x * s + d.y * c)
+    let yaw = atan2(-local.x, -local.y) * 180 / .pi
+    let pitch = atan2(-t.heightAboveGround - Double(eyeHeight), length(local)) * 180 / .pi
+    return (Float(yaw), Float(pitch))
 }
 
 // MARK: - 画一帧
 
 /// 画一帧（两只眼），返回 GPU 耗时（毫秒）。云层是时间累积的：同一个画面连画几帧才收敛。
 @discardableResult
-func render(_ timeline: JumpTimeline, yaw: Float, pitch: Float, hands handPoses: [HandPose],
-            color: MTLTexture, depth: MTLTexture, fovY: Float, handTracking: Bool = false) -> Double {
+func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [HandPose],
+            color: MTLTexture, depth: MTLTexture, fovY: Float, handTracking: Bool = true,
+            watchOnLeft: Bool = true, panel showPanel: Bool = true) -> Double {
     let width = color.width, height = color.height
     let head = rotation(yaw: yaw, pitch: pitch)
     let proj = projection(fovY: fovY, aspect: Float(width) / Float(height), near: 0.05)
@@ -137,21 +212,30 @@ func render(_ timeline: JumpTimeline, yaw: Float, pitch: Float, hands handPoses:
                                   viewport: SIMD4(0, 0, Float(width), Float(height))))
     }
 
-    let altitude = Float(timeline.altitude)
+    let t = session.timeline
+    let altitude = Float(t.altitude)
     var frame = FrameUniforms()
-    frame.camera = SIMD4(altitude - eyeHeight, Float(timeline.time), Float(timeline.brightness), 0)
-    frame.ground = SIMD4(Float(timeline.position.x), 0, Float(timeline.position.y), 0)
-    let leftHand = handPoses.first(where: { $0.isLeft })
-    frame.placeAltimeter(feet: timeline.altitudeFeet, eyeHeight: eyeHeight, leftHand: leftHand)
-    // 和真机一样：允许了手部追踪时只有手腕上的表，左手不在视野里就没有高度表
-    if handTracking && leftHand == nil { frame.hudUp.w = 0 }
-    let objects = SceneObjects.make(timeline: timeline, eyeHeight: eyeHeight, hands: handPoses, proxyHands: true)
+    frame.camera = SIMD4(altitude - eyeHeight, Float(t.time), Float(t.brightness), 0)
+    frame.ground = SIMD4(Float(t.position.x), Float(t.landShift.x), Float(t.position.y), Float(t.landShift.y))
+    let turning = Float(min(abs(t.turnRate) / JumpTimeline.maxTurnRate, 1))
+    frame.heading = SIMD4(Float(cos(t.heading)), Float(sin(t.heading)), turning * 0.55, 0)
+    let watchHand = handPoses.first(where: { $0.isLeft == watchOnLeft })
+    frame.placeAltimeter(feet: t.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand, alarm: t.alarmLevel)
+    // 和真机一样：允许了手部追踪时只有手腕上的表，戴表的手不在视野里就没有高度表
+    if handTracking && watchHand == nil { frame.hudUp.w = 0 }
+    let objects = session.objects(layout: layout, hands: handPoses, watchOnLeft: watchOnLeft, proxyHands: true)
+    textPanel.set(showPanel ? session.hint : "")
+    let forward = (head * SIMD4<Float>(0, 0, -1, 0)).xyz
+    let panel = textPanel.texture.map {
+        (texture: $0, uniforms: panelPlacer.place(head: SIMD3(0, eyeHeight, 0), forward: forward, dt: 1.0 / 90,
+                                                  width: $0.width, height: $0.height))
+    }
 
     let cb = queue.makeCommandBuffer()!
     renderer.encodeSky(cb, altitude: altitude)
     let vp = MTLViewport(originX: 0, originY: 0, width: Double(width), height: Double(height), znear: 0, zfar: 1)
     renderer.encode(cb, views: views, viewports: [vp, vp], frame: frame, colorTexture: color, depthTexture: depth,
-                    renderTargetArrayLength: 2, rateMap: nil, objects: objects)
+                    renderTargetArrayLength: 2, rateMap: nil, objects: objects, panel: panel)
     cb.commit()
     cb.waitUntilCompleted()
     if let error = cb.error { print("GPU 错误：\(error)") }
@@ -178,52 +262,62 @@ func saveLeftEye(_ color: MTLTexture, to url: URL) {
     savePNG(bgra: bytes, width: width, height: height, to: url)
 }
 
-// MARK: - 时间线上的时刻
-
-/// 从头按 90 Hz 跑到时刻 t（不捏手指，第 11 秒自动跳）
-func timeline(at t: Double) -> JumpTimeline {
-    var tl = JumpTimeline()
-    while tl.time < t, !tl.isOver { tl.step(1.0 / 90) }
-    return tl
-}
-
-/// 开伞那一刻（时间线时间）
-let deployTime: Double = {
-    var tl = JumpTimeline()
-    while tl.deployTime == nil, !tl.isOver { tl.step(1.0 / 90) }
-    return tl.deployTime ?? 0
-}()
+// MARK: - 镜头
 
 struct Shot {
     var name: String
-    var timeline: JumpTimeline
+    var session: () -> JumpSession
     var yaw: Float          // 度，正 = 向左转
     var pitch: Float        // 度，负 = 低头
     var hands: Hands = .none
     var fovY: Float = 70
+    var watchOnLeft = true
+    /// 按靶的方向看（覆盖 yaw / pitch）
+    var lookAtTarget = false
 }
 
-func freefall(_ altitude: Double) -> JumpTimeline { JumpTimeline(freefallFrom: altitude) }
+let alarmFeet = { (feet: Int) in at { $0.altitudeFeet <= feet } }
 
 let shots: [Shot] = [
-    Shot(name: "c1_cabin_ramp", timeline: timeline(at: 3), yaw: 0, pitch: -12),
-    Shot(name: "c2_cabin_front", timeline: timeline(at: 3), yaw: 180, pitch: -8),
-    Shot(name: "c3_green_light", timeline: timeline(at: 8), yaw: -18, pitch: 0),
-    Shot(name: "c4_exit", timeline: timeline(at: 12.4), yaw: 0, pitch: -10),
-    Shot(name: "c5_plane_leaving", timeline: timeline(at: 16), yaw: 175, pitch: 22),
-    Shot(name: "c6_plane_far", timeline: timeline(at: 24), yaw: 175, pitch: 32),
-    Shot(name: "01_exit_down45", timeline: freefall(9100), yaw: 0, pitch: -45, hands: .arch),
-    Shot(name: "02_exit_horizon", timeline: freefall(9100), yaw: 0, pitch: -8),
-    Shot(name: "05_tower_side", timeline: freefall(6000), yaw: 30, pitch: -10, hands: .arch),
-    Shot(name: "g1_watch", timeline: freefall(6500), yaw: 0, pitch: -50, hands: .watch),
-    Shot(name: "g2_watch_zoom", timeline: freefall(6500), yaw: 22, pitch: -38, hands: .watch, fovY: 22),
-    Shot(name: "07_in_deck", timeline: freefall(2800), yaw: 0, pitch: -30),
-    Shot(name: "08_below_deck", timeline: freefall(2100), yaw: 0, pitch: -40, hands: .arch),
-    Shot(name: "p1_deploy", timeline: timeline(at: deployTime + 1.0), yaw: 0, pitch: 70),
-    Shot(name: "p2_canopy_up", timeline: timeline(at: deployTime + 8), yaw: 15, pitch: 62),
-    Shot(name: "p3_canopy_view", timeline: timeline(at: deployTime + 20), yaw: 0, pitch: -32),
-    Shot(name: "p4_canopy_reef", timeline: timeline(at: deployTime + 60), yaw: 10, pitch: -28),
-    Shot(name: "p5_canopy_low", timeline: timeline(at: deployTime + 85), yaw: 0, pitch: -22, hands: .watch),
+    Shot(name: "d1_door_start", session: { at { $0.time >= 1.5 } }, yaw: 0, pitch: -12),
+    Shot(name: "d2_bar_reach", session: { at { $0.time >= 1.5 } }, yaw: -48, pitch: -16, hands: .barOpen, fovY: 80),
+    Shot(name: "d3_holding_bar", session: { at { $0.holdingBar && $0.time >= 3.5 } }, yaw: -30, pitch: 4,
+         hands: .bar, fovY: 84),
+    Shot(name: "d4_door_light", session: { at { $0.holdingBar && $0.time >= 3.5 } }, yaw: 0, pitch: 30, fovY: 80),
+    Shot(name: "d5_exit", session: { at { $0.phase == .exit && $0.time - ($0.exitTime ?? 0) > 0.8 } }, yaw: 0,
+         pitch: -10),
+    Shot(name: "c5_plane_leaving", session: { at { since($0.leftRampTime, $0) >= 3.5 } },
+         yaw: 175, pitch: 22),
+    Shot(name: "f1_exit_down45", session: { freefall(9100) }, yaw: 0, pitch: -45, hands: .arch),
+    Shot(name: "f2_tower_side", session: { freefall(6000) }, yaw: 30, pitch: -10, hands: .arch),
+    Shot(name: "g2_watch_zoom", session: { freefall(6500) }, yaw: 22, pitch: -38, hands: .watch, fovY: 22),
+    Shot(name: "g3_watch_right", session: { freefall(6500) }, yaw: -22, pitch: -38, hands: .watchRight, fovY: 22,
+         watchOnLeft: false),
+    Shot(name: "f3_below_deck", session: { freefall(2100) }, yaw: 0, pitch: -40, hands: .arch),
+    Shot(name: "f4_alarm_watch", session: { alarmFeet(3400) }, yaw: 0, pitch: -50, hands: .watch, fovY: 60),
+    Shot(name: "f5_handle", session: { alarmFeet(3300) }, yaw: -10, pitch: -62, hands: .handle, fovY: 80),
+    Shot(name: "o1_bag", session: { deployed(0.4) }, yaw: 0, pitch: 72, fovY: 90),
+    Shot(name: "o2_lines", session: { deployed(0.9) }, yaw: 0, pitch: 72, fovY: 90),
+    Shot(name: "o3_inflate", session: { deployed(1.6) }, yaw: 0, pitch: 70, fovY: 90),
+    Shot(name: "o4_open", session: { deployed(2.6) }, yaw: 0, pitch: 66, fovY: 90),
+    Shot(name: "o5_full", session: { deployed(4.5) }, yaw: 0, pitch: 62, fovY: 90),
+    Shot(name: "k1_canopy_toggles", session: { deployed(12) }, yaw: 0, pitch: 40, hands: .toggles, fovY: 90),
+    Shot(name: "k2_left_brake", session: {
+        let s = deployed(15)
+        s.autopilot?.hold = (1, 0)
+        run(s, for: 2.5)
+        return s
+    }, yaw: 0, pitch: 55, hands: .toggles, fovY: 90),
+    Shot(name: "k3_canopy_view", session: { deployed(25) }, yaw: 0, pitch: -32),
+    Shot(name: "k4_target_far", session: { at { $0.phase == .canopy && $0.heightAboveGround < 300 } }, yaw: 0, pitch: 0,
+         lookAtTarget: true),
+    Shot(name: "k5_target_near", session: { at { $0.phase == .canopy && $0.heightAboveGround < 40 } }, yaw: 0,
+         pitch: 0, fovY: 80, lookAtTarget: true),
+    Shot(name: "l1_landed_down", session: { at { since($0.landedTime, $0) >= 2 } }, yaw: 0,
+         pitch: -55, fovY: 80),
+    Shot(name: "l2_landed_canopy", session: { at { since($0.landedTime, $0) >= 6 } }, yaw: 0,
+         pitch: -20, fovY: 80),
+    Shot(name: "l3_crash", session: { at(deployFeet: 200) { $0.landedTime != nil } }, yaw: 0, pitch: -30),
 ]
 
 if mode == "shots" || mode == "all" {
@@ -232,16 +326,136 @@ if mode == "shots" || mode == "all" {
     let depth = makeArray(.depth32Float, width: width, height: height, shared: false)
     for shot in shots where filter.isEmpty || shot.name.contains(filter) {
         renderer.resetHistory()
-        let h = hands(shot.hands)
+        panelPlacer = PanelPlacer()
+        let session = shot.session()
+        let h = hands(shot.hands, session)
+        var yaw = shot.yaw, pitch = shot.pitch
+        if shot.lookAtTarget { (yaw, pitch) = lookAtTarget(session.timeline) }
         for _ in 0..<11 {
-            render(shot.timeline, yaw: shot.yaw, pitch: shot.pitch, hands: h, color: color, depth: depth, fovY: shot.fovY)
+            render(session, yaw: yaw, pitch: pitch, hands: h, color: color, depth: depth, fovY: shot.fovY,
+                   watchOnLeft: shot.watchOnLeft)
         }
-        let ms = render(shot.timeline, yaw: shot.yaw, pitch: shot.pitch, hands: h, color: color, depth: depth,
-                        fovY: shot.fovY)
+        let ms = render(session, yaw: yaw, pitch: pitch, hands: h, color: color, depth: depth, fovY: shot.fovY,
+                        watchOnLeft: shot.watchOnLeft)
         saveLeftEye(color, to: outDir.appendingPathComponent("\(shot.name).png"))
-        print(String(format: "%@  t=%.1f s  %.0f m  %@  %.1f ms", shot.name, shot.timeline.time,
-                     shot.timeline.altitude, String(describing: shot.timeline.phase), ms))
+        let t = session.timeline
+        print(String(format: "%@  t=%.1f s  %.0f m（离地 %.0f）  %@  %.1f ms  「%@」", shot.name, t.time, t.altitude,
+                     t.heightAboveGround, String(describing: t.phase), ms,
+                     session.hint.replacingOccurrences(of: "\n", with: " / ")))
     }
+}
+
+if mode == "sim" || mode == "all" {
+    // 不同高度开伞：太晚要摔；正常开伞自动驾驶要能飞进靶（自动驾驶飞得进，人才有机会）
+    print("开伞高度 → 结果：")
+    for feet in [3500.0, 3000, 2500, 2000, 1500, 1000, 600, 300, -1] {
+        let s = autoSession(deployFeet: feet)
+        var openAt = SIMD2<Double>(0, 0), openHAG = 0.0
+        run(s) { t in
+            if t.phase == .opening, t.sinceDeploy ?? 1 < 0.02 { openAt = t.groundPosition; openHAG = t.heightAboveGround }
+            return t.landedTime != nil
+        }
+        let t = s.timeline
+        let toTarget = length(t.scene.target - openAt)
+        if env["PILOT"] == String(Int(feet)) {
+            // 再跑一遍，打印伞下每 2 秒的状态
+            let d = autoSession(deployFeet: feet)
+            run(d) { $0.phase == .canopy }
+            while d.timeline.landedTime == nil {
+                let tl = d.timeline
+                if Int((tl.time * 90).rounded()) % 180 == 0 {
+                    let v = tl.scene.target - tl.groundPosition
+                    let reach = JumpTimeline.canopySpeed * max(tl.heightAboveGround - 6, 0) / JumpTimeline.canopySink + 15
+                    print(String(format: "    t=%5.1f 离地 %5.0f  离靶 %5.0f  能飞 %5.0f  富余 %5.0f  刹车 %.2f/%.2f  航向 %6.0f°  地面 (%.0f, %.0f)",
+                                 tl.time, tl.heightAboveGround, length(v), reach, reach - length(v), tl.brakeLeft,
+                                 tl.brakeRight, tl.heading * 180 / .pi, tl.groundPosition.x, tl.groundPosition.y))
+                }
+                d.step(dt: 1.0 / 90, hands: [], layout: layout)
+            }
+        }
+        print(String(format: "  %@  开伞时离地 %4.0f m、离靶 %4.0f m → %@  离靶心 %.1f m  落地 %.1f m/s  （t=%.0f s）",
+                     feet < 0 ? "  不开伞" : String(format: "%5.0f ft", feet), openHAG, toTarget,
+                     String(describing: t.outcome!), t.landingDistance, t.landingSpeed, t.time))
+    }
+}
+
+if mode == "hands" || mode == "all" {
+    // 真手的抓握逻辑：不开自动驾驶，用合成的手一步步做（握拳 = 抓）
+    let s = JumpSession(timeline: JumpTimeline(), realHands: true, autopilot: nil)
+    s.setEyeHeight(eyeHeight)
+    func step(_ seconds: Double, _ makeHands: () -> [HandPose]) {
+        let end = s.timeline.time + seconds
+        while s.timeline.time < end, !s.timeline.isOver {
+            s.step(dt: 1.0 / 90, hands: makeHands(), layout: layout)
+        }
+    }
+    func report(_ what: String) {
+        let t = s.timeline
+        print(String(format: "  %@ → %@  抓杆 %@  离地 %.0f m  拉手 %@  刹车 %.2f/%.2f  航向 %.1f°  「%@」", what,
+                     String(describing: t.phase), t.holdingBar ? "是" : "否", t.heightAboveGround,
+                     s.interaction.handlePulled ? "已拉" : "没拉", t.brakeLeft, t.brakeRight, t.heading * 180 / .pi,
+                     s.hint.replacingOccurrences(of: "\n", with: " / ")))
+    }
+    print("真手流程：")
+    let bar = s.timeline.bar
+    let barPoint = SIMD3<Float>(bar.x, eyeHeight - 0.22, bar.z)
+    func barHand(_ curl: Float) -> [HandPose] {
+        [grip(left: false, at: barPoint + SIMD3(-0.035, 0, 0.02), forward: SIMD3(0.25, -0.1, -1), palm: SIMD3(1, 0, 0),
+              curl: curl)]
+    }
+    step(1.0) { barHand(0.35) }
+    report("张开手放到杆边上")
+    step(1.0) { barHand(1.5) }
+    report("握拳")
+    step(0.2) { [] }
+    report("手丢了 0.2 秒（应该还算抓着）")
+    step(2.0) { barHand(1.5) }
+    step(0.3) { barHand(0.35) }
+    report("松开")
+    run(s) { $0.phase == .freefall && $0.heightAboveGround < 1500 }
+    // 还没报警就去拉：拉不动
+    var reach: Float = 0
+    func handleHand(_ pull: Float, _ curl: Float) -> [HandPose] {
+        let p = layout.handleRest + normalize(SIMD3<Float>(0.3, 0.1, -1)) * pull
+        return [grip(left: false, at: p, forward: SIMD3(-0.4, -0.2, -1), palm: SIMD3(0, -0.3, 1), curl: curl)]
+    }
+    step(0.3) { handleHand(0, 0.35) }
+    step(0.3) { handleHand(0, 1.5) }
+    step(0.5) { reach = min(reach + 0.01, 0.3); return handleHand(reach, 1.5) }
+    report("报警前拉拉手")
+    step(0.3) { handleHand(0, 0.35) }
+    run(s) { $0.alarmLevel >= 1 }
+    report("手表报警")
+    reach = 0
+    step(0.3) { handleHand(0, 0.35) }
+    step(0.3) { handleHand(0, 1.5) }
+    step(0.5) { reach = min(reach + 0.01, 0.3); return handleHand(reach, 1.5) }
+    report("报警后拉拉手")
+    step(0.5) { [] }
+    run(s) { $0.phase == .canopy }
+    func toggleHands(_ leftPull: Float, _ rightPull: Float) -> [HandPose] {
+        let r = layout.toggleRest
+        return [grip(left: true, at: r.0 - SIMD3(0, leftPull, 0), forward: SIMD3(0.3, 1, -0.2), palm: SIMD3(1, 0, 0),
+                     curl: 1.5),
+                grip(left: false, at: r.1 - SIMD3(0, rightPull, 0), forward: SIMD3(-0.3, 1, -0.2),
+                     palm: SIMD3(-1, 0, 0), curl: 1.5)]
+    }
+    step(0.5) { toggleHands(0, 0) }
+    report("抓住两个操纵环")
+    let h0 = s.timeline.heading
+    var pull: Float = 0
+    step(3.0) { pull = min(pull + 0.004, 0.25); return toggleHands(pull, 0) }
+    report(String(format: "拉左环 3 秒（航向变了 %+.1f°，应该往左 = 正）", (s.timeline.heading - h0) * 180 / .pi))
+    let h1 = s.timeline.heading
+    step(3.0) { toggleHands(0, 0.25) }
+    report(String(format: "拉右环 3 秒（航向变了 %+.1f°，应该往右 = 负）", (s.timeline.heading - h1) * 180 / .pi))
+    step(0.5) {
+        let r = layout.toggleRest
+        return [grip(left: true, at: r.0 - SIMD3(0, 0.1, 0), forward: SIMD3(0.3, 1, -0.2), palm: SIMD3(1, 0, 0), curl: 0.3),
+                grip(left: false, at: r.1 - SIMD3(0, 0.1, 0), forward: SIMD3(-0.3, 1, -0.2), palm: SIMD3(-1, 0, 0),
+                     curl: 0.3)]
+    }
+    report("张开手（操纵环弹回）")
 }
 
 if mode == "seq" || mode == "all" {
@@ -250,11 +464,19 @@ if mode == "seq" || mode == "all" {
     let color = makeArray(.bgra8Unorm_srgb, width: width, height: height, shared: true)
     let depth = makeArray(.depth32Float, width: width, height: height, shared: false)
     renderer.resetHistory()
-    // SEQ=cabin：从机舱阶段开始（飞机以 70 m/s 掠过云层，查水平方向的重投影）
-    var tl = env["SEQ"] == "cabin" ? JumpTimeline() : freefall(Double(env["SEQALT"].flatMap(Float.init) ?? 7200))
+    // SEQ=cabin：从机舱阶段开始（飞机以 70 m/s 掠过云层，查水平方向的重投影）；SEQ=turn：伞下拉着左环转弯
+    let session: JumpSession
+    switch env["SEQ"] {
+    case "cabin": session = autoSession()
+    case "turn":
+        session = deployed(15)
+        session.autopilot?.hold = (1, 0)
+    default: session = freefall(Double(env["SEQALT"].flatMap(Float.init) ?? 7200))
+    }
     for i in 0..<91 {
-        tl.step(1.0 / 90)
-        render(tl, yaw: 20 + Float(i) * 0.5, pitch: -30, hands: [], color: color, depth: depth, fovY: 70)
+        session.step(dt: 1.0 / 90, hands: [], layout: layout)
+        render(session, yaw: 20 + Float(i) * 0.5, pitch: -30, hands: [], color: color, depth: depth, fovY: 70,
+               panel: false)
         if [0, 4, 30, 90].contains(i) {
             saveLeftEye(color, to: outDir.appendingPathComponent(String(format: "seq_%02d.png", i)))
         }
@@ -264,31 +486,32 @@ if mode == "seq" || mode == "all" {
 
 if mode == "film" {
     // 预览视频：从机舱开始按 90 Hz 跑完整段（时间累积和重投影都和真机一样逐帧跑），存成 30 fps。
-    // 机舱、出舱、开伞这几段按原速，自由落体和伞降按 3 倍速。头部动作是写死的；只在抬手看表时画替身手。只存左眼。
+    // 机舱、出舱、开伞这几段按原速，自由落体和伞降按 3 倍速。头部动作是写死的。只存左眼。
     let width = 1280, height = 720
     let color = makeArray(.bgra8Unorm_srgb, width: width, height: height, shared: true)
     let depth = makeArray(.depth32Float, width: width, height: height, shared: false)
     renderer.resetHistory()
-    var tl = JumpTimeline()
+    let session = autoSession()
     var saved = 0
     var videoTime = 0.0, nextFrame = 0.0
     var yaw: Float = 0, pitch: Float = -10
     let framesDir = outDir.appendingPathComponent("frames")
     try? FileManager.default.createDirectory(at: framesDir, withIntermediateDirectories: true)
-    while !tl.isOver {
-        tl.step(1.0 / 90)
+    while !session.timeline.isOver {
+        session.step(dt: 1.0 / 90, hands: [], layout: layout)
+        let tl = session.timeline
         let t = Float(tl.time)
         var targetYaw: Float = 0, targetPitch: Float = -10
         var pose: Hands = .none
         var speed = 3.0
         let sinceRamp = tl.leftRampTime.map { tl.time - $0 } ?? -1
-        let sinceDeploy = tl.deployTime.map { tl.time - $0 } ?? -1
+        let sinceDeploy = tl.sinceDeploy ?? -1
         switch tl.phase {
         case .cabin:
             speed = 1
-            targetYaw = 5 * sin(t / 2)
+            targetYaw = tl.holdingBar ? -15 : 5 * sin(t / 2)
             targetPitch = -9
-            if tl.time > 5.5 && tl.time < 9 { targetYaw = -20; targetPitch = 0 }   // 看跳伞灯变绿
+            if tl.holdingBar { pose = .bar }
         case .exit:
             speed = 1
             targetPitch = -12
@@ -296,6 +519,10 @@ if mode == "film" {
             if sinceRamp < 7 {
                 speed = 1
                 if sinceRamp > 1.5 { targetYaw = 170; targetPitch = 25 }   // 回头看飞机飞走
+            } else if tl.alarmLevel > 0 {
+                speed = 1
+                targetPitch = -55
+                pose = .handle
             } else {
                 targetYaw = 28 * sin(t * 2 * .pi / 26) + 8
                 targetPitch = -34 + 9 * sin(t * 2 * .pi / 17)
@@ -304,23 +531,26 @@ if mode == "film" {
         case .opening:
             speed = 1
             targetPitch = 65
-        case .canopy, .done:
+        case .canopy:
+            pose = .toggles
             if sinceDeploy < 10 {
                 speed = 1
-                targetPitch = 62
-                targetYaw = 12
+                targetPitch = 55
+                targetYaw = 8
             } else {
-                targetYaw = 20 * sin(t * 2 * .pi / 30)
-                targetPitch = -28 + 6 * sin(t * 2 * .pi / 19)
-                if sinceDeploy > 50 && sinceDeploy < 55 { pose = .watch; targetPitch = -48; targetYaw = 0 }
+                let look = lookAtTarget(tl)
+                targetYaw = look.yaw * 0.6
+                targetPitch = max(look.pitch, -60) * 0.8
             }
+        case .landed, .done:
+            speed = 1
+            targetPitch = -40
         }
         // 头转得平滑一点（时间常数 0.4 秒），换镜头不会跳
         let k = Float(1 - exp(-1.0 / 90 / 0.4))
         yaw += (targetYaw - yaw) * k
         pitch += (targetPitch - pitch) * k
-        render(tl, yaw: yaw, pitch: pitch, hands: hands(pose), color: color, depth: depth, fovY: 64,
-               handTracking: true)
+        render(session, yaw: yaw, pitch: pitch, hands: hands(pose, session), color: color, depth: depth, fovY: 64)
         videoTime += 1.0 / 90 / speed
         if videoTime >= nextFrame {
             nextFrame += 1.0 / 30
@@ -328,7 +558,7 @@ if mode == "film" {
             saved += 1
         }
     }
-    print("预览帧 \(saved) 张（时间线 \(String(format: "%.1f", tl.time)) 秒）")
+    print("预览帧 \(saved) 张（时间线 \(String(format: "%.1f", session.timeline.time)) 秒）")
 }
 
 if mode == "perf" || mode == "all" {
@@ -338,19 +568,26 @@ if mode == "perf" || mode == "all" {
     let depth = makeArray(.depth32Float, width: width, height: height, shared: false)
     print("性能（两只眼 \(width)×\(height)，云层比例 \(renderer.settings.cloudScale)，步长倍数 \(renderer.settings.cloudStep)）：")
     for shot in shots where filter.isEmpty || shot.name.contains(filter) {
-        let h = hands(shot.hands)
+        panelPlacer = PanelPlacer()
+        let session = shot.session()
+        let h = hands(shot.hands, session)
         for _ in 0..<4 {
-            render(shot.timeline, yaw: shot.yaw, pitch: shot.pitch, hands: h, color: color, depth: depth, fovY: 100)
+            render(session, yaw: shot.yaw, pitch: shot.pitch, hands: h, color: color, depth: depth, fovY: 100)
         }
         var times: [Double] = []
         // 这台 Mac 上别的程序也在用 GPU，单次计时抖得厉害：取 24 次里最快的（最接近不受干扰的耗时）和中位
         for _ in 0..<24 {
-            times.append(render(shot.timeline, yaw: shot.yaw, pitch: shot.pitch, hands: h,
-                                color: color, depth: depth, fovY: 100))
+            times.append(render(session, yaw: shot.yaw, pitch: shot.pitch, hands: h, color: color, depth: depth,
+                                fovY: 100))
         }
         times.sort()
         print(String(format: "  %@  最快 %.2f ms  中位 %.2f ms", shot.name, times[0], times[times.count / 2]))
     }
+    // CPU：伞衣布料每帧的耗时（真机在渲染线程上跑）
+    let s = deployed(5)
+    let start = Date()
+    for _ in 0..<900 { s.step(dt: 1.0 / 90, hands: [], layout: layout) }
+    print(String(format: "  伞衣布料 + 时间线：每帧 %.3f ms（CPU）", Date().timeIntervalSince(start) / 900 * 1000))
 }
 
 if mode == "maps" || mode == "all" {
@@ -377,7 +614,7 @@ if mode == "maps" || mode == "all" {
     }
     savePNG(bgra: bgra, width: w.width, height: w.height, to: outDir.appendingPathComponent("map_weather.png"))
 
-    // 环礁图，叠上时间线的水平路线（红点：自由落体，黄点：伞降），看伞降会不会飞过礁和沙洲
+    // 环礁图，叠上自动驾驶的水平路线（红点：自由落体，黄点：伞降，白点：靶），看伞降会不会飞过礁和沙洲
     let a = renderer.atoll
     let atollRGBA = dump(a, bytesPerPixel: 4)
     var atollBGRA = [UInt8](repeating: 0, count: atollRGBA.count)
@@ -392,46 +629,65 @@ if mode == "maps" || mode == "all" {
         atollBGRA[i] = UInt8(min(255, b * 255)); atollBGRA[i + 1] = UInt8(min(255, g * 255))
         atollBGRA[i + 2] = UInt8(min(255, r * 255)); atollBGRA[i + 3] = 255
     }
-    var tl = JumpTimeline()
+    // 环礁图的中心和大小（和 Clouds.h 的 ATOLL_CENTER / ATOLL_SIZE 一致）
+    let atollCenter = SIMD2<Double>(Double(env["ATOLLX"].flatMap(Float.init) ?? 1800),
+                                    Double(env["ATOLLZ"].flatMap(Float.init) ?? -3350))
+    let atollSize = Double(env["ATOLLSIZE"].flatMap(Float.init) ?? 16000)
+    func plot(_ p: SIMD2<Double>, _ color: (UInt8, UInt8, UInt8), radius: Int = 3) {
+        let uv = (p - atollCenter) / atollSize + 0.5
+        let px = Int(uv.x * Double(a.width)), py = Int(uv.y * Double(a.height))
+        for dy in -radius...radius { for dx in -radius...radius {
+            let x = px + dx, y = py + dy
+            if x >= 0, y >= 0, x < a.width, y < a.height {
+                let i = (y * a.width + x) * 4
+                atollBGRA[i] = color.2; atollBGRA[i + 1] = color.1; atollBGRA[i + 2] = color.0
+            }
+        } }
+    }
+    let s = autoSession()
     var path: [String] = []
-    let atollCenter = SIMD2<Double>(Double(env["ATOLLX"].flatMap(Float.init) ?? 0),
-                                    Double(env["ATOLLZ"].flatMap(Float.init) ?? 0))
-    while !tl.isOver {
-        tl.step(1.0 / 90)
+    while !s.timeline.isOver {
+        s.step(dt: 1.0 / 90, hands: [], layout: layout)
+        let tl = s.timeline
         let step = Int((tl.time * 90).rounded())
-        if step % 90 == 0 {
-            // 地面坐标 → 环礁图像素（图 16 km 见方，2048 像素）
-            let uv = (tl.position - atollCenter) / 16000 + 0.5
-            let px = Int(uv.x * Double(a.width)), py = Int(uv.y * Double(a.height))
+        if step % 45 == 0 {
             let canopy = tl.phase == .canopy || tl.phase == .opening
-            for dy in -3...3 { for dx in -3...3 {
-                let x = px + dx, y = py + dy
-                if x >= 0, y >= 0, x < a.width, y < a.height {
-                    let i = (y * a.width + x) * 4
-                    atollBGRA[i] = 0; atollBGRA[i + 1] = canopy ? 230 : 0; atollBGRA[i + 2] = 255
-                }
-            } }
+            plot(tl.groundPosition, canopy ? (255, 230, 0) : (255, 0, 0), radius: 1)
         }
         if step % (90 * 10) == 0 {
-            path.append(String(format: "t=%.0f %@ alt=%.0f x=%.0f z=%.0f", tl.time, String(describing: tl.phase),
-                               tl.altitude, tl.position.x, tl.position.y))
+            path.append(String(format: "t=%.0f %@ 离地=%.0f 地面 x=%.0f z=%.0f", tl.time, String(describing: tl.phase),
+                               tl.heightAboveGround, tl.groundPosition.x, tl.groundPosition.y))
         }
     }
+    plot(s.timeline.scene.target, (255, 255, 255), radius: 2)
     savePNG(bgra: atollBGRA, width: a.width, height: a.height, to: outDir.appendingPathComponent("map_atoll.png"))
+    // 着陆区放大：以靶为中心 2 km 见方
+    let zoom = 512
+    var crop = [UInt8](repeating: 0, count: zoom * zoom * 4)
+    let tuv = (s.timeline.scene.target - atollCenter) / atollSize + 0.5
+    let cx = Int(tuv.x * Double(a.width)), cy = Int(tuv.y * Double(a.height))
+    let span = Int(2000 / atollSize * Double(a.width))
+    for y in 0..<zoom { for x in 0..<zoom {
+        let sx = min(max(cx - span / 2 + x * span / zoom, 0), a.width - 1)
+        let sy = min(max(cy - span / 2 + y * span / zoom, 0), a.height - 1)
+        for c in 0..<4 { crop[(y * zoom + x) * 4 + c] = atollBGRA[(sy * a.width + sx) * 4 + c] }
+    } }
+    savePNG(bgra: crop, width: zoom, height: zoom, to: outDir.appendingPathComponent("map_landing.png"))
     print("时间线（每 10 秒）：\n  " + path.joined(separator: "\n  "))
+    print("结果：\(s.resultSummary ?? "没落地")")
 
-    let s = renderer.cloudShadow
-    let half = dump(s, bytesPerPixel: 2)
-    var gray = [UInt8](repeating: 255, count: s.width * s.height * 4)
+    let shadow = renderer.cloudShadow
+    let half = dump(shadow, bytesPerPixel: 2)
+    var gray = [UInt8](repeating: 255, count: shadow.width * shadow.height * 4)
     half.withUnsafeBytes { raw in
         let values = raw.bindMemory(to: Float16.self)
-        for i in 0..<(s.width * s.height) {
+        for i in 0..<(shadow.width * shadow.height) {
             let t = exp(-Float(values[i]) * renderer.settings.cloudExtinction * 0.5)
             let v = UInt8(max(0, min(255, t * 255)))
             gray[i * 4] = v; gray[i * 4 + 1] = v; gray[i * 4 + 2] = v
         }
     }
-    savePNG(bgra: gray, width: s.width, height: s.height, to: outDir.appendingPathComponent("map_shadow.png"))
+    savePNG(bgra: gray, width: shadow.width, height: shadow.height, to: outDir.appendingPathComponent("map_shadow.png"))
 
     // 大气常量（太阳照度记为 1）
     let constants = device.makeBuffer(length: atmosphereConstantsSize, options: .storageModeShared)!

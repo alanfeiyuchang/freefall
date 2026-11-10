@@ -14,7 +14,7 @@ struct FrameUniforms {
     var sunDirection = SIMD4<Float>(0, 1, 0, 0)
     /// x 舞台 y 加上它 = 海拔（米），y 时间，z 画面亮度，w 有注视点 rate map（SceneRenderer 填）
     var camera = SIMD4<Float>(0, 0, 1, 0)
-    /// xz 你在云 / 海面坐标里的水平位置（米）
+    /// xz 你在云坐标里的水平位置（米），yw 地面坐标 - 云坐标（JumpTimeline.landShift）
     var ground = SIMD4<Float>(0, 0, 0, 0)
     /// x 云层分辨率比例，y 步长倍数，z 消光系数，w 覆盖率偏移（SceneRenderer 按 settings 填）
     var clouds = SIMD4<Float>(0.5, 1, 0.035, 0)
@@ -28,8 +28,17 @@ struct FrameUniforms {
     var hudUp = SIMD4<Float>(0, 1, 0, 0)
     /// 高度数字的字形，每字节一个（0-9、10 逗号、255 结束）
     var hudGlyphs = SIMD4<UInt32>(repeating: 0xFFFF_FFFF)
-    /// x 样式（0 前方面板，1 手腕表盘），y 表盘外圈弧的比例
+    /// x 样式（0 前方面板，1 手腕表盘），y 表盘外圈弧的比例，z 报警（0/1/2）
     var hudStyle = SIMD4<Float>(0, 0, 0, 0)
+    /// x cos 航向，y sin 航向，z 转弯时的暗边强度
+    var heading = SIMD4<Float>(1, 0, 0, 0)
+}
+
+/// 和 Common.h 的 PanelUniforms 一样：提示文字面板
+struct PanelUniforms {
+    var center: SIMD4<Float>
+    var right: SIMD4<Float>
+    var up: SIMD4<Float>
 }
 
 /// 和 Objects.h 的 ObjectUniforms 一样
@@ -42,8 +51,12 @@ struct ObjectUniforms {
 struct TemporalUniforms {
     /// xy 这一帧重算 2×2 块里的哪个像素，z 帧序号，w 历史有效
     var pattern = SIMD4<Float>(0, 0, 0, 0)
-    /// xyz 这一帧到上一帧你在云坐标里的位移（x、海拔、z），w 有上一帧的 rate map
+    /// w 有上一帧的 rate map
     var motion = SIMD4<Float>(0, 0, 0, 0)
+    /// 这一帧：x、z 你在云坐标里的位置，y 舞台 → 海拔的偏移，w 航向
+    var now = SIMD4<Float>(0, 0, 0, 0)
+    /// 上一帧，同上
+    var prev = SIMD4<Float>(0, 0, 0, 0)
 }
 
 /// 和 Common.h 的 AtmosphereConstants 一样大（6 个 float4），只在 GPU 上读写。
