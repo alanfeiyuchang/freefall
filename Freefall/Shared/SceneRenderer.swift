@@ -76,6 +76,9 @@ final class SceneRenderer: @unchecked Sendable {
     private static let maxCones = 160
     private let alwaysWriteDepth: MTLDepthStencilState
     private let nearerDepth: MTLDepthStencilState
+    /// 只做深度测试、不写深度（雨丝：被伞、手挡住，但不挡别的）
+    private let testDepth: MTLDepthStencilState
+    private let rainPipeline: MTLRenderPipelineState
 
 
     /// 没有 rate map 时绑给 shader 的占位缓冲（shader 不会读它）
@@ -163,6 +166,21 @@ final class SceneRenderer: @unchecked Sendable {
         lineDescriptor.maxVertexAmplificationCount = maxViewCount
         lineDescriptor.inputPrimitiveTopology = .line
         linePipeline = try device.makeRenderPipelineState(descriptor: lineDescriptor)
+        // 雨丝：叠加上去（不影响 alpha）
+        let rainDescriptor = MTLRenderPipelineDescriptor()
+        rainDescriptor.label = "rain"
+        rainDescriptor.vertexFunction = try function("rainVertex")
+        rainDescriptor.fragmentFunction = try function("rainFragment")
+        rainDescriptor.colorAttachments[0].pixelFormat = colorFormat
+        rainDescriptor.colorAttachments[0].isBlendingEnabled = true
+        rainDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+        rainDescriptor.colorAttachments[0].destinationRGBBlendFactor = .one
+        rainDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .zero
+        rainDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .one
+        rainDescriptor.depthAttachmentPixelFormat = depthFormat
+        rainDescriptor.maxVertexAmplificationCount = maxViewCount
+        rainDescriptor.inputPrimitiveTopology = .triangle
+        rainPipeline = try device.makeRenderPipelineState(descriptor: rainDescriptor)
 
         let plane = ProceduralMeshes.plane()
         planeVertexCount = plane.count
@@ -187,6 +205,10 @@ final class SceneRenderer: @unchecked Sendable {
         nearer.depthCompareFunction = .greaterEqual     // reverse-Z
         nearer.isDepthWriteEnabled = true
         nearerDepth = device.makeDepthStencilState(descriptor: nearer)!
+        let test = MTLDepthStencilDescriptor()
+        test.depthCompareFunction = .greaterEqual
+        test.isDepthWriteEnabled = false
+        testDepth = device.makeDepthStencilState(descriptor: test)!
 
         try precompute(library: library, queue: queue)
     }
@@ -471,6 +493,20 @@ final class SceneRenderer: @unchecked Sendable {
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
         encodeObjects(enc, objects: objects, views: &views, frame: &frame)
+
+        if var rain = objects.rain {
+            let count = Int(rain.center.w * min(rain.offset.w, 1))
+            if count > 0 {
+                enc.setRenderPipelineState(rainPipeline)
+                enc.setDepthStencilState(testDepth)
+                enc.setVertexBytes(&views, length: MemoryLayout<ViewUniforms>.stride * viewCount, index: 0)
+                enc.setVertexBytes(&rain, length: MemoryLayout<RainUniforms>.stride, index: 1)
+                enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
+                enc.setFragmentBuffer(atmosphereConstants, offset: 0, index: 2)
+                enc.setFragmentBytes(&rain, length: MemoryLayout<RainUniforms>.stride, index: 3)
+                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
+            }
+        }
 
         if frame.hudUp.w > 0 {
             enc.setRenderPipelineState(hudPipeline)

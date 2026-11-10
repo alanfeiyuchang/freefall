@@ -34,6 +34,22 @@
 #define TARGET_RADIUS 20.0f
 #define TARGET_BULLSEYE 3.0f
 
+// 会下雨的那片碎积云层：云坐标里沿飞机航线（z）拉长的一片椭圆，云底约 2,400 米、云顶约 3,200 米。
+// 不管在舱里等多久再跳（等得越久出舱点在云坐标里越往 +z），下落都会从它里面或边上穿过去。
+// 必须和 Swift 的 JumpTimeline.deckCenter / deckAxes / rain(at:altitude:) 一致。
+#define DECK_CENTER float2(-450.0f, 400.0f)
+#define DECK_AXES float2(800.0f, 1700.0f)
+
+static inline float deckMask(float2 cloudXZ) {
+    float2 d = (cloudXZ - DECK_CENTER) / DECK_AXES;
+    return exp(-dot(d, d));
+}
+
+/// 雨的竖直分布：云里就开始下（3,200 → 2,600 米渐强），云底以下最大，往下渐渐蒸发（2,100 → 1,500 米渐弱）
+static inline float rainProfile(float h) {
+    return smoothstep(3200.0f, 2600.0f, h) * smoothstep(1500.0f, 2100.0f, h);
+}
+
 struct Weather { float coverage; float base; float top; float columnar; };
 
 static inline Weather sampleWeather(float2 xz, texture2d<float> weather) {

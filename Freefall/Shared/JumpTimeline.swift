@@ -50,6 +50,11 @@ struct JumpTimeline {
     /// 地面（环礁、靶）在云坐标里的起始偏移：出舱、惯性滑行完，开伞点离靶 600 多米、在靶的左后方
     static let landShiftStart = SIMD2<Double>(0, 264)
     static let feetPerMeter = 3.28084
+    // 会下雨的碎积云层（云坐标里的椭圆，和 Clouds.h 的 DECK_CENTER / DECK_AXES 一致）
+    static let deckCenter = SIMD2<Double>(-450, 400)
+    static let deckAxes = SIMD2<Double>(800, 1700)
+    /// 雨滴下落速度（m/s）
+    static let rainFallSpeed: Double = 8.5
 
     /// 这一关的着陆区：靶心位置（云坐标）和地面高度
     var scene = LandingZone.atoll
@@ -324,6 +329,26 @@ struct JumpTimeline {
         var clock = Int((angle / (2 * .pi) * 12).rounded())
         if clock == 0 { clock = 12 }
         return (clock, distance)
+    }
+
+    /// 某处的雨有多大（0…1）：碎积云层的范围 × 高度分布（云里就开始下，云底以下最大，到 1,500 米蒸发完）。
+    /// 和 Clouds.h 的 deckMask × rainProfile 一样。
+    static func rain(at cloudXZ: SIMD2<Double>, altitude: Double) -> Double {
+        let d = (cloudXZ - deckCenter) / deckAxes
+        let top = smoothstep((3200 - altitude) / 600)
+        let bottom = smoothstep((altitude - 1500) / 600)
+        return exp(-dot(d, d)) * top * bottom
+    }
+
+    /// 你这里的雨有多大
+    var rainIntensity: Double { Self.rain(at: position, altitude: altitude) }
+
+    /// 雨相对你的速度（舞台空间，m/s）：雨往下落（顺风稍微斜一点），你掉得比它快得多，所以雨是往上走的
+    var rainVelocity: SIMD3<Double> {
+        let relative = SIMD3<Double>(1.5 - velocity.x, verticalSpeed - Self.rainFallSpeed, 0.8 - velocity.y)
+        // 云坐标 → 舞台：反转航向
+        let c = cos(heading), s = sin(heading)
+        return SIMD3(relative.x * c - relative.z * s, relative.y, relative.x * s + relative.z * c)
     }
 
     static func smoothstep(_ x: Double) -> Double {

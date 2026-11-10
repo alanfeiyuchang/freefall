@@ -27,6 +27,10 @@ final class JumpSession {
     private var tooEarlyUntil: Double?
     /// 真手抓住拉手、操纵环的次数（给声音用）
     private(set) var grabs = 0
+    /// 雨丝相对你累计走过的距离（舞台空间，按盒子取模）
+    private var rainOffset = SIMD3<Float>(0, 0, 0)
+    static let rainBox: Float = 14
+    static let rainDrops: Float = 6000
 
     init(timeline: JumpTimeline = JumpTimeline(), realHands: Bool, autopilot: Autopilot?) {
         self.timeline = timeline
@@ -61,6 +65,10 @@ final class JumpSession {
         if pinchesBegan > 0, timeline.phase == .landed { timeline.requestEnd() }
 
         timeline.step(dt)
+
+        let v = timeline.rainVelocity
+        rainOffset += SIMD3(Float(v.x), Float(v.y), Float(v.z)) * Float(dt)
+        rainOffset -= (rainOffset / Self.rainBox).rounded(.down) * Self.rainBox
 
         if !handsDriving {
             // 没有真手去拉：拉手开伞后就没了；操纵环按刹车量往下移，看起来是被拉下去的
@@ -127,11 +135,22 @@ final class JumpSession {
 
     // MARK: - 给画面用
 
-    func objects(layout: BodyLayout, hands: [HandPose], watchOnLeft: Bool, proxyHands: Bool = false) -> SceneObjects {
-        SceneObjects.make(SceneObjects.Input(timeline: timeline, eyeHeight: layout.anchor.y, layout: layout,
-                                             interaction: interaction,
-                                             cloth: timeline.sinceDeploy == nil ? nil : cloth,
-                                             hands: hands, watchOnLeft: watchOnLeft, proxyHands: proxyHands))
+    func objects(layout: BodyLayout, hands: [HandPose], watchOnLeft: Bool, proxyHands: Bool = false,
+                 head: SIMD3<Float>? = nil) -> SceneObjects {
+        var o = SceneObjects.make(SceneObjects.Input(timeline: timeline, eyeHeight: layout.anchor.y, layout: layout,
+                                                     interaction: interaction,
+                                                     cloth: timeline.sinceDeploy == nil ? nil : cloth,
+                                                     hands: hands, watchOnLeft: watchOnLeft, proxyHands: proxyHands))
+        let rain = Float(timeline.rainIntensity)
+        if rain > 0.005 {
+            let v = timeline.rainVelocity
+            // 拖影：一帧多一点（90 Hz），雨丝刚好连成一道
+            o.rain = RainUniforms(offset: SIMD4(rainOffset, rain),
+                                  velocity: SIMD4(Float(v.x), Float(v.y), Float(v.z), 1.2 / 90),
+                                  center: SIMD4(head ?? layout.anchor, Self.rainDrops),
+                                  box: SIMD4(Self.rainBox, 0, 0, 0))
+        }
+        return o
     }
 
     /// 浮在面前的提示（空 = 不显示）

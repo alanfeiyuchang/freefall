@@ -50,6 +50,8 @@ struct SceneObjects {
     var lines: [SIMD4<Float>] = []
     /// 背带、拉手、操纵环、表带（离屏测试里还有代替真手的手）
     var roundCones: [RoundCone] = []
+    /// 身边的雨丝（不下雨是 nil）
+    var rain: RainUniforms?
 
     static let strapColor = SIMD3<Float>(0.035, 0.035, 0.04)
     static let webbingColor = SIMD3<Float>(0.09, 0.09, 0.1)

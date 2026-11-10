@@ -191,6 +191,16 @@ func lookAtTarget(_ t: JumpTimeline) -> (yaw: Float, pitch: Float) {
     return (Float(yaw), Float(pitch))
 }
 
+/// 看向云坐标里某一点、某个高度的朝向（度）
+func look(atCloud point: SIMD2<Double>, altitude: Double, from t: JumpTimeline) -> (yaw: Float, pitch: Float) {
+    let d = point - t.position
+    let c = cos(t.heading), s = sin(t.heading)
+    let local = SIMD2(d.x * c - d.y * s, d.x * s + d.y * c)
+    let yaw = atan2(-local.x, -local.y) * 180 / .pi
+    let pitch = atan2(altitude - t.altitude, length(local)) * 180 / .pi
+    return (Float(yaw), Float(pitch))
+}
+
 // MARK: - 画一帧
 
 /// 画一帧（两只眼），返回 GPU 耗时（毫秒）。云层是时间累积的：同一个画面连画几帧才收敛。
@@ -223,7 +233,8 @@ func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [
     frame.placeAltimeter(feet: t.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand, alarm: t.alarmLevel)
     // 和真机一样：允许了手部追踪时只有手腕上的表，戴表的手不在视野里就没有高度表
     if handTracking && watchHand == nil { frame.hudUp.w = 0 }
-    let objects = session.objects(layout: layout, hands: handPoses, watchOnLeft: watchOnLeft, proxyHands: true)
+    let objects = session.objects(layout: layout, hands: handPoses, watchOnLeft: watchOnLeft, proxyHands: true,
+                                  head: SIMD3(0, eyeHeight, 0))
     textPanel.set(showPanel ? session.hint : "")
     let forward = (head * SIMD4<Float>(0, 0, -1, 0)).xyz
     let panel = textPanel.texture.map {
@@ -274,6 +285,8 @@ struct Shot {
     var watchOnLeft = true
     /// 按靶的方向看（覆盖 yaw / pitch）
     var lookAtTarget = false
+    /// 看向雨区（碎积云层中心、这个高度；覆盖 yaw / pitch）
+    var lookAtRain: Double?
 }
 
 let alarmFeet = { (feet: Int) in at { $0.altitudeFeet <= feet } }
@@ -294,6 +307,10 @@ let shots: [Shot] = [
     Shot(name: "g3_watch_right", session: { freefall(6500) }, yaw: -22, pitch: -38, hands: .watchRight, fovY: 22,
          watchOnLeft: false),
     Shot(name: "f3_below_deck", session: { freefall(2100) }, yaw: 0, pitch: -40, hands: .arch),
+    Shot(name: "r1_rain_in_deck", session: { freefall(2800) }, yaw: 0, pitch: -25),
+    Shot(name: "r2_rain_below", session: { freefall(2050) }, yaw: 20, pitch: -12),
+    Shot(name: "r3_rain_curtains", session: { deployed(8) }, yaw: 0, pitch: 0, fovY: 80, lookAtRain: 2000),
+    Shot(name: "r4_rain_from_above", session: { freefall(4300) }, yaw: 0, pitch: 0, fovY: 80, lookAtRain: 1500),
     Shot(name: "f4_alarm_watch", session: { alarmFeet(3400) }, yaw: 0, pitch: -50, hands: .watch, fovY: 60),
     Shot(name: "f5_handle", session: { alarmFeet(3300) }, yaw: -10, pitch: -62, hands: .handle, fovY: 80),
     Shot(name: "o1_bag", session: { deployed(0.4) }, yaw: 0, pitch: 72, fovY: 90),
@@ -331,6 +348,9 @@ if mode == "shots" || mode == "all" {
         let h = hands(shot.hands, session)
         var yaw = shot.yaw, pitch = shot.pitch
         if shot.lookAtTarget { (yaw, pitch) = lookAtTarget(session.timeline) }
+        if let h = shot.lookAtRain {
+            (yaw, pitch) = look(atCloud: JumpTimeline.deckCenter, altitude: h, from: session.timeline)
+        }
         for _ in 0..<11 {
             render(session, yaw: yaw, pitch: pitch, hands: h, color: color, depth: depth, fovY: shot.fovY,
                    watchOnLeft: shot.watchOnLeft)
@@ -339,8 +359,8 @@ if mode == "shots" || mode == "all" {
                         watchOnLeft: shot.watchOnLeft)
         saveLeftEye(color, to: outDir.appendingPathComponent("\(shot.name).png"))
         let t = session.timeline
-        print(String(format: "%@  t=%.1f s  %.0f m（离地 %.0f）  %@  %.1f ms  「%@」", shot.name, t.time, t.altitude,
-                     t.heightAboveGround, String(describing: t.phase), ms,
+        print(String(format: "%@  t=%.1f s  %.0f m（离地 %.0f）  %@  雨 %.2f  %.1f ms  「%@」", shot.name, t.time,
+                     t.altitude, t.heightAboveGround, String(describing: t.phase), t.rainIntensity, ms,
                      session.hint.replacingOccurrences(of: "\n", with: " / ")))
     }
 }

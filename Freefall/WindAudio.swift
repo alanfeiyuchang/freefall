@@ -7,6 +7,7 @@ import os
 /// - 发动机：螺旋桨叶片通过频率（四台略微失谐，嗡嗡地拍）+ 低频轰鸣，出舱后随距离变小
 /// - 自由落体的风：低沉的呼啸（棕噪声）+ 嘶嘶声（带通，速度越快越高）+ 阵风的冲击 + 跳伞服被扯的啪啪声
 /// - 伞下：轻风 + 伞布抖动
+/// - 穿过碎积云层时下雨：沙沙的雨声 + 雨点打在头盔上的「嗒嗒」声（左右随机）
 /// - 近地和落地后：海浪拍礁、海鸥（左右随机）
 /// - 高度表报警：三声一组（可以开伞），急促连响（低于决断高度）
 /// 一次性的：抓扶杆、绿灯「叮」、拉手撕开、开伞（呼——、布抖、张满时「嘭」）、落地、摔、落水、赢/输
@@ -22,6 +23,8 @@ final class JumpAudio: @unchecked Sendable {
         var ambience: Float = 0
         /// 转弯的快慢 0…1（风声大一点）
         var turn: Float = 0
+        /// 雨有多大 0…1
+        var rain: Float = 0
         // 一次性的事件：计数加一就触发一次（渲染线程只管加，音频线程看到变化就播）
         var dings = 0, grabs = 0, rips = 0, deploys = 0, thuds = 0, crashes = 0, splashes = 0, wins = 0, fails = 0
     }
@@ -70,7 +73,12 @@ final class JumpDSP: @unchecked Sendable {
 
     // 平滑后的参数
     private var speed: Float = 0, gain: Float = 0, engineLevel: Float = 0
-    private var canopy: Float = 0, ambience: Float = 0, turn: Float = 0
+    private var canopy: Float = 0, ambience: Float = 0, turn: Float = 0, rain: Float = 0
+    // 雨
+    private var rainHigh: [Float] = [0, 0], rainLast: [Float] = [0, 0]
+    private var dropEnv: [Float] = [0, 0, 0, 0, 0, 0], dropPhase: [Float] = [0, 0, 0, 0, 0, 0]
+    private var dropFreq: [Float] = [3000, 3000, 3000, 3000, 3000, 3000], dropPan: [Float] = [0, 0, 0, 0, 0, 0]
+    private var nextDrop = 0
 
     // 风
     private var brown: [Float] = [0, 0], low: [Float] = [0, 0], band: [Float] = [0, 0]
@@ -133,6 +141,7 @@ final class JumpDSP: @unchecked Sendable {
             canopy += (params.canopy - canopy) * slow
             ambience += (params.ambience - ambience) * slow
             turn += (params.turn - turn) * smoothing
+            rain += (params.rain - rain) * smoothing
 
             var outL: Float = 0, outR: Float = 0
 
@@ -178,6 +187,36 @@ final class JumpDSP: @unchecked Sendable {
                 fabricLow = fabricLow * 0.97 + white() * 0.03
                 let rustle = fabricLow * (0.4 + 0.6 * max(0, sin(2 * .pi * fabricPhase))) * canopy * (0.5 + turn) * 0.9
                 outL += rustle; outR += rustle * 0.85
+            }
+
+            // ---- 雨 ----
+            if rain > 0.003 {
+                // 沙沙声：一阶高通的白噪声（只剩嘶嘶的高频），掉得越快越响
+                let loud = rain * (0.5 + 0.5 * min(speed / 50, 1))
+                for c in 0..<2 {
+                    let w = white()
+                    rainHigh[c] = 0.9 * (rainHigh[c] + w - rainLast[c])
+                    rainLast[c] = w
+                    let s = rainHigh[c] * loud * 0.045
+                    if c == 0 { outL += s } else { outR += s }
+                }
+                // 雨点打在头盔、护目镜上：随机的短促「嗒」，每秒一两百个，几个同时响
+                if unit() < rain * 180 / sampleRate {
+                    let k = nextDrop
+                    nextDrop = (nextDrop + 1) % dropEnv.count
+                    dropEnv[k] = 0.4 + 0.6 * unit()
+                    dropFreq[k] = 2200 + 4200 * unit()
+                    dropPan[k] = white()
+                    dropPhase[k] = 0
+                }
+                let decay = exp(-dt / 0.0035)
+                for k in 0..<dropEnv.count where dropEnv[k] > 0.001 {
+                    dropPhase[k] += 2 * .pi * dropFreq[k] * dt
+                    let tick = sin(dropPhase[k]) * dropEnv[k] * 0.06 * loud
+                    outL += tick * (1 - dropPan[k]) * 0.7
+                    outR += tick * (1 + dropPan[k]) * 0.7
+                    dropEnv[k] *= decay
+                }
             }
 
             // ---- 发动机 ----

@@ -244,7 +244,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
         uniforms.placeAltimeter(feet: timeline.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand,
                                 alarm: timeline.alarmLevel)
         if handsEnabled && watchHand == nil { uniforms.hudUp.w = 0 }
-        let objects = session.objects(layout: layout, hands: hands, watchOnLeft: watchOnLeft)
+        let objects = session.objects(layout: layout, hands: hands, watchOnLeft: watchOnLeft, head: head)
         panel.set(session.hint)
         let panelDraw = panel.texture.map {
             (texture: $0, uniforms: panelPlacer.place(head: head, forward: headForward, dt: Float(dt),
@@ -373,6 +373,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
         let near = Float(min(max((300 - t.heightAboveGround) / 250, 0), 1))
         audioParams.ambience = t.phase == .landed || t.phase == .done ? 1 : near
         audioParams.turn = Float(min(abs(t.turnRate) / JumpTimeline.maxTurnRate, 1))
+        audioParams.rain = Float(t.rainIntensity)
         audio.update(audioParams)
     }
 

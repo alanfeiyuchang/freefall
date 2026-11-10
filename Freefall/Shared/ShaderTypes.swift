@@ -41,6 +41,18 @@ struct PanelUniforms {
     var up: SIMD4<Float>
 }
 
+/// 和 Rain.h 的 RainUniforms 一样：身边的雨丝
+struct RainUniforms {
+    /// xyz 雨相对你累计走过的距离（舞台空间，米，按盒子取模），w 强度 0…1
+    var offset: SIMD4<Float>
+    /// xyz 雨相对你的速度（舞台空间，m/s），w 拖影时长（秒）
+    var velocity: SIMD4<Float>
+    /// xyz 盒子中心（你的头），w 雨丝总数
+    var center: SIMD4<Float>
+    /// x 盒子边长（米）
+    var box: SIMD4<Float>
+}
+
 /// 和 Objects.h 的 ObjectUniforms 一样
 struct ObjectUniforms {
     var model: simd_float4x4

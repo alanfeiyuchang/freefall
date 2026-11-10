@@ -3,6 +3,7 @@
 #include "Atmosphere.h"
 #include "Clouds.h"
 #include "Objects.h"
+#include "Rain.h"
 
 // 每帧：
 //   1. computeSkyViewLUT     — 按你现在的高度重算天空视图表（192×108，很便宜）
@@ -91,9 +92,9 @@ kernel void generateWeather(texture2d<float, access::write> out [[texture(0)]],
     top = max(top, sqrt(saturate(1.0f - (dTower / 2100.0f) * (dTower / 2100.0f))) * 0.88f);
     columnar = max(columnar, tower);
 
-    // 左后方一层碎积云：大约 3,200 → 2,400 米，你会从它的边上穿过去；开伞后往靶飞就离开它的下面，着陆区是晴的
-    float dDeck = length(xz - float2(-600.0f, 550.0f));
-    float deck = exp(-(dDeck * dDeck) / (1100.0f * 1100.0f));
+    // 左边一层会下雨的碎积云：大约 3,200 → 2,400 米，沿航线拉长（见 Clouds.h 的 DECK_*），下落时会穿过它；
+    // 开伞后往靶飞就离开它的下面，着陆区是晴的
+    float deck = deckMask(xz);
     float inDeck = smoothstep(0.15f, 0.55f, deck);
     coverage = max(coverage, deck * 0.72f);
     top = mix(top, 0.24f, inDeck);
@@ -596,6 +597,7 @@ fragment SceneOut sceneFragment(VOut in [[stage_in]],
     } else {
         color += sunLight(rd, sunDir, transmittanceToTop(transLUT, camR, rd.y));
     }
+    color = rainCurtains(color, r, ground ? sea.x : 1e9f, ign(in.position.xy + 3.0f), F, A, waveNoise);
 #endif
 
     // 云层是半分辨率的，双线性放大（预乘过的散射光 + 透射率，放大后照样能直接合成）
