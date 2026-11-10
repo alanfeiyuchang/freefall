@@ -338,6 +338,11 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
     float3 eye = views[in.viewIndex].cameraPosition.xyz;
     float3 toPoint = in.stagePos - eye;
     float dist = max(length(toPoint), 0.01f);
+    float2 reveal = float2(1.0f, 0.0f);
+    if (revealActive) {                                        // 开场：和天空一样按视线 7 米处实体化
+        reveal = revealEnvironment(eye, toPoint / dist, F);
+        if (reveal.x + reveal.y < 0.003f) discard_fragment();
+    }
     float3 rd = rotateHeading(toPoint / dist, F.heading.x, F.heading.y);
     float3 sunDir = F.sunDirection.xyz;
     float2 p = in.ground;
@@ -433,6 +438,10 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
         color *= 1.0f - F.heading.z * smoothstep(0.22f, 0.55f, length(uv));
     }
     float3 g = sqrt(color) + (ign(in.position.xy + 17.0f) - 0.5f) / 255.0f;
+    if (revealActive) {
+        float a = reveal.x;
+        return float4(g * g * a + REVEAL_GLOW_COLOR * reveal.y * F.camera.z, saturate(a + reveal.y * 0.5f));
+    }
     return float4(g * g, 1.0f);
 }
 

@@ -24,6 +24,7 @@ struct MeshVertex {
 #define MATERIAL_METAL 7       // 金属（3 环、连接环、扣眼、卡扣、钢索、表圈）
 #define MATERIAL_PLASTIC 8     // 硬塑料（钢索软管、表壳）
 #define MATERIAL_RUBBER 9      // 橡胶（表带）
+#define MATERIAL_BAR 10        // 舱门边的扶杆：开场在你的房间里只有它
 
 struct ObjectUniforms {
     float4x4 model;      // 物体 → 舞台
@@ -232,6 +233,12 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
     int material = int(in.color.a + 0.5f);
     float3 albedo = in.color.rgb;
     float daylight = 1.0f - in.interior;
+    // 开场：还没实体化的地方丢掉（深度留 0，系统透出你的房间）；扶杆和替身手一直在
+    float2 reveal = float2(1.0f, 0.0f);
+    if (revealActive && material != MATERIAL_BAR && material != MATERIAL_SOFT) {
+        reveal = revealAt(in.stagePos, F);
+        if (reveal.x < 0.5f) discard_fragment();
+    }
 
     float altitude = F.camera.x + in.stagePos.y;
     float3 sunE = mix(A.sunAtCloudBase.rgb, A.sunAtCloudTop.rgb, saturate((altitude - 1000.0f) / 8000.0f));
@@ -241,7 +248,17 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
     const float3 cabinRed = float3(0.05f, 0.0045f, 0.0035f);   // 货舱里的红色夜灯（照度）
 
     float3 radiance;
-    if (material == MATERIAL_EMISSIVE) {
+    if (material == MATERIAL_BAR) {
+        // 扶杆：在你的房间里时按屋里柔和的灯光打（上亮下暗），飞机在它周围长出来以后换成机舱里的光
+        float3 E = sunE * saturate(dot(N, L)) * daylight * daylight
+                 + skyE * (0.12f + 0.88f * daylight)
+                 + cabinRed * in.interior;
+        float3 room = float3(0.5f, 0.49f, 0.46f) * (0.6f + 0.4f * N.y);
+        float roomMix = F.reveal.w < 0.0f ? 1.0f : 1.0f - smoothstep(0.4f, 3.0f, F.reveal.w);
+        radiance = albedo * mix(E, room, roomMix) / PI;
+        // 还没握住的时候慢慢一明一暗，提示去握
+        if (F.reveal.w < 0.0f) radiance *= 1.0f + 0.3f * (0.5f + 0.5f * sin(F.camera.y * 3.5f));
+    } else if (material == MATERIAL_EMISSIVE) {
         radiance = albedo;
     } else if (material == MATERIAL_LAMP_RED) {
         radiance = albedo * (O.params.x < 0.5f ? 1.0f : 0.004f);
@@ -325,7 +342,9 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
         }
     }
     float3 c = tonemap(radiance * F.exposure.x) * F.camera.z;
-    return float4(c, 1.0f);
+    c += REVEAL_GLOW_COLOR * reveal.y * F.camera.z;
+    // 开场还在房间里时，开头的淡入是从透明淡入（预乘），不是从黑色：屋里不会先冒出一根黑杆子
+    return float4(c, F.reveal.w < 0.0f ? F.camera.z : 1.0f);
 }
 
 // MARK: - 手套（Shared/Glove.swift：苹果示例的手套，按手部追踪的关节蒙皮）
@@ -404,7 +423,7 @@ fragment float4 gloveFragment(GloveOut in [[stage_in]],
     g.interior = O.params.y;
     float3 radiance = shadeGear(g, V, dnx, dny, F, A, skyLUT);
     float3 c = tonemap(radiance * F.exposure.x) * F.camera.z;
-    return float4(c, 1.0f);
+    return float4(c, F.reveal.w < 0.0f ? F.camera.z : 1.0f);
 }
 
 // MARK: - 绳子（伞绳、刹车绳）

@@ -42,6 +42,8 @@ struct FrameUniforms {
     var canopyChord = SIMD4<Float>(0, 0, 1, 0)
     /// 身体的影子（舞台空间）：xyz 头顶，w 有没有（0/1）。身体当成一根从头顶竖直垂到脚的胶囊
     var bodyShadow = SIMD4<Float>(0, 0, 0, 0)
+    /// 开场的实体化：xyz 起点（舞台空间），w 波前半径（米；-1 = 还在房间里只有扶杆，≥ 1000 = 全部完成）
+    var reveal = SIMD4<Float>(0, 0, 0, 1e6)
 }
 
 /// 和 Objects.h 的 LineSegment 一样：一段绳子（伞绳、刹车绳），画成朝着眼睛的细长条

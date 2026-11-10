@@ -64,6 +64,8 @@ struct SceneObjects {
     var canopyShadow: CanopyCloth.ShadowShape?
     /// 身体的影子：头顶（舞台空间）；在机舱里是 nil
     var bodyTop: SIMD3<Float>?
+    /// 开场的实体化（FrameUniforms.reveal）：xyz 起点，w 波前半径（-1 = 还在房间里只有扶杆，1e6 = 全部完成）
+    var reveal = SIMD4<Float>(0, 0, 0, 1e6)
 
     static let skinColor = SIMD3<Float>(0.42, 0.27, 0.2)
 

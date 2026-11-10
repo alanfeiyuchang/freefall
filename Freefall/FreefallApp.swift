@@ -3,7 +3,9 @@ import SwiftUI
 
 @main
 struct FreefallApp: App {
-    @State private var immersionStyle: ImmersionStyle = .full
+    /// 混合沉浸：开场先透出你的房间，只有那根扶杆；握住以后飞机和天一点点长出来，把整个视野盖满
+    /// （盖满以后和完全沉浸看起来一样；不中途切换沉浸方式，免得渲染层被重建）
+    @State private var immersionStyle: ImmersionStyle = .mixed
     @State private var model = AppModel.shared
 
     var body: some Scene {
@@ -19,8 +21,7 @@ struct FreefallApp: App {
                                         scene: AppModel.shared.scene)
             }
         }
-        // full：整个视野都是天空，看不到房间
-        .immersionStyle(selection: $immersionStyle, in: .full)
+        .immersionStyle(selection: $immersionStyle, in: .mixed, .full)
         // 戴手套：真手和前臂整个藏起来，只画手套（苹果的手套示例也是这么做的）。
         // 不戴：真手透视出来，按深度和画面合成：表盘比手腕近，就盖在手腕上；伞绳、舱壁比手远，就被手挡住。
         // （.visible 会让手永远盖在最上面，手腕上的表就看不见了）

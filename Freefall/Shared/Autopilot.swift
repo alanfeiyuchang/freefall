@@ -6,7 +6,8 @@ struct Autopilot {
     /// 在多少英尺拉伞（手表 3,500 ft 报警，低于这个才拉得动）
     var deployFeet: Double = 3000
     var grabAt: Double = 2.5
-    var holdFor: Double = 2.5
+    /// 亮绿灯以后再抓多久才松手
+    var holdFor: Double = 1.5
     /// 伞下不自己转向，一直按这个刹车量（测试用）
     var hold: (left: Double, right: Double)?
 
@@ -17,7 +18,8 @@ struct Autopilot {
         switch t.phase {
         case .cabin:
             if t.barGrabbedTime == nil, t.time >= grabAt { t.grabBar() }
-            if let grabbed = t.barGrabbedTime, t.time - grabbed >= holdFor { t.releaseBar() }
+            if t.greenLight, let grabbed = t.barGrabbedTime,
+               t.time - grabbed >= JumpTimeline.revealDuration + JumpTimeline.greenDelay + holdFor { t.releaseBar() }
         case .freefall:
             if Double(t.altitudeFeet) <= deployFeet, t.heightAboveGround > 0.5 { t.requestDeploy() }
         case .canopy:

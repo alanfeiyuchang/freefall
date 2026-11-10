@@ -65,6 +65,9 @@ final class SceneRenderer: @unchecked Sendable {
     /// 地面类型图（树林、水和熔岩的边、冰碛、农田……启动时预算，着色时只查一次）
     let surfaceMap: MTLTexture
     private let terrainPipeline: MTLRenderPipelineState
+    /// 开场实体化那几秒用的管线（片元着色器带遮罩，会丢弃还没出现的片元）：天空海面、地形、网格
+    private let revealPipelines: (scene: MTLRenderPipelineState, terrain: MTLRenderPipelineState,
+                                  mesh: MTLRenderPipelineState)
     private let terrainDepthPipeline: MTLRenderPipelineState
     /// 没有地形时绑给云层 pass 的占位深度
     private let emptyTerrainDepth: MTLTexture
@@ -132,10 +135,17 @@ final class SceneRenderer: @unchecked Sendable {
         self.device = device
         self.scene = scene
 
-        func function(_ name: String) throws -> MTLFunction {
-            guard let f = library.makeFunction(name: name) else { throw RendererError.missingFunction(name) }
-            return f
+        /// 用到函数常量的函数必须带常量值特化以后才能建管线：平时 revealConstant = false（不带开场遮罩）
+        func specialized(_ name: String, reveal: Bool) throws -> MTLFunction {
+            guard library.functionNames.contains(name) else { throw RendererError.missingFunction(name) }
+            let constants = MTLFunctionConstantValues()
+            var on = reveal
+            constants.setConstantValue(&on, type: .bool, index: 10)
+            return try library.makeFunction(name: name, constantValues: constants)
         }
+        func function(_ name: String) throws -> MTLFunction { try specialized(name, reveal: false) }
+        /// 带「开场实体化」遮罩的版本（Common.h 的函数常量 revealConstant）
+        func revealFunction(_ name: String) throws -> MTLFunction { try specialized(name, reveal: true) }
         func texture(_ type: MTLTextureType, _ format: MTLPixelFormat, _ width: Int, _ height: Int,
                      _ depth: Int = 1) -> MTLTexture {
             let d = MTLTextureDescriptor()
@@ -149,11 +159,11 @@ final class SceneRenderer: @unchecked Sendable {
             return device.makeTexture(descriptor: d)!
         }
         func renderPipeline(_ vertex: String, _ fragment: String, colors: [MTLPixelFormat],
-                            depth: MTLPixelFormat, blend: Bool) throws -> MTLRenderPipelineState {
+                            depth: MTLPixelFormat, blend: Bool, reveal: Bool = false) throws -> MTLRenderPipelineState {
             let d = MTLRenderPipelineDescriptor()
-            d.label = fragment
+            d.label = reveal ? fragment + " (reveal)" : fragment
             d.vertexFunction = try function(vertex)
-            d.fragmentFunction = try function(fragment)
+            d.fragmentFunction = try reveal ? revealFunction(fragment) : function(fragment)
             for (i, format) in colors.enumerated() {
                 d.colorAttachments[i].pixelFormat = format
             }
@@ -198,6 +208,13 @@ final class SceneRenderer: @unchecked Sendable {
                                            depth: depthFormat, blend: false)
         terrainPipeline = try renderPipeline("terrainVertex", "terrainFragment", colors: [colorFormat],
                                              depth: depthFormat, blend: false)
+        revealPipelines = (
+            scene: try renderPipeline("skyVertex", "sceneFragment", colors: [colorFormat], depth: depthFormat,
+                                      blend: false, reveal: true),
+            terrain: try renderPipeline("terrainVertex", "terrainFragment", colors: [colorFormat], depth: depthFormat,
+                                        blend: false, reveal: true),
+            mesh: try renderPipeline("meshVertex", "objectFragment", colors: [colorFormat], depth: depthFormat,
+                                     blend: false, reveal: true))
         let depthOnly = MTLRenderPipelineDescriptor()
         depthOnly.label = "terrain depth"
         depthOnly.vertexFunction = try function("terrainDepthVertex")
@@ -472,6 +489,9 @@ final class SceneRenderer: @unchecked Sendable {
             frame.canopyChord = shadow.chord
         }
         if let top = objects.bodyTop { frame.bodyShadow = SIMD4(top, 1) }
+        // 开场的实体化：还在进行时换成带遮罩的管线，没出现的像素不画（混合沉浸里透出房间）
+        frame.reveal = objects.reveal
+        let revealing = objects.reveal.w < 1000
         let rateBuffer = rateMap.map(rateMapBuffer(for:)) ?? emptyRateMapBuffer
 
         // 0. 地形：先选块，画一遍深度（云层按它截断）
@@ -576,7 +596,9 @@ final class SceneRenderer: @unchecked Sendable {
         // 3. 天空、海面，合成云层；4. 高度表
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = colorTexture
-        pass.colorAttachments[0].loadAction = .dontCare
+        // 混合沉浸：没画到的像素是全透明的（系统在那里透出房间），所以要清成 (0, 0, 0, 0)
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         pass.colorAttachments[0].storeAction = .store
         pass.depthAttachment.texture = depthTexture
         pass.depthAttachment.loadAction = .clear
@@ -592,10 +614,10 @@ final class SceneRenderer: @unchecked Sendable {
         // 地形先画（写深度），天空 pass 再按深度只填地形没盖住的像素
         if let terrainDraw {
             encodeTerrain(enc, terrainDraw, views: &views, frame: &frame, rateBuffer: rateBuffer,
-                          cloud: history.history[writeIndex])
+                          cloud: history.history[writeIndex], revealing: revealing)
         }
 
-        enc.setRenderPipelineState(scenePipeline)
+        enc.setRenderPipelineState(revealing ? revealPipelines.scene : scenePipeline)
         enc.setDepthStencilState(nearerDepth)
         enc.setFragmentBytes(&views, length: MemoryLayout<ViewUniforms>.stride * viewCount, index: 0)
         enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
@@ -610,7 +632,7 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setFragmentTexture(baseNoise, index: 6)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
-        encodeObjects(enc, objects: objects, views: &views, frame: &frame)
+        encodeObjects(enc, objects: objects, views: &views, frame: &frame, revealing: revealing)
 
         if var rain = objects.rain {
             let count = Int(rain.center.w * min(rain.offset.w, 1))
@@ -626,7 +648,11 @@ final class SceneRenderer: @unchecked Sendable {
             }
         }
 
-        if frame.hudUp.w > 0 {
+        // 高度表：开场时等实体化的波前走到手腕上才出现
+        let hudCenter = SIMD3(frame.hudCenter.x, frame.hudCenter.y, frame.hudCenter.z)
+        let revealCenter = SIMD3(objects.reveal.x, objects.reveal.y, objects.reveal.z)
+        let hudShown = !revealing || (objects.reveal.w >= 0 && distance(hudCenter, revealCenter) < objects.reveal.w - 0.1)
+        if frame.hudUp.w > 0, hudShown {
             enc.setRenderPipelineState(hudPipeline)
             enc.setDepthStencilState(nearerDepth)
             enc.setVertexBytes(&views, length: MemoryLayout<ViewUniforms>.stride * viewCount, index: 0)
@@ -736,10 +762,11 @@ final class SceneRenderer: @unchecked Sendable {
 
     /// 地形的主 pass：一次实例化画完（着色、空气透视、叠云都在片元里）
     private func encodeTerrain(_ enc: MTLRenderCommandEncoder, _ draw: TerrainDraw, views: inout [ViewUniforms],
-                               frame: inout FrameUniforms, rateBuffer: MTLBuffer, cloud: MTLTexture) {
+                               frame: inout FrameUniforms, rateBuffer: MTLBuffer, cloud: MTLTexture,
+                               revealing: Bool) {
         var tu = draw.uniforms
         let viewsLength = MemoryLayout<ViewUniforms>.stride * views.count
-        enc.setRenderPipelineState(terrainPipeline)
+        enc.setRenderPipelineState(revealing ? revealPipelines.terrain : terrainPipeline)
         enc.setDepthStencilState(nearerDepth)
         enc.setVertexBytes(&views, length: viewsLength, index: 0)
         enc.setVertexBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
@@ -786,7 +813,7 @@ final class SceneRenderer: @unchecked Sendable {
 
     /// 飞机、伞衣和伞绳、身上的装备、手腕上的表。都在天空和云之后画，正常做深度测试（真手按这个深度和画面合成）。
     private func encodeObjects(_ enc: MTLRenderCommandEncoder, objects: SceneObjects,
-                               views: inout [ViewUniforms], frame: inout FrameUniforms) {
+                               views: inout [ViewUniforms], frame: inout FrameUniforms, revealing: Bool) {
         let viewCount = views.count
         let viewsLength = MemoryLayout<ViewUniforms>.stride * viewCount
         enc.setDepthStencilState(nearerDepth)
@@ -800,7 +827,7 @@ final class SceneRenderer: @unchecked Sendable {
         }
         func draw(_ buffer: MTLBuffer, count: Int, model: simd_float4x4) {
             var u = uniforms(model)
-            enc.setRenderPipelineState(meshPipeline)
+            enc.setRenderPipelineState(revealing ? revealPipelines.mesh : meshPipeline)
             enc.setVertexBuffer(buffer, offset: 0, index: 0)
             enc.setVertexBytes(&views, length: viewsLength, index: 1)
             enc.setVertexBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 2)

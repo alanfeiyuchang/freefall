@@ -295,6 +295,20 @@ func saveLeftEye(_ color: MTLTexture, to url: URL) {
     var bytes = [UInt8](repeating: 0, count: width * height * 4)
     color.getBytes(&bytes, bytesPerRow: width * 4, bytesPerImage: width * height * 4,
                    from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, slice: 0)
+    // 混合沉浸：透明的像素在真机上透出你的房间。这里没有透视，垫一张灰色渐变的「房间」（上面墙、下面地板），
+    // 颜色是预乘过的，直接 c + (1 - a) × 房间
+    for y in 0..<height {
+        let s = Float(y) / Float(height - 1)
+        let wall = SIMD3<Float>(196, 190, 181) * (1 - s) + SIMD3<Float>(112, 102, 93) * s
+        for x in 0..<width {
+            let i = (y * width + x) * 4
+            let a = Float(bytes[i + 3]) / 255
+            guard a < 1 else { continue }
+            for (k, w) in [(0, wall.z), (1, wall.y), (2, wall.x)] {
+                bytes[i + k] = UInt8(min(Float(bytes[i + k]) + (1 - a) * w, 255))
+            }
+        }
+    }
     savePNG(bgra: bytes, width: width, height: height, to: url)
 }
 
@@ -352,7 +366,18 @@ let gearShots: [Shot] = [
          pitch: 4, fovY: 60, eye: SIMD3(0, -0.05, -1.3)),
 ]
 
-let atollShots: [Shot] = [
+/// 开场：先在房间里只有扶杆，自动驾驶 2.5 秒时握住，飞机从手边长出来，约 4.6 秒长完，再 1 秒亮绿灯
+let revealShots: [Shot] = [
+    Shot(name: "v1_room", session: { at { $0.time >= 1.5 } }, yaw: -22, pitch: -4, fovY: 90),
+    Shot(name: "v2_reveal_05", session: { at { $0.time >= 3.0 } }, yaw: -22, pitch: -4, fovY: 90),
+    Shot(name: "v3_reveal_15", session: { at { $0.time >= 4.0 } }, yaw: -22, pitch: -4, fovY: 90),
+    Shot(name: "v4_reveal_25", session: { at { $0.time >= 5.0 } }, yaw: -22, pitch: -4, fovY: 90),
+    Shot(name: "v5_reveal_35", session: { at { $0.time >= 6.0 } }, yaw: -22, pitch: -4, fovY: 90),
+    Shot(name: "v6_reveal_back", session: { at { $0.time >= 5.5 } }, yaw: 160, pitch: -2, fovY: 90),
+    Shot(name: "v7_ready", session: { at { $0.time >= 8.6 } }, yaw: -22, pitch: -4, fovY: 90),
+]
+
+let atollShots: [Shot] = revealShots + [
     Shot(name: "d1_door_start", session: { at { $0.time >= 1.5 } }, yaw: 0, pitch: -12),
     Shot(name: "d2_bar_reach", session: { at { $0.time >= 1.5 } }, yaw: -48, pitch: -16, hands: .barOpen, fovY: 80),
     Shot(name: "d3_holding_bar", session: { at { $0.holdingBar && $0.time >= 3.5 } }, yaw: -30, pitch: 4,
@@ -400,7 +425,7 @@ let atollShots: [Shot] = [
 
 
 /// 地形场景的镜头：高空俯瞰、穿过云层、报警时、开伞后看靶、看两边的山、低空、落地
-let terrainShots: [Shot] = [
+let terrainShots: [Shot] = revealShots + [
     Shot(name: "t1_door", session: { at { $0.time >= 1.5 } }, yaw: 0, pitch: -14),
     Shot(name: "t2_high_down", session: { freefallAbove(5500) }, yaw: 0, pitch: -55, fovY: 80),
     Shot(name: "t3_high_horizon", session: { freefallAbove(5500) }, yaw: 30, pitch: -12, fovY: 80),
@@ -583,10 +608,17 @@ if mode == "hands" || mode == "all" {
     step(1.0) { barHand(0.35) }
     report("张开手放到杆边上")
     step(1.0) { barHand(1.5) }
-    report("握拳")
+    report("握拳（飞机开始长出来）")
     step(0.2) { [] }
     report("手丢了 0.2 秒（应该还算抓着）")
-    step(2.0) { barHand(1.5) }
+    step(0.5) { barHand(0.35) }
+    report("还没亮绿灯就松手（不算跳）")
+    step(0.5) { barHand(1.5) }
+    report("再握住")
+    step(5.5) { barHand(1.5) }
+    report(String(format: "握着等 5.5 秒（实体化半径 %@，绿灯 %@）",
+                  s.timeline.revealRadius.map { $0.isFinite ? String(format: "%.1f m", $0) : "完成" } ?? "没开始",
+                  s.timeline.greenLight ? "亮" : "没亮"))
     step(0.3) { barHand(0.35) }
     report("松开")
     run(s) { $0.phase == .freefall && $0.heightAboveGround < 1500 }

@@ -554,6 +554,12 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
     float2 screen = screenPosition(in.position.xy, in.viewIndex, F.camera.w > 0.5f, rateMap);
     Ray r = worldRay(screen, views[in.viewIndex], F);
     float3 rd = r.direction;
+    // 开场：门外的天、海、云按视线 7 米处的点实体化，没到的地方透出房间
+    float2 reveal = float2(1.0f, 0.0f);
+    if (revealActive) {
+        reveal = revealEnvironment(views[in.viewIndex].cameraPosition.xyz, rotateHeading(rd, F.heading.x, -F.heading.y), F);
+        if (reveal.x + reveal.y < 0.003f) discard_fragment();
+    }
     float3 sunDir = F.sunDirection.xyz;
     float ch = max(r.origin.y, 1.0f);
     float camR = ATM_BOTTOM + ch * 0.001f;
@@ -654,6 +660,11 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
     }
     // 8 位输出前抖动半个色阶，天空渐变不出色带。在 √ 空间里抖（近似 sRGB 曲线，比 pow 便宜得多）
     float3 g = sqrt(color) + (ign(in.position.xy + 17.0f) - 0.5f) / 255.0f;
+    if (revealActive) {
+        // 开场：预乘输出，边上半透明地透出房间，再叠一道发光
+        float a = reveal.x;
+        return float4(g * g * a + REVEAL_GLOW_COLOR * reveal.y * F.camera.z, saturate(a + reveal.y * 0.5f));
+    }
     return float4(g * g, 1.0f);
 }
 

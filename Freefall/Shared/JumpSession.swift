@@ -95,7 +95,9 @@ final class JumpSession {
     private func handle(_ event: Interaction.Event) {
         switch event {
         case .grabbedBar:
-            timeline.grabBar()
+            // 实体化从抓住扶杆的那只手开始蔓延
+            let hand = interaction.left.holding == .bar ? interaction.left : interaction.right
+            timeline.grabBar(at: hand.point)
         case .releasedBar:
             // 两只手都松开才算松手
             if !interaction.holdingBar { timeline.releaseBar() }
@@ -142,6 +144,10 @@ final class JumpSession {
                                                      cloth: timeline.sinceDeploy == nil ? nil : cloth,
                                                      hands: hands, watchOnLeft: watchOnLeft, proxyHands: proxyHands,
                                                      gloves: gloves))
+        // 开场的实体化（FrameUniforms.reveal）：xyz 起点，w 波前半径（-1 = 只有扶杆，很大 = 全部完成）
+        let c = timeline.revealCenter
+        let radius = timeline.revealRadius.map { $0.isFinite ? Float($0) : 1e6 } ?? -1
+        o.reveal = SIMD4(Float(c.x), Float(c.y), Float(c.z), radius)
         if timeline.scene.hasTerrain {
             o.terrain = TerrainFrame(scene: timeline.scene, groundOrigin: timeline.groundPosition,
                                      stageToAltitude: timeline.altitude - timeline.eyeHeight, heading: timeline.heading)
@@ -163,8 +169,15 @@ final class JumpSession {
         let t = timeline
         switch t.phase {
         case .cabin:
+            if t.barGrabbedTime == nil {
+                return usesRealHands ? "伸出右手，握住右边的黄色扶杆" : "捏住手指 = 握住扶杆"
+            }
+            if !t.greenLight {
+                // 飞机正在长出来：别打扰，松手了就提醒再抓住
+                return t.holdingBar ? "" : (usesRealHands ? "再握住扶杆" : "再捏住手指")
+            }
             if t.holdingBar { return usesRealHands ? "绿灯！松手就跳" : "绿灯！松开手指就跳" }
-            return usesRealHands ? "伸出右手，抓住右边的黄色扶杆" : "捏住手指 = 抓住扶杆"
+            return usesRealHands ? "握住扶杆，松手就跳" : "捏住手指，松开就跳"
         case .exit, .opening:
             return ""
         case .freefall:

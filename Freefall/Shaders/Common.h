@@ -30,6 +30,7 @@ struct FrameUniforms {
     float4 canopySpan;       // xyz 展向单位向量，w 投影的半展长（米）
     float4 canopyChord;      // xyz 弦向单位向量（前缘 → 后缘），w 半弦长（米）
     float4 bodyShadow;       // 身体的影子：xyz 头顶（舞台空间），w 有没有。身体是从头顶竖直垂到脚的胶囊
+    float4 reveal;           // 开场的实体化：xyz 起点（舞台空间），w 波前半径（米；< 0 只有扶杆，≥ 1000 全部完成）
 };
 
 /// 提示文字面板（舞台空间里的一块板）
@@ -236,4 +237,65 @@ static inline float bodyShadow(float3 p, float3 L, constant FrameUniforms &F) {
 /// 太阳在舞台空间的方向（伞下转向是世界绕你转，舞台里的东西要按航向反过来转）
 static inline float3 stageSunDirection(constant FrameUniforms &F) {
     return rotateHeading(F.sunDirection.xyz, F.heading.x, -F.heading.y);
+}
+
+// MARK: - 开场的实体化（混合沉浸：没画的地方透出你的房间）
+
+// 只有开场那几秒的管线带着这段遮罩（会丢弃片元）：着色器里一出现 discard，GPU 就没法提前剔除被挡住的片元，
+// 天空、地形这种全屏的 pass 会白算很多。所以用函数常量编两套，实体化完成以后换回不带遮罩的。
+constant bool revealConstant [[function_constant(10)]];
+constant bool revealActive = is_function_constant_defined(revealConstant) && revealConstant;
+
+static inline float revealHash(float3 p) {
+    p = fract(p * 0.1031f);
+    p += dot(p, p.zyx + 31.32f);
+    return fract((p.x + p.y) * p.z);
+}
+
+/// 便宜的三维值噪声（0…1），只用来把波前的边打碎
+static inline float revealNoise(float3 x) {
+    float3 i = floor(x), f = fract(x);
+    f = f * f * (3.0f - 2.0f * f);
+    float a = mix(mix(revealHash(i), revealHash(i + float3(1, 0, 0)), f.x),
+                  mix(revealHash(i + float3(0, 1, 0)), revealHash(i + float3(1, 1, 0)), f.x), f.y);
+    float b = mix(mix(revealHash(i + float3(0, 0, 1)), revealHash(i + float3(1, 0, 1)), f.x),
+                  mix(revealHash(i + float3(0, 1, 1)), revealHash(i + float3(1, 1, 1)), f.x), f.y);
+    return mix(a, b, f.z);
+}
+
+/// 波前离这个点还有多远：x > 0 表示波前已经扫过（米，边被噪声打碎），y 是发光的收尾系数（快完成时收掉），
+/// z 是离起点的距离。全部完成恒为 (1e6, 0, 0)，还在房间里恒为 (-1e6, 0, 0)。
+static inline float3 revealEdge(float3 p, constant FrameUniforms &F, float noiseScale) {
+    float r = F.reveal.w;
+    if (r >= 1000.0f) return float3(1e6f, 0.0f, 0.0f);
+    if (r < 0.0f) return float3(-1e6f, 0.0f, 0.0f);
+    float d = distance(p, F.reveal.xyz);
+    float3 q = p * noiseScale;
+    float n = revealNoise(q * 3.1f) * 0.65f + revealNoise(q * 9.3f + 7.0f) * 0.35f;
+    float edge = r - d + (n - 0.5f) * 0.45f / noiseScale;
+    return float3(edge, 1.0f - smoothstep(10.0f, 16.0f, r), d);
+}
+
+/// 网格（飞机、装备）：x = 1 已经出现、0 还是房间（片元直接丢掉，深度留 0，系统就透出房间）；
+/// y = 波前的发光（刚出现的边上一道亮线，往里一圈慢慢暗下去的扫描纹）
+static inline float2 revealAt(float3 p, constant FrameUniforms &F) {
+    float3 e = revealEdge(p, F, 1.0f);
+    if (e.x <= 0.0f) return float2(0.0f, 0.0f);
+    float scan = 0.6f + 0.4f * sin(e.z * 48.0f - F.camera.y * 9.0f);
+    float glow = (exp(-e.x / 0.022f) * 1.4f + exp(-e.x / 0.28f) * 0.45f * scan) * e.y;
+    return float2(1.0f, glow);
+}
+
+/// 波前的颜色（显示空间，直接加在色调映射之后）
+#define REVEAL_GLOW_COLOR float3(0.42f, 0.86f, 1.0f)
+
+/// 天空、海、地形这种「很远」的东西：按视线上舱壁外面一点的地方算（朝舱门 7 米；朝机头要过了 14 米长的货舱，
+/// 按 16 米，不然机头那端还没长出来就先透出天），噪声放大四倍（一大片一大片地出现），
+/// 边是软的：x = 不透明度（预乘输出，没到的地方半透出房间），y = 边上的发光（也是预乘的，叠在房间上）
+static inline float2 revealEnvironment(float3 eye, float3 stageDirection, constant FrameUniforms &F) {
+    float distanceOut = 7.0f + 9.0f * saturate(stageDirection.z);
+    float3 e = revealEdge(eye + stageDirection * distanceOut, F, 0.25f);
+    float alpha = smoothstep(0.0f, 1.2f, e.x);
+    float glow = exp(-abs(e.x - 0.35f) / 0.3f) * 0.55f * e.y;
+    return float2(alpha, glow);
 }

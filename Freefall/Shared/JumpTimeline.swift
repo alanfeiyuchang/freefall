@@ -82,7 +82,11 @@ struct JumpTimeline {
     private(set) var turnRate: Double = 0
     /// 机舱地板原点相对舞台原点的位置：你站在跳板上，飞机原点在你身后
     private(set) var planeOffset = SIMD3<Double>(0, 0, ProceduralMeshes.standOnRamp)
+    /// 第一次抓住扶杆的时刻：开场的「实体化」从这时开始，结束后再过一会儿亮绿灯
     private(set) var barGrabbedTime: Double?
+    /// 实体化从哪里开始蔓延（舞台坐标：抓住扶杆的那只手）
+    private(set) var revealCenter = SIMD3<Double>(Double(ProceduralMeshes.barStage.x), 1.25,
+                                                   Double(ProceduralMeshes.barStage.y))
     private(set) var exitTime: Double?
     private(set) var leftRampTime: Double?
     private(set) var deployTime: Double?
@@ -132,17 +136,22 @@ struct JumpTimeline {
 
     // MARK: - 输入
 
-    /// 抓住舱门边的扶杆：游戏开始，跳伞灯变绿
-    mutating func grabBar() {
+    /// 抓住扶杆。第一次抓住时开场的「实体化」从抓的地方开始（at：手在舞台里的位置；没有就按胸口高度）
+    mutating func grabBar(at point: SIMD3<Float>? = nil) {
         guard phase == .cabin else { return }
         holdingBar = true
-        if barGrabbedTime == nil { barGrabbedTime = time }
+        if barGrabbedTime == nil {
+            barGrabbedTime = time
+            if let point { revealCenter = SIMD3(Double(point.x), Double(point.y), Double(point.z)) }
+            else { revealCenter.y = eyeHeight - 0.35 }
+        }
     }
 
-    /// 松开扶杆：跳
+    /// 松开扶杆：亮了绿灯才算跳，之前松手只是放开（再抓住就行）
     mutating func releaseBar() {
         guard phase == .cabin, holdingBar else { return }
         holdingBar = false
+        guard greenLight else { return }
         phase = .exit
         exitTime = time
     }
@@ -305,7 +314,25 @@ struct JumpTimeline {
     var groundPosition: SIMD2<Double> { position + landShift }
     /// 赢了：落进靶里
     var won: Bool { outcome == .bullseye || outcome == .inTarget }
-    var greenLight: Bool { barGrabbedTime != nil }
+    /// 开场：你先站在自己的房间里，只看得到那根扶杆；抓住以后飞机从手边开始一点点长出来（波前越走越快），
+    /// 走过 7 米左右舱门外的天和云也出现，16 米时全部完成。之后再过一秒亮绿灯
+    static let revealDoneRadius = 16.0
+    static let revealDuration = pow(revealDoneRadius / 1.6, 1 / 1.5)      // 约 4.6 秒
+    static let greenDelay = 1.0
+    /// 实体化的波前走到离起点多远（米）：还没抓扶杆是 nil（只有扶杆），完成以后是 .infinity
+    var revealRadius: Double? {
+        guard let start = barGrabbedTime else { return nil }
+        let r = 1.6 * pow(max(time - start, 0), 1.5)
+        return r >= Self.revealDoneRadius ? .infinity : r
+    }
+    /// 实体化进行到哪了（0…1，声音跟着它渐渐起来）
+    var revealProgress: Double {
+        guard let start = barGrabbedTime else { return 0 }
+        return min(max((time - start) / Self.revealDuration, 0), 1)
+    }
+    var greenLight: Bool {
+        barGrabbedTime.map { time - $0 >= Self.revealDuration + Self.greenDelay } ?? false
+    }
     /// 高度表的读数（米）：你的脚离着陆区的高度（真的高度表也是在着陆区归零的）
     var heightAboveGround: Double { altitude - eyeHeight - scene.dzElevation }
     /// 你的脚离正下方地面多高（米）：山区里可能比高度表的读数小得多

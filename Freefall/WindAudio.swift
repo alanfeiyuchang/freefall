@@ -31,6 +31,8 @@ final class JumpAudio: @unchecked Sendable {
         var rumble: Float = 0
         // 一次性的事件：计数加一就触发一次（渲染线程只管加，音频线程看到变化就播）
         var dings = 0, grabs = 0, rips = 0, deploys = 0, thuds = 0, crashes = 0, splashes = 0, wins = 0, fails = 0
+        /// 开场握住扶杆：飞机从手边长出来的那几秒（一次性的上扬的声音）
+        var reveals = 0
     }
 
     private let engine = AVAudioEngine()
@@ -108,12 +110,13 @@ final class JumpDSP: @unchecked Sendable {
     // 报警
     private var alarmTime: Float = 0, alarmPhase: Float = 0
     // 一次性事件
-    private var counters = [Int](repeating: 0, count: 9)
-    private var eventTime = [Float](repeating: -1, count: 9)
+    private var counters = [Int](repeating: 0, count: 10)
+    private var eventTime = [Float](repeating: -1, count: 10)
+    private var revealLow: Float = 0, revealBand: Float = 0
     private var deployLow: Float = 0, deployBand: Float = 0
     private var splashLow: Float = 0
 
-    private enum Event: Int { case ding, grab, rip, deploy, thud, crash, splash, win, fail }
+    private enum Event: Int { case ding, grab, rip, deploy, thud, crash, splash, win, fail, reveal }
 
     init(sampleRate: Float) {
         self.sampleRate = sampleRate
@@ -132,7 +135,7 @@ final class JumpDSP: @unchecked Sendable {
     func render(frameCount: Int, into list: UnsafeMutablePointer<AudioBufferList>, params: JumpAudio.Params) {
         let buffers = UnsafeMutableAudioBufferListPointer(list)
         let counts = [params.dings, params.grabs, params.rips, params.deploys, params.thuds, params.crashes,
-                      params.splashes, params.wins, params.fails]
+                      params.splashes, params.wins, params.fails, params.reveals]
         for i in 0..<counts.count where counts[i] != counters[i] {
             counters[i] = counts[i]
             eventTime[i] = 0
@@ -415,6 +418,22 @@ final class JumpDSP: @unchecked Sendable {
             splashLow = splashLow * 0.9 + white() * 0.1
             out += sin(2 * .pi * 90 * t * exp(-t * 3)) * exp(-t * 9) * 0.6
             out += (white() * 0.5 + splashLow * 1.5) * exp(-t * 2.5) * min(t / 0.05, 1) * 0.5
+        }
+        if let t = advance(.reveal, 5.4) {         // 开场实体化：一阵越来越高、越来越亮的呼——，上面浮着一层泛音，最后落进飞机的轰鸣
+            let rise = min(t / 4.6, 1)
+            let envelope = rise * rise * (3 - 2 * rise) * (1 - max(0, (t - 4.4) / 1.0))
+            let w = white()
+            let sweep = 160 * pow(18, rise)                       // 160 Hz → 2.9 kHz
+            let f = 2 * sin(Float.pi * min(sweep, 5000) / sampleRate)
+            let high = w - revealLow - 0.7 * revealBand
+            revealBand += f * high
+            revealLow += f * revealBand
+            out += revealBand * envelope * 0.22
+            let shimmer: [Float] = [523.3, 784.0, 1046.5, 1568.0]
+            for (k, freq) in shimmer.enumerated() {
+                let wobble = 1 + 0.004 * sin(2 * .pi * (3.1 + Float(k)) * t)
+                out += sin(2 * .pi * freq * wobble * t) * envelope * envelope * (0.022 - Float(k) * 0.004)
+            }
         }
         if let t = advance(.win, 1.6) {            // 赢：三个上行音
             let notes: [Float] = [523.3, 659.3, 784.0]

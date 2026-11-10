@@ -17,6 +17,8 @@ enum MeshMaterial: Float {
     case diffuse = 0, emissive = 1, lampRed = 2, lampGreen = 3, fabric = 4, soft = 5
     /// 装备（Gear.swift）：尼龙织带、金属（环、扣、钢索）、塑料（软管、表壳）、橡胶（表带）
     case webbing = 6, metal = 7, plastic = 8, rubber = 9
+    /// 舱门边的扶杆：开场在你的房间里只有它（不参与实体化，先按屋里的光打）
+    case bar = 10
 }
 
 struct MeshBuilder {
@@ -170,7 +172,7 @@ enum ProceduralMeshes {
         // 舱门边的黄色竖扶杆，和门口上方的一组跳伞灯（抓住扶杆变绿）
         let barX = barStage.x, barZ = barStage.y - Float(standOnRamp)
         m.box(SIMD3(barX - 0.02, barBottom - 0.25, barZ - 0.02), SIMD3(barX + 0.02, barTop + 0.3, barZ + 0.02),
-              color: SIMD3(0.62, 0.48, 0.04))
+              color: SIMD3(0.62, 0.48, 0.04), material: .bar)
         for y: Float in [barBottom - 0.25, barTop + 0.26] {
             m.box(SIMD3(barX - 0.05, y, barZ - 0.05), SIMD3(barX + 0.05, y + 0.04, barZ + 0.05), color: SIMD3(0.2, 0.2, 0.21))
         }

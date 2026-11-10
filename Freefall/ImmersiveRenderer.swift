@@ -51,6 +51,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var wasHoldingBar = false
     private var grabsHeard = 0
     private var dingSent = false
+    private var revealSent = false
     private var deploySent = false
     private var landingSent = false
     private var resultSent = false
@@ -347,7 +348,11 @@ final class ImmersiveRenderer: @unchecked Sendable {
         wasHoldingBar = t.holdingBar
         audioParams.grabs += session.grabs - grabsHeard        // 抓住拉手、操纵环
         grabsHeard = session.grabs
-        if t.barGrabbedTime != nil && !dingSent {          // 绿灯
+        if t.barGrabbedTime != nil && !revealSent {        // 握住扶杆：飞机开始长出来
+            revealSent = true
+            audioParams.reveals += 1
+        }
+        if t.greenLight && !dingSent {                     // 绿灯
             dingSent = true
             audioParams.dings += 1
         }
@@ -371,9 +376,11 @@ final class ImmersiveRenderer: @unchecked Sendable {
             }
         }
         let underCanopy = t.phase == .opening || t.phase == .canopy
-        audioParams.speed = Float(t.windSpeed)
+        // 开场还在房间里：没有发动机、没有风；飞机长出来的那几秒里慢慢起来
+        let cabinLevel = t.phase == .cabin ? Float(t.revealProgress) : 1
+        audioParams.speed = Float(t.windSpeed) * cabinLevel
         audioParams.gain = Float(t.brightness)
-        audioParams.engine = t.leftRampTime == nil ? 1 : Float(25 / (25 + t.planeDistance))
+        audioParams.engine = (t.leftRampTime == nil ? 1 : Float(25 / (25 + t.planeDistance))) * cabinLevel
         audioParams.alarm = t.alarmLevel
         audioParams.canopy = underCanopy ? 1 : 0
         // 海浪和海鸥：伞下离地 300 米以内渐渐听到，落地以后最响（只有海边的两关）
