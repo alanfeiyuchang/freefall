@@ -24,12 +24,14 @@ let mode = args.count > 3 ? args[3] : "shots"
 let filter = args.count > 4 ? args[4] : ""
 try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
 
+let env = ProcessInfo.processInfo.environment
+/// 跳哪一关：SCENE=0 环礁（默认）1 草原 2 高山 3 雪山 4 冰川 5 火山
+let jumpScene = JumpScene(rawValue: Int(env["SCENE"] ?? "0") ?? 0) ?? .atoll
 let device = MTLCreateSystemDefaultDevice()!
 let library = try device.makeLibrary(URL: URL(fileURLWithPath: args[1]))
 let queue = device.makeCommandQueue()!
 let renderer = try SceneRenderer(device: device, library: library, colorFormat: .bgra8Unorm_srgb,
-                                 depthFormat: .depth32Float, maxViewCount: 2, queue: queue)
-let env = ProcessInfo.processInfo.environment
+                                 depthFormat: .depth32Float, maxViewCount: 2, queue: queue, scene: jumpScene)
 if let v = env["EXPOSURE"], let x = Float(v) { renderer.settings.exposure = x }
 if let v = env["SIGMA"], let x = Float(v) { renderer.settings.cloudExtinction = x }
 if let v = env["STEP"], let x = Float(v) { renderer.settings.cloudStep = x }
@@ -148,7 +150,7 @@ func hands(_ pose: Hands, _ session: JumpSession) -> [HandPose] {
 
 // MARK: - 跑模拟
 
-func autoSession(from timeline: JumpTimeline = JumpTimeline(), deployFeet: Double = 3000) -> JumpSession {
+func autoSession(from timeline: JumpTimeline = JumpTimeline(scene: jumpScene), deployFeet: Double = 3000) -> JumpSession {
     let s = JumpSession(timeline: timeline, realHands: true, autopilot: Autopilot(deployFeet: deployFeet))
     s.setEyeHeight(eyeHeight)
     return s
@@ -173,7 +175,9 @@ func at(deployFeet: Double = 3000, _ stop: (JumpTimeline) -> Bool) -> JumpSessio
     return s
 }
 
-func freefall(_ altitude: Double) -> JumpSession { autoSession(from: JumpTimeline(freefallFrom: altitude)) }
+func freefall(_ altitude: Double) -> JumpSession { autoSession(from: JumpTimeline(freefallFrom: altitude, scene: jumpScene)) }
+/// 着陆区上空多少米开始自由落体（地形场景的着陆区不在海平面）
+func freefallAbove(_ height: Double) -> JumpSession { freefall(jumpScene.dzElevation + height) }
 
 /// 某个时刻之后过了多少秒（还没到是 -1）
 func since(_ moment: Double?, _ t: JumpTimeline) -> Double { moment.map { t.time - $0 } ?? -1 }
@@ -291,7 +295,7 @@ struct Shot {
 
 let alarmFeet = { (feet: Int) in at { $0.altitudeFeet <= feet } }
 
-let shots: [Shot] = [
+let atollShots: [Shot] = [
     Shot(name: "d1_door_start", session: { at { $0.time >= 1.5 } }, yaw: 0, pitch: -12),
     Shot(name: "d2_bar_reach", session: { at { $0.time >= 1.5 } }, yaw: -48, pitch: -16, hands: .barOpen, fovY: 80),
     Shot(name: "d3_holding_bar", session: { at { $0.holdingBar && $0.time >= 3.5 } }, yaw: -30, pitch: 4,
@@ -336,6 +340,100 @@ let shots: [Shot] = [
          pitch: -20, fovY: 80),
     Shot(name: "l3_crash", session: { at(deployFeet: 200) { $0.landedTime != nil } }, yaw: 0, pitch: -30),
 ]
+
+/// 地形场景的镜头：高空俯瞰、穿过云层、报警时、开伞后看靶、看两边的山、低空、落地
+let terrainShots: [Shot] = [
+    Shot(name: "t1_door", session: { at { $0.time >= 1.5 } }, yaw: 0, pitch: -14),
+    Shot(name: "t2_high_down", session: { freefallAbove(5500) }, yaw: 0, pitch: -55, fovY: 80),
+    Shot(name: "t3_high_horizon", session: { freefallAbove(5500) }, yaw: 30, pitch: -12, fovY: 80),
+    Shot(name: "t4_rain", session: { freefallAbove(2400) }, yaw: 0, pitch: -30),
+    Shot(name: "t5_alarm", session: { alarmFeet(3400) }, yaw: 0, pitch: -45, hands: .watch, fovY: 70),
+    Shot(name: "t6_canopy_target", session: { deployed(12) }, yaw: 0, pitch: 0, fovY: 80, lookAtTarget: true),
+    Shot(name: "t7_canopy_left", session: { deployed(14) }, yaw: 75, pitch: 5, fovY: 80),
+    Shot(name: "t8_canopy_right", session: { deployed(14) }, yaw: -75, pitch: 5, fovY: 80),
+    Shot(name: "t9_canopy_back", session: { deployed(16) }, yaw: 180, pitch: -5, fovY: 80),
+    Shot(name: "ta_low", session: { at { $0.phase == .canopy && $0.terrainClearance < 120 } }, yaw: 0, pitch: 0,
+         fovY: 80, lookAtTarget: true),
+    Shot(name: "tb_near", session: { at { $0.phase == .canopy && $0.terrainClearance < 25 } }, yaw: 0, pitch: -25,
+         fovY: 80),
+    Shot(name: "tc_landed", session: { at { since($0.landedTime, $0) >= 3 } }, yaw: 0, pitch: -20, fovY: 80),
+    Shot(name: "td_landed_around", session: { at { since($0.landedTime, $0) >= 3 } }, yaw: 120, pitch: 8, fovY: 80),
+]
+
+let shots = jumpScene == .atoll ? atollShots : terrainShots
+
+if mode == "terrain" {
+    // CPU（TerrainField.swift）和 GPU（TerrainField.h）的地形高度、地面类型逐点比对
+    var points: [SIMD2<Float>] = []
+    var rng = SystemRandomNumberGenerator()
+    for _ in 0..<4096 {
+        points.append(SIMD2(Float.random(in: -6000...6000, using: &rng), Float.random(in: -6000...6000, using: &rng)))
+    }
+    for i in 0..<512 {   // 着陆区附近密一点
+        let a = Float(i) * 0.618 * 2 * .pi, r = Float(i) * 0.8
+        points.append(TerrainField.target + SIMD2(cos(a), sin(a)) * r)
+    }
+    let pointBuffer = device.makeBuffer(bytes: points, length: MemoryLayout<SIMD2<Float>>.stride * points.count,
+                                        options: .storageModeShared)!
+    let outBuffer = device.makeBuffer(length: MemoryLayout<SIMD2<Float>>.stride * points.count, options: .storageModeShared)!
+    let pipeline = try device.makeComputePipelineState(function: library.makeFunction(name: "sampleTerrain")!)
+    for scene in JumpScene.allCases where scene.hasTerrain {
+        var sceneIndex = Int32(scene.rawValue)
+        var count = UInt32(points.count)
+        let cb = queue.makeCommandBuffer()!
+        let enc = cb.makeComputeCommandEncoder()!
+        enc.setComputePipelineState(pipeline)
+        enc.setBuffer(pointBuffer, offset: 0, index: 0)
+        enc.setBuffer(outBuffer, offset: 0, index: 1)
+        enc.setBytes(&sceneIndex, length: 4, index: 2)
+        enc.setBytes(&count, length: 4, index: 3)
+        enc.dispatchThreads(MTLSize(width: points.count, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        let gpu = outBuffer.contents().bindMemory(to: SIMD2<Float>.self, capacity: points.count)
+        var maxDiff: Float = 0, hazardMismatch = 0, minH: Float = 1e9, maxH: Float = -1e9
+        var worst = SIMD2<Float>(0, 0)
+        for (i, p) in points.enumerated() {
+            let h = TerrainField.height(scene, p)
+            let diff = abs(h - gpu[i].x)
+            if diff > maxDiff { maxDiff = diff; worst = p }
+            let hz = TerrainField.hazard(scene, p, h)?.rawValue ?? 0
+            if hz != Int(gpu[i].y) { hazardMismatch += 1 }
+            minH = min(minH, h); maxH = max(maxH, h)
+        }
+        let dz = TerrainField.height(scene, TerrainField.target)
+        print(String(format: "  %@：高度差最大 %.4f 米（在 %.0f, %.0f），地面类型不一致 %d / %d；高度 %.0f ~ %.0f，靶 %.1f（应为 %.0f）",
+                     scene.name, maxDiff, worst.x, worst.y, hazardMismatch, points.count, minH, maxH, dz,
+                     scene.dzElevation))
+    }
+}
+
+if mode == "hazards" {
+    // 几个已知位置的地面判定：火山口、熔岩流、冰裂缝、冰湖、河、树林、陡坡、烟柱
+    func check(_ scene: JumpScene, _ name: String, _ p: SIMD2<Float>) {
+        let h = TerrainField.height(scene, p)
+        let hz = TerrainField.hazard(scene, p, h).map { "\($0)" } ?? "没事"
+        print(String(format: "  %@ %@：海拔 %.0f，坡度 %.0f°，%@", scene.name, name, h, TerrainField.slopeDegrees(scene, p), hz))
+    }
+    check(.volcano, "火山口中间", TerrainField.coneCenter)
+    check(.volcano, "熔岩流上", SIMD2(-150, -1080))
+    check(.volcano, "靶", TerrainField.target)
+    check(.volcano, "火山锥坡上", TerrainField.coneCenter + SIMD2(300, 0))
+    let plume = TerrainField.plumeDensity(TerrainField.coneCenter + TerrainField.plumeDrift * 500, altitude: TerrainField.coneTop + 460)
+    print(String(format: "  火山 烟柱里（火山口上方 500 米）：浓度 %.2f（> 0.4 算冲进去）", plume))
+    for s in stride(from: Float(-1600), through: -1200, by: 50) {
+        let p = TerrainField.target + TerrainField.valleyDir * s
+        if TerrainField.hazard(.glacier, p, TerrainField.height(.glacier, p)) == .crevasse { check(.glacier, "冰瀑区（找到的第一条裂缝）", p); break }
+    }
+    check(.glacier, "冰湖", TerrainField.target + TerrainField.valleyDir * 1730)
+    check(.glacier, "靶", TerrainField.target)
+    check(.grassland, "河中间", SIMD2(0, -390 + 110 * sin(0.4) + 45 * sin(2.1)))
+    check(.grassland, "池塘", TerrainField.pondCenter)
+    check(.alpine, "谷壁上（横向 1.2 km）", TerrainField.target + TerrainField.valleySide * 1200)
+    check(.snow, "谷壁上（横向 1.4 km）", TerrainField.target + TerrainField.valleySide * 1400)
+}
 
 if mode == "shots" || mode == "all" {
     let width = 1280, height = 960
@@ -401,7 +499,7 @@ if mode == "sim" || mode == "all" {
 
 if mode == "hands" || mode == "all" {
     // 真手的抓握逻辑：不开自动驾驶，用合成的手一步步做（握拳 = 抓）
-    let s = JumpSession(timeline: JumpTimeline(), realHands: true, autopilot: nil)
+    let s = JumpSession(timeline: JumpTimeline(scene: jumpScene), realHands: true, autopilot: nil)
     s.setEyeHeight(eyeHeight)
     func step(_ seconds: Double, _ makeHands: () -> [HandPose]) {
         let end = s.timeline.time + seconds

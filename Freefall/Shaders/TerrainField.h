@@ -1,0 +1,398 @@
+#pragma once
+#include "Common.h"
+
+// 地形场景的高度和地面类型：草原、高山、雪山、冰川、火山（环礁是平的海，不走这里）。
+// 高度是程序生成的函数：GPU 用它画地形网格、生成高度图（云被山挡住、山的影子）；
+// Swift 的 TerrainField.swift 逐行照抄了一份，CPU 用它判断落地、撞山、掉进河里 / 树林 / 岩浆 / 冰裂缝。
+// **改这里必须同步改那边**（tools/render-check 的 terrain 模式会比对两边的高度）。
+//
+// 所有地形场景共用一个着陆点：靶在地面坐标 LZ_TARGET，开伞点大约在 (0, -100)，从开伞点到靶的方向是 VALLEY_DIR。
+// 山谷、河、冰川都顺着这个方向摆，正常开伞以后顺着谷飞就能到靶。
+
+#define SCENE_ATOLL 0
+#define SCENE_GRASSLAND 1
+#define SCENE_ALPINE 2
+#define SCENE_SNOW 3
+#define SCENE_GLACIER 4
+#define SCENE_VOLCANO 5
+
+#define LZ_TARGET float2(380.0f, -620.0f)
+#define VALLEY_DIR float2(0.59028f, -0.80720f)
+#define VALLEY_SIDE float2(0.80720f, 0.59028f)
+
+// 地面类型
+#define MAT_ROCK 0
+#define MAT_GRASS 1
+#define MAT_FOREST 2
+#define MAT_SNOW 3
+#define MAT_ICE 4
+#define MAT_WATER 5
+#define MAT_LAVA 6
+#define MAT_ASH 7
+#define MAT_SCREE 8
+#define MAT_FIELD 9
+#define MAT_MORAINE 10
+#define MAT_CREVASSE 11
+#define MAT_SAND 12
+
+// 火山：火山口、熔岩湖、烟柱（地面坐标）
+#define CONE_CENTER float2(-500.0f, -950.0f)
+#define CONE_BASE_RADIUS 520.0f
+#define CONE_TOP 900.0f
+#define CRATER_RADIUS 150.0f
+#define LAVA_LAKE 780.0f
+#define PLUME_DRIFT float2(-0.55f, 0.22f)
+
+// MARK: - 噪声（整数哈希的值噪声，带导数）
+
+static inline float tHash(int2 c) {
+    uint h = (uint(c.x) * 0x8DA6B343u) ^ (uint(c.y) * 0xD8163841u);
+    h ^= h >> 15u;
+    h *= 0x2C1B3C6Du;
+    h ^= h >> 12u;
+    h *= 0x297A2D39u;
+    h ^= h >> 15u;
+    return float(h) * (2.0f / 4294967296.0f) - 1.0f;
+}
+
+/// 值噪声（-1..1）和它的两个偏导数
+static inline float3 tNoised(float2 p) {
+    float2 i = floor(p);
+    float2 f = p - i;
+    float2 u = f * f * f * (f * (f * 6.0f - 15.0f) + 10.0f);
+    float2 du = 30.0f * f * f * (f * (f - 2.0f) + 1.0f);
+    int2 c = int2(i);
+    float a = tHash(c), b = tHash(c + int2(1, 0)), d = tHash(c + int2(0, 1)), e = tHash(c + int2(1, 1));
+    float k1 = b - a, k2 = d - a, k4 = a - b - d + e;
+    return float3(a + k1 * u.x + k2 * u.y + k4 * u.x * u.y,
+                  du.x * (k1 + k4 * u.y), du.y * (k2 + k4 * u.x));
+}
+
+static inline float tNoise(float2 p) { return tNoised(p).x; }
+
+/// 下一个八度：放大 2 倍、转 37°（不对齐网格，没有横平竖直的纹）
+static inline float2 tOctave(float2 p) {
+    return float2(1.6f * p.x - 1.2f * p.y, 1.2f * p.x + 1.6f * p.y);
+}
+
+/// 普通 fbm，约 -1..1
+static inline float tFbm(float2 p, int octaves) {
+    float a = 0.0f, b = 0.5f;
+    for (int i = 0; i < octaves; i++) {
+        a += b * tNoise(p);
+        b *= 0.5f;
+        p = tOctave(p) + float2(3.1f, 1.7f);
+    }
+    return a;
+}
+
+/// 有侵蚀感的 fbm（Quilez）：坡陡的地方后面的细节压小，山脊尖、山谷平
+static inline float tEroded(float2 p, int octaves) {
+    float a = 0.0f, b = 1.0f;
+    float2 d = 0.0f;
+    for (int i = 0; i < octaves; i++) {
+        float3 n = tNoised(p);
+        d += n.yz;
+        a += b * n.x / (1.0f + dot(d, d));
+        b *= 0.5f;
+        p = tOctave(p);
+    }
+    return a;
+}
+
+/// 山脊噪声：1 - |n| 的平方，越高的八度只长在上一层的脊上，0..1
+static inline float tRidged(float2 p, int octaves) {
+    float a = 0.0f, b = 0.5f, w = 1.0f;
+    for (int i = 0; i < octaves; i++) {
+        float n = 1.0f - abs(tNoise(p));
+        n = n * n * w;
+        w = saturate(n * 1.8f);
+        a += n * b;
+        b *= 0.5f;
+        p = tOctave(p) + float2(1.3f, -2.9f);
+    }
+    return a;
+}
+
+static inline float tSmooth(float a, float b, float x) {
+    float t = saturate((x - a) / (b - a));
+    return t * t * (3.0f - 2.0f * t);
+}
+
+/// (沿山谷往下游的距离, 横向往右的距离)，原点在靶上
+static inline float2 valleyCoords(float2 p) {
+    float2 d = p - LZ_TARGET;
+    return float2(dot(d, VALLEY_DIR), dot(d, VALLEY_SIDE));
+}
+
+// MARK: - 着陆区的海拔（Swift 的 JumpScene.dzElevation 一致）
+
+static inline float dzElevation(int scene) {
+    switch (scene) {
+    case SCENE_GRASSLAND: return 240.0f;
+    case SCENE_ALPINE: return 1150.0f;
+    case SCENE_SNOW: return 2750.0f;
+    case SCENE_GLACIER: return 1935.0f;
+    case SCENE_VOLCANO: return 620.0f;
+    default: return 0.0f;
+    }
+}
+
+// MARK: - 草原：缓丘、一条弯弯的河、一个池塘、成片的树林、农田
+
+/// 河：大致东西向，从开伞点和靶中间穿过去。返回到河中线的距离（米）
+static inline float riverDistance(float2 p) {
+    float x = p.x;
+    float z = -390.0f + 110.0f * precise::sin(x / 310.0f + 0.4f) + 45.0f * precise::sin(x / 120.0f + 2.1f);
+    float slope = 110.0f / 310.0f * precise::cos(x / 310.0f + 0.4f) + 45.0f / 120.0f * precise::cos(x / 120.0f + 2.1f);
+    return abs(p.y - z) / precise::sqrt(1.0f + slope * slope);
+}
+
+#define RIVER_HALF_WIDTH 14.0f
+#define POND_CENTER float2(650.0f, -800.0f)
+#define POND_RADIUS 55.0f
+
+static inline float grasslandHeight(float2 p) {
+    float r = length(p - LZ_TARGET);
+    float river = riverDistance(p);
+    float pond = length(p - POND_CENTER);
+    // 缓丘：离河、离着陆区远的地方才起伏，河在一片平的河滩里
+    float hills = 55.0f * tFbm(p / 3200.0f + float2(5.2f, 1.3f), 4) + 7.0f * tFbm(p / 420.0f + float2(1.1f, 8.3f), 3);
+    float flat = tSmooth(60.0f, 420.0f, river) * tSmooth(140.0f, 650.0f, r) * tSmooth(80.0f, 300.0f, pond);
+    float h = 240.0f + hills * flat + 0.6f * tFbm(p / 55.0f, 3);
+    // 河槽和池塘：水面比河滩低 2.5 米
+    float water = 237.5f;
+    h = mix(water, h, tSmooth(RIVER_HALF_WIDTH, RIVER_HALF_WIDTH + 14.0f, river));
+    h = mix(water, h, tSmooth(POND_RADIUS, POND_RADIUS + 16.0f, pond));
+    return h;
+}
+
+/// 树林（0..1，> 0.5 算树林）：成片的林子，河两岸一溜，着陆区周围是空地
+static inline float grasslandForest(float2 p) {
+    float r = length(p - LZ_TARGET);
+    float river = riverDistance(p);
+    float patches = tFbm(p / 650.0f + float2(7.7f, 2.2f), 4);
+    float riparian = tSmooth(70.0f, 35.0f, river) * tSmooth(RIVER_HALF_WIDTH + 4.0f, RIVER_HALF_WIDTH + 12.0f, river)
+                   * tSmooth(-0.25f, 0.05f, tFbm(p / 120.0f + float2(3.3f, 9.9f), 3));
+    float f = max(tSmooth(0.1f, 0.2f, patches), riparian);
+    return f * tSmooth(200.0f, 260.0f, r);
+}
+
+// MARK: - 高山：U 形谷，两边是陡峭的岩壁和山峰，谷底有草甸、溪流、林子
+
+static inline float alpineFloor(float s) { return 1150.0f + 0.035f * max(-s, 0.0f) - 0.02f * max(s, 0.0f); }
+
+/// 溪流（在谷底靶的左边一百多米，弯来弯去）到中线的距离
+static inline float alpineStreamDistance(float2 sl) {
+    float center = -175.0f + 60.0f * precise::sin(sl.x / 240.0f) + 25.0f * precise::sin(sl.x / 90.0f + 1.3f);
+    return abs(sl.y - center);
+}
+
+static inline float alpineHeight(float2 p) {
+    float2 sl = valleyCoords(p);
+    float s = sl.x, l = sl.y;
+    float floorH = alpineFloor(s);
+    float halfWidth = 430.0f + 150.0f * tFbm(float2(s / 1800.0f, 9.1f), 3);
+    float lp = max(abs(l) - halfWidth, 0.0f);
+    float wall = 2600.0f * (1.0f - precise::exp(-precise::pow(lp / 1150.0f, 1.7f)));
+    float steep = tSmooth(0.0f, 500.0f, lp);
+    float mountains = tEroded(p / 2400.0f + float2(3.7f, 1.3f), 10);
+    float h = floorH + wall + mountains * mix(14.0f, 950.0f, steep) + 0.5f * tFbm(p / 40.0f, 3);
+    // 着陆区一片平的草甸
+    float r = length(p - LZ_TARGET);
+    h = mix(1150.0f + 0.4f * tFbm(p / 40.0f, 3), h, tSmooth(80.0f, 240.0f, r));
+    // 溪流
+    float stream = alpineStreamDistance(sl);
+    float water = floorH - 3.0f;
+    h = mix(min(water, h), h, tSmooth(5.0f, 22.0f, stream));
+    return h;
+}
+
+static inline float alpineForest(float2 p, float h) {
+    float2 sl = valleyCoords(p);
+    float r = length(p - LZ_TARGET);
+    float lp = max(abs(sl.y) - 380.0f, 0.0f);
+    float patches = tFbm(p / 500.0f + float2(4.4f, 6.1f), 4);
+    // 林线：谷底往上五六百米，参差不齐
+    float treeline = alpineFloor(sl.x) + 560.0f + 180.0f * tNoise(p / 700.0f + float2(2.0f, 2.0f));
+    float belowTreeline = tSmooth(treeline + 60.0f, treeline - 60.0f, h);
+    float onSlope = tSmooth(0.0f, 150.0f, lp) + tSmooth(0.15f, 0.3f, patches);
+    return saturate(onSlope) * belowTreeline * tSmooth(-0.05f, 0.08f, patches) * tSmooth(230.0f, 300.0f, r)
+         * tSmooth(18.0f, 30.0f, alpineStreamDistance(sl));
+}
+
+// MARK: - 雪山：高处的冰斗，一大片平的雪坡，四周是尖利的雪峰和岩壁
+
+static inline float snowHeight(float2 p) {
+    float2 sl = valleyCoords(p);
+    float s = sl.x, l = sl.y;
+    float floorH = 2750.0f + 0.06f * max(-s, 0.0f) - 0.04f * max(s, 0.0f);
+    float halfWidth = 650.0f + 200.0f * tFbm(float2(s / 2000.0f, 2.7f), 3);
+    float lp = max(abs(l) - halfWidth, 0.0f);
+    float wall = 2300.0f * (1.0f - precise::exp(-precise::pow(lp / 1000.0f, 1.6f)));
+    float steep = tSmooth(0.0f, 400.0f, lp);
+    float ridges = tRidged(p / 3000.0f + float2(8.1f, 0.4f), 8);
+    float h = floorH + wall + (ridges - 0.35f) * mix(30.0f, 1300.0f, steep)
+            + 4.0f * tFbm(p / 260.0f, 3) * (1.0f - steep);
+    float r = length(p - LZ_TARGET);
+    h = mix(2750.0f + 0.6f * tFbm(p / 60.0f, 3), h, tSmooth(90.0f, 300.0f, r));
+    return h;
+}
+
+// MARK: - 冰川：一条从上游流下来的冰川，中间有暗色的中碛，上游有冰瀑和裂缝区，下游是冰湖
+
+static inline float glacierFloor(float s) { return 1900.0f + 0.05f * max(-s, 0.0f) + 0.00003f * s * s * step(s, 0.0f) - 0.045f * max(s, 0.0f); }
+
+#define GLACIER_HALF_WIDTH 720.0f
+#define GLACIER_LAKE_S 1350.0f
+
+/// 冰湖：< 0.92 是水（椭圆加噪声的湖岸）
+static inline float glacierLake(float2 p) {
+    float2 sl = valleyCoords(p);
+    float2 d = (sl - float2(GLACIER_LAKE_S + 380.0f, 0.0f)) / float2(430.0f, 620.0f);
+    return length(d) + 0.22f * tNoise(p / 260.0f + float2(4.0f, 1.0f));
+}
+
+
+static inline float glacierHeight(float2 p) {
+    float2 sl = valleyCoords(p);
+    float s = sl.x, l = sl.y;
+    float floorH = glacierFloor(s);
+    // 冰面横截面微微拱起，边上是侧碛的土垄
+    float across = l / GLACIER_HALF_WIDTH;
+    float ice = 35.0f * (1.0f - across * across) * step(abs(across), 1.0f);
+    float m = (abs(l) - GLACIER_HALF_WIDTH - 40.0f) / 60.0f;
+    float moraine = 28.0f * precise::exp(-m * m);
+    float lp = max(abs(l) - GLACIER_HALF_WIDTH - 60.0f, 0.0f);
+    float wall = 2400.0f * (1.0f - precise::exp(-precise::pow(lp / 1100.0f, 1.6f)));
+    float steep = tSmooth(0.0f, 450.0f, lp);
+    float mountains = tEroded(p / 2600.0f + float2(1.9f, 6.6f), 10);
+    float h = floorH + ice + moraine + wall + mountains * mix(8.0f, 1000.0f, steep)
+            + 1.2f * tFbm(p / 90.0f, 3) * (1.0f - steep);
+    // 冰瀑：上游一段坡陡了，冰面一棱一棱的（横向的裂缝把冰切成冰塔）
+    h += 6.0f * tSmooth(-1700.0f, -1300.0f, s) * tSmooth(-700.0f, -1000.0f, s) * abs(precise::sin(s / 9.0f))
+       * step(abs(across), 1.0f);
+    float r = length(p - LZ_TARGET);
+    h = mix(1900.0f + 35.0f * (1.0f - across * across) + 0.3f * tFbm(p / 40.0f, 3), h, tSmooth(80.0f, 220.0f, r));
+    // 冰湖：冰川末端前面，湖岸弯弯曲曲
+    float lake = tSmooth(1.0f, 0.82f, glacierLake(p));
+    h = mix(h, min(h, glacierFloor(GLACIER_LAKE_S) - 25.0f), lake);
+    return h;
+}
+
+/// 冰裂缝（> 0.5 算裂缝）：冰瀑那一段横贯整条冰川，两边边缘斜着裂；着陆区附近 150 米内没有
+static inline float glacierCrevasse(float2 p) {
+    float2 sl = valleyCoords(p);
+    float s = sl.x, l = sl.y;
+    if (abs(l) > GLACIER_HALF_WIDTH) return 0.0f;
+    float wobble = 6.0f * tNoise(p / 70.0f) + 3.0f * tNoise(p / 23.0f);
+    // 裂缝一段一段的（几十米长），宽窄不一
+    float segments = tSmooth(-0.25f, 0.15f, tNoise(float2(s / 16.0f, l / 45.0f) + float2(7.0f, 3.0f)));
+    float width = 1.0f + 0.6f * tNoise(float2(s / 16.0f, l / 30.0f));
+    // 冰瀑区：横向裂缝，间距 16 米左右
+    float transverse = tSmooth(-1900.0f, -1500.0f, s) * tSmooth(-500.0f, -800.0f, s) * segments;
+    float t = abs(fract((s + wobble) / 16.0f) - 0.5f) * 16.0f / width;
+    // 边缘：斜 45° 往上游的裂缝
+    float edge = tSmooth(420.0f, 560.0f, abs(l));
+    float diag = (s + abs(l)) * 0.7071f;
+    float e = abs(fract((diag + wobble) / 22.0f) - 0.5f) * 22.0f;
+    // 再零散加一片：下游中间一块受挤压的区域
+    float patchZone = tSmooth(0.15f, 0.3f, tFbm(p / 400.0f + float2(5.5f, 3.2f), 3)) * tSmooth(150.0f, 260.0f, length(p - LZ_TARGET));
+    float c = max(transverse * tSmooth(1.6f, 0.9f, t), max(edge, patchZone) * segments * tSmooth(1.3f, 0.7f, e / width));
+    return c * tSmooth(150.0f, 200.0f, length(p - LZ_TARGET));
+}
+
+// MARK: - 火山：破火山口（一大片平地，四周是陡的口壁），里面一座正在喷的小火山锥，熔岩往外流
+
+static inline float lavaFlowDistance(float2 p) {
+    // 两条熔岩流：一条往右下（从靶的下方 500 米经过），一条往左
+    float2 a0 = CONE_CENTER, a1 = float2(-150.0f, -1080.0f), a2 = float2(250.0f, -1180.0f), a3 = float2(700.0f, -1430.0f);
+    float2 b1 = float2(-880.0f, -720.0f), b2 = float2(-1250.0f, -330.0f);
+    float d = 1e9f;
+    float2 seg[5][2] = { {a0, a1}, {a1, a2}, {a2, a3}, {a0, b1}, {b1, b2} };
+    for (int i = 0; i < 5; i++) {
+        float2 pa = p - seg[i][0], ba = seg[i][1] - seg[i][0];
+        float t = saturate(dot(pa, ba) / dot(ba, ba));
+        d = min(d, length(pa - ba * t));
+    }
+    return d + 12.0f * tNoise(p / 60.0f);
+}
+
+static inline float volcanoHeight(float2 p) {
+    float2 kc = float2(150.0f, -350.0f);
+    float rk = length(p - kc);
+    // 破火山口：半径 2.3 km 的平底，口壁高 350 米，外坡一路下到 9 km 外的海里
+    float rimNoise = 120.0f * tFbm(p / 900.0f + float2(2.2f, 7.1f), 4);
+    float inner = 620.0f + 4.0f * tFbm(p / 300.0f, 3) + 1.2f * tFbm(p / 45.0f, 3);
+    float rimH = 980.0f + rimNoise;
+    float outer = rimH * precise::pow(saturate(1.0f - (rk - 2500.0f) / 7000.0f), 1.6f) - 30.0f;
+    float h = rk < 2300.0f ? mix(inner, rimH, tSmooth(1950.0f, 2300.0f, rk))
+                           : mix(rimH, outer, tSmooth(2300.0f, 2700.0f, rk));
+    h += 160.0f * tEroded(p / 1800.0f, 7) * tSmooth(2000.0f, 2600.0f, rk);
+    // 火山锥：凹的坡面，顶上一个火山口
+    float rc = length(p - CONE_CENTER);
+    float cone = (CONE_TOP - 620.0f) * precise::pow(saturate(1.0f - rc / CONE_BASE_RADIUS), 1.5f);
+    float crater = tSmooth(CRATER_RADIUS + 40.0f, CRATER_RADIUS - 30.0f, rc);
+    float coneH = 620.0f + cone + 18.0f * tFbm(p / 120.0f, 3) * tSmooth(CONE_BASE_RADIUS, 200.0f, rc);
+    coneH = mix(coneH, LAVA_LAKE, crater);
+    h = max(h, coneH);
+    // 熔岩流比两边略高一点（流动的熔岩堤）
+    float flow = lavaFlowDistance(p);
+    h += 3.0f * tSmooth(40.0f, 12.0f, flow) * step(rk, 2200.0f);
+    float r = length(p - LZ_TARGET);
+    h = mix(620.0f + 0.3f * tFbm(p / 40.0f, 3), h, tSmooth(80.0f, 200.0f, r));
+    return h;
+}
+
+static inline bool volcanoLava(float2 p) {
+    return lavaFlowDistance(p) < 14.0f || length(p - CONE_CENTER) < CRATER_RADIUS - 20.0f;
+}
+
+/// 烟柱：从火山口往上，越高越粗，被风吹得往左偏。返回 0..1 的浓度（> 0.4 算冲进去了）
+static inline float plumeDensity(float2 p, float altitude) {
+    float above = altitude - (CONE_TOP - 40.0f);
+    if (above < 0.0f || above > 3200.0f) return 0.0f;
+    float2 axis = CONE_CENTER + PLUME_DRIFT * above;
+    float radius = 90.0f + 0.22f * above;
+    float d = length(p - axis) / radius;
+    return saturate(1.0f - d * d) * tSmooth(3200.0f, 1800.0f, above);
+}
+
+// MARK: - 汇总
+
+static inline float terrainHeight(int scene, float2 p) {
+    switch (scene) {
+    case SCENE_GRASSLAND: return grasslandHeight(p);
+    case SCENE_ALPINE: return alpineHeight(p);
+    case SCENE_SNOW: return snowHeight(p);
+    case SCENE_GLACIER: return glacierHeight(p);
+    case SCENE_VOLCANO: return volcanoHeight(p);
+    default: return 0.0f;
+    }
+}
+
+/// 会出事的地面（和 Swift 的 TerrainField.hazard 一致）：0 没事，否则是 MAT_WATER / MAT_FOREST / MAT_LAVA / MAT_CREVASSE
+static inline int terrainHazard(int scene, float2 p, float h) {
+    switch (scene) {
+    case SCENE_GRASSLAND:
+        if (riverDistance(p) < RIVER_HALF_WIDTH || length(p - POND_CENTER) < POND_RADIUS) return MAT_WATER;
+        if (grasslandForest(p) > 0.5f) return MAT_FOREST;
+        return 0;
+    case SCENE_ALPINE:
+        if (alpineStreamDistance(valleyCoords(p)) < 5.0f) return MAT_WATER;
+        if (alpineForest(p, h) > 0.5f) return MAT_FOREST;
+        return 0;
+    case SCENE_GLACIER: {
+        float2 sl = valleyCoords(p);
+        if (glacierLake(p) < 0.92f && sl.x > GLACIER_LAKE_S - 100.0f) return MAT_WATER;
+        if (glacierCrevasse(p) > 0.5f) return MAT_CREVASSE;
+        return 0;
+    }
+    case SCENE_VOLCANO:
+        if (h < 0.5f) return MAT_WATER;
+        if (volcanoLava(p)) return MAT_LAVA;
+        return 0;
+    default:
+        return 0;
+    }
+}

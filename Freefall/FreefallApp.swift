@@ -9,12 +9,12 @@ struct FreefallApp: App {
         WindowGroup(id: StartView.windowID) {
             StartView()
         }
-        .defaultSize(width: 640, height: 560)
+        .defaultSize(width: 720, height: 660)
 
         ImmersiveSpace(id: StartView.spaceID) {
             CompositorLayer(configuration: FallLayerConfiguration()) { layerRenderer in
                 ImmersiveRenderer.start(layerRenderer, handsEnabled: AppModel.shared.handsAllowed,
-                                        watchOnLeft: AppModel.shared.watchOnLeft)
+                                        watchOnLeft: AppModel.shared.watchOnLeft, scene: AppModel.shared.scene)
             }
         }
         // full：整个视野都是天空，看不到房间

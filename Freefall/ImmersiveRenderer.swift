@@ -59,7 +59,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var lastQualityChange: CFTimeInterval = 0
     private var lastStatsLog: CFTimeInterval = 0
 
-    init(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool) throws {
+    init(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, jumpScene: JumpScene) throws {
         self.layerRenderer = layerRenderer
         self.handsEnabled = handsEnabled && HandTrackingProvider.isSupported
         self.watchOnLeft = watchOnLeft
@@ -72,19 +72,21 @@ final class ImmersiveRenderer: @unchecked Sendable {
                                   colorFormat: layerRenderer.configuration.colorFormat,
                                   depthFormat: layerRenderer.configuration.depthFormat,
                                   maxViewCount: layerRenderer.properties.viewCount,
-                                  queue: queue)
+                                  queue: queue, scene: jumpScene)
         panel = TextPanel(device: device)
         audio = DebugOptions.mute ? nil : JumpAudio()
-        session = JumpSession(timeline: DebugOptions.startAltitude.map { JumpTimeline(freefallFrom: $0) } ?? JumpTimeline(),
+        session = JumpSession(timeline: DebugOptions.startAltitude.map { JumpTimeline(freefallFrom: $0, scene: jumpScene) }
+                                  ?? JumpTimeline(scene: jumpScene),
                               realHands: self.handsEnabled,
                               autopilot: DebugOptions.autopilot ? Autopilot(deployFeet: DebugOptions.autoDeployFeet) : nil)
     }
 
     @MainActor
-    static func start(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool) {
+    static func start(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, scene: JumpScene) {
         let renderer: ImmersiveRenderer
         do {
-            renderer = try ImmersiveRenderer(layerRenderer, handsEnabled: handsEnabled, watchOnLeft: watchOnLeft)
+            renderer = try ImmersiveRenderer(layerRenderer, handsEnabled: handsEnabled, watchOnLeft: watchOnLeft,
+                                             jumpScene: scene)
         } catch {
             log.error("无法创建渲染器：\(error.localizedDescription)")
             return
@@ -369,11 +371,21 @@ final class ImmersiveRenderer: @unchecked Sendable {
         audioParams.engine = t.leftRampTime == nil ? 1 : Float(25 / (25 + t.planeDistance))
         audioParams.alarm = t.alarmLevel
         audioParams.canopy = underCanopy ? 1 : 0
-        // 海浪和海鸥：伞下离地 300 米以内渐渐听到，落地以后最响
-        let near = Float(min(max((300 - t.heightAboveGround) / 250, 0), 1))
-        audioParams.ambience = t.phase == .landed || t.phase == .done ? 1 : near
+        // 海浪和海鸥：伞下离地 300 米以内渐渐听到，落地以后最响（只有海边的两关）
+        let near = Float(min(max((300 - t.terrainClearance) / 250, 0), 1))
+        let seaside: Float = t.scene == .atoll ? 1 : 0
+        audioParams.ambience = (t.phase == .landed || t.phase == .done ? 1 : near) * seaside
         audioParams.turn = Float(min(abs(t.turnRate) / JumpTimeline.maxTurnRate, 1))
         audioParams.rain = Float(t.rainIntensity)
+        // 草原、高山：离地 150 米以内听得到林子里的鸟；火山：离火山锥 3 km 以内越来越响的轰鸣
+        let low = Float(min(max((150 - t.terrainClearance) / 120, 0), 1))
+        audioParams.birds = (t.scene == .grassland || t.scene == .alpine) ? (t.phase == .landed ? 1 : low) : 0
+        if t.scene == .volcano {
+            let d = Float(length(t.groundPosition - SIMD2<Double>(TerrainField.coneCenter)))
+            audioParams.rumble = 1 - min(max((d - 400) / 2600, 0), 1)
+        } else {
+            audioParams.rumble = 0
+        }
         audio.update(audioParams)
     }
 

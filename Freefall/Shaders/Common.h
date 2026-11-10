@@ -25,6 +25,7 @@ struct FrameUniforms {
     uint4 hudGlyphs;         // 高度数字的字形，每字节一个（0-9 数字、10 逗号、255 结束）
     float4 hudStyle;         // x 样式（0 前方面板，1 手腕表盘），y 表盘外圈弧的比例（高度 / 30,000 ft），z 报警（0/1/2）
     float4 heading;          // x cos 航向，y sin 航向（舞台 → 世界绕 y 轴转），z 转弯时的暗边强度，w 未用
+    float4 world;            // x 场景编号，y 云层整体抬高多少米（= 着陆区海拔），z 有地形（0/1），w 未用
 };
 
 /// 提示文字面板（舞台空间里的一块板）

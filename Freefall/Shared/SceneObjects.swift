@@ -52,6 +52,8 @@ struct SceneObjects {
     var roundCones: [RoundCone] = []
     /// 身边的雨丝（不下雨是 nil）
     var rain: RainUniforms?
+    /// 地形（环礁没有）
+    var terrain: TerrainFrame?
 
     static let strapColor = SIMD3<Float>(0.035, 0.035, 0.04)
     static let webbingColor = SIMD3<Float>(0.09, 0.09, 0.1)

@@ -32,6 +32,8 @@ struct FrameUniforms {
     var hudStyle = SIMD4<Float>(0, 0, 0, 0)
     /// x cos 航向，y sin 航向，z 转弯时的暗边强度
     var heading = SIMD4<Float>(1, 0, 0, 0)
+    /// x 场景编号，y 云层整体抬高多少米，z 有地形（SceneRenderer 按场景填）
+    var world = SIMD4<Float>(0, 0, 0, 0)
 }
 
 /// 和 Common.h 的 PanelUniforms 一样：提示文字面板

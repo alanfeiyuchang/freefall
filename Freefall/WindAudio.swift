@@ -25,6 +25,10 @@ final class JumpAudio: @unchecked Sendable {
         var turn: Float = 0
         /// 雨有多大 0…1
         var rain: Float = 0
+        /// 林间的鸟叫 0…1（草原、高山近地的时候）
+        var birds: Float = 0
+        /// 火山的轰鸣 0…1（离火山锥越近越响）
+        var rumble: Float = 0
         // 一次性的事件：计数加一就触发一次（渲染线程只管加，音频线程看到变化就播）
         var dings = 0, grabs = 0, rips = 0, deploys = 0, thuds = 0, crashes = 0, splashes = 0, wins = 0, fails = 0
     }
@@ -74,6 +78,12 @@ final class JumpDSP: @unchecked Sendable {
     // 平滑后的参数
     private var speed: Float = 0, gain: Float = 0, engineLevel: Float = 0
     private var canopy: Float = 0, ambience: Float = 0, turn: Float = 0, rain: Float = 0
+    private var birds: Float = 0, rumbleLevel: Float = 0
+    // 鸟叫：一串短促的「啾啾」，音高往上滑
+    private var birdCountdown: Float = 1, birdTime: Float = -1, birdNotes = 0, birdPitch: Float = 3000
+    private var birdPan: Float = 0, birdPhase: Float = 0
+    // 火山：很低的隆隆声（低通的棕噪声），偶尔一声闷响
+    private var quake: [Float] = [0, 0], quakeLow: [Float] = [0, 0], boomTime: Float = -1, boomCountdown: Float = 4
     // 雨
     private var rainHigh: [Float] = [0, 0], rainLast: [Float] = [0, 0]
     private var dropEnv: [Float] = [0, 0, 0, 0, 0, 0], dropPhase: [Float] = [0, 0, 0, 0, 0, 0]
@@ -142,6 +152,8 @@ final class JumpDSP: @unchecked Sendable {
             ambience += (params.ambience - ambience) * slow
             turn += (params.turn - turn) * smoothing
             rain += (params.rain - rain) * smoothing
+            birds += (params.birds - birds) * slow
+            rumbleLevel += (params.rumble - rumbleLevel) * slow
 
             var outL: Float = 0, outR: Float = 0
 
@@ -216,6 +228,52 @@ final class JumpDSP: @unchecked Sendable {
                     outL += tick * (1 - dropPan[k]) * 0.7
                     outR += tick * (1 + dropPan[k]) * 0.7
                     dropEnv[k] *= decay
+                }
+            }
+
+            // ---- 林间的鸟 ----
+            if birds > 0.01 {
+                birdCountdown -= dt
+                if birdCountdown <= 0 && birdTime < 0 {
+                    birdTime = 0
+                    birdNotes = 2 + Int(unit() * 4)
+                    birdPitch = 2600 + 1600 * unit()
+                    birdPan = white() * 0.9
+                    birdCountdown = 1.5 + 4 * unit()
+                }
+                if birdTime >= 0 {
+                    let note: Float = 0.09, gap: Float = 0.05
+                    let local = fmod(birdTime, note + gap)
+                    if local < note {
+                        let x = local / note
+                        birdPhase += 2 * .pi * birdPitch * (1 + 0.35 * x) * dt
+                        if birdPhase > 2 * .pi { birdPhase -= 2 * .pi }
+                        let env = min(x / 0.15, 1) * (1 - x)
+                        let chirp = sin(birdPhase) * env * 0.035 * birds
+                        outL += chirp * (1 - birdPan) * 0.7
+                        outR += chirp * (1 + birdPan) * 0.7
+                    }
+                    birdTime += dt
+                    if birdTime > Float(birdNotes) * (note + gap) { birdTime = -1 }
+                }
+            }
+
+            // ---- 火山的轰鸣 ----
+            if rumbleLevel > 0.01 {
+                for c in 0..<2 {
+                    quake[c] = quake[c] * 0.998 + white() * 0.03
+                    quakeLow[c] += (quake[c] - quakeLow[c]) * 0.01
+                    let s = quakeLow[c] * rumbleLevel * 2.2
+                    if c == 0 { outL += s } else { outR += s }
+                }
+                boomCountdown -= dt
+                if boomCountdown <= 0 { boomTime = 0; boomCountdown = 5 + 8 * unit() }
+                if boomTime >= 0 {
+                    let boom = (sin(2 * .pi * 34 * boomTime) * 0.8 + white() * 0.3) * exp(-boomTime * 1.6)
+                        * min(boomTime / 0.08, 1) * rumbleLevel * 0.35
+                    outL += boom; outR += boom
+                    boomTime += dt
+                    if boomTime > 3 { boomTime = -1 }
                 }
             }
 

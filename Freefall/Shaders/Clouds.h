@@ -1,6 +1,7 @@
 #pragma once
 #include "Common.h"
 #include "Atmosphere.h"
+#include "TerrainField.h"
 
 // 体积云：思路照 Schneider 的 Nubis（地平线：零之曙光），用三张预先生成的纹理拼出密度场：
 //   天气图（2D，平铺 64 km）：r 覆盖率，g 云顶高度，b 云底高度。决定哪里有云、多高。
@@ -18,6 +19,8 @@
 #define BASE_NOISE_SIZE 2600.0f
 #define DETAIL_NOISE_SIZE 420.0f
 #define CLOUD_FAR 160000.0f
+// 地形高度图：地面坐标 ±32 km（Terrain.h）
+#define TERRAIN_MAP_SIZE 64000.0f
 
 // 环礁：一张 16 km 见方的图，中心在你自由落体位置的右前方约 3.8 km（地面坐标，见 generateAtoll）。
 // 伞降往正前方飞八百多米，中途越过礁缘和一座小沙洲，最后在潟湖上空（tools/render-check 的 maps 模式能画出路线）。
@@ -52,12 +55,13 @@ static inline float rainProfile(float h) {
 
 struct Weather { float coverage; float base; float top; float columnar; };
 
-static inline Weather sampleWeather(float2 xz, texture2d<float> weather) {
+/// offset：云层整体抬高多少米（地形场景按着陆区的海拔抬，雪山里的云在 5 km 以上）
+static inline Weather sampleWeather(float2 xz, texture2d<float> weather, float offset = 0.0f) {
     float4 w = weather.sample(linearRepeat, xz / WEATHER_TILE + 0.5f, level(0));
     Weather o;
     o.coverage = w.r;
-    o.top = mix(1500.0f, CLOUD_MAX_H, w.g);
-    o.base = mix(CLOUD_MIN_H, 3500.0f, w.b);
+    o.top = mix(1500.0f, CLOUD_MAX_H, w.g) + offset;
+    o.base = mix(CLOUD_MIN_H, 3500.0f, w.b) + offset;
     o.columnar = w.a;
     return o;
 }
@@ -125,7 +129,29 @@ struct CloudMaps {
     texture3d<float> detail;
     texture2d<float> weather;
     texture2d<float> topMax;     // 附近最高的云顶（见 computeCloudTopMax）
+    float offset;                // 云层整体抬高多少米
+    float terrainDistance;       // 视线碰到地形的距离（米）：只算地形前面的云（没有地形是很大的数）
+    float2 landShift;            // 地面坐标 - 云坐标（火山的烟柱长在地面上）
+    int scene;
+    float time;
 };
+
+/// 火山的烟柱：TerrainField.h 的形状（和 CPU 判断冲没冲进去用的一样）× 往上翻滚的噪声。只有火山这一关有。
+static inline float plumeCloud(float3 p, CloudMaps maps) {
+    if (maps.scene != SCENE_VOLCANO) return 0.0f;
+    float2 g = p.xz + maps.landShift;
+    float shape = plumeDensity(g, p.y);
+    if (shape <= 0.0f) return 0.0f;
+    float n = maps.base.sample(linearRepeat, float3(g.x / 320.0f, (p.y - maps.time * 7.0f) / 260.0f, g.y / 320.0f),
+                               level(0)).r;
+    return saturate(shape * 1.6f * (n * 1.6f - 0.35f));
+}
+
+/// 这一点离烟柱近不近（步进的时候别一步跨过去）
+static inline bool nearPlume(float3 p, CloudMaps maps) {
+    if (maps.scene != SCENE_VOLCANO) return false;
+    return length(p.xz + maps.landShift - CONE_CENTER) < 4500.0f && p.y < CONE_TOP + 3300.0f;
+}
 
 /// 朝太阳走几步（越走越长）估这一点到云外的光学深度（密度 × 米）。近处 5 步（约 1 km），远处 4 步。
 /// x = 全程，y = 只算前两步（约 80 米）：顺便拿来近似环境光遮蔽——凹进去、背着光的地方天光也少。
@@ -135,8 +161,8 @@ static inline float2 lightOpticalDepth(float3 p, float3 sunDir, CloudMaps maps, 
     float growth = far ? 2.6f : 2.1f;
     for (int i = 0; i < steps; i++) {
         float3 q = p + sunDir * (s + ds * 0.5f);
-        Weather w = sampleWeather(q.xz, maps.weather);
-        od += cloudDensity(q, w, maps.base, maps.detail, i < 2 && !far, bias) * ds;
+        Weather w = sampleWeather(q.xz, maps.weather, maps.offset);
+        od += max(cloudDensity(q, w, maps.base, maps.detail, i < 2 && !far, bias), plumeCloud(q, maps)) * ds;
         if (i == 1) near = od;
         s += ds;
         ds *= growth;
@@ -158,21 +184,25 @@ static CloudHit marchClouds(float3 ro, float3 rd, float jitter, constant FrameUn
     hit.depth = 0.0f;
 
     float ch = ro.y, mu = rd.y;
-    float2 outer = sphereHits(ch, mu, CLOUD_MAX_H);
-    float2 inner = sphereHits(ch, mu, CLOUD_MIN_H);
+    float off = maps.offset;
+    // 火山的烟柱从火山口（比云底低）就开始冒，步进的下边界要放到火山口
+    float lowH = maps.scene == SCENE_VOLCANO ? min(CLOUD_MIN_H + off, CONE_TOP - 60.0f) : CLOUD_MIN_H + off;
+    float2 outer = sphereHits(ch, mu, CLOUD_MAX_H + off);
+    float2 inner = sphereHits(ch, mu, lowH);
     float t0, t1;
-    if (ch > CLOUD_MAX_H) {
+    if (ch > CLOUD_MAX_H + off) {
         if (outer.y <= 0.0f) return hit;
         t0 = max(outer.x, 0.0f);
         t1 = inner.x > 0.0f ? inner.x : outer.y;
-    } else if (ch >= CLOUD_MIN_H) {
+    } else if (ch >= lowH) {
         t0 = 0.0f;
         t1 = inner.x > 0.0f ? inner.x : outer.y;
     } else {
         t0 = max(inner.y, 0.0f);
         t1 = outer.y;
     }
-    t1 = min(t1, CLOUD_FAR);
+    // 只算地形前面的云：山后面的云被山挡住了（地形的距离来自云层 pass 之前的地形深度预渲染）
+    t1 = min(min(t1, CLOUD_FAR), maps.terrainDistance);
     if (t1 <= t0) return hit;
 
     float3 sunDir = F.sunDirection.xyz;
@@ -195,18 +225,18 @@ static CloudHit marchClouds(float3 ro, float3 rd, float jitter, constant FrameUn
         float fineStep = clamp(t * 0.004f, 24.0f, 400.0f) * quality;
         float coarseStep = fineStep * 3.0f;
         float3 p = float3(ro.x + rd.x * t + F.ground.x, heightAt(ch, mu, t), ro.z + rd.z * t + F.ground.z);
-        Weather w = sampleWeather(p.xz, maps.weather);
+        Weather w = sampleWeather(p.xz, maps.weather, off);
 
         if (!fine) {
             // 还在附近所有云顶之上、并且在往下走：直接跳到那个高度（水平最多走 1.4 km，不越过上限图的保护范围）
             float topNear = mix(1500.0f, CLOUD_MAX_H, maps.topMax.sample(linearRepeat, p.xz / WEATHER_TILE + 0.5f,
-                                                                         level(0)).r) + 60.0f;
-            if (p.y > topNear && mu < -0.02f) {
+                                                                         level(0)).r) + 60.0f + off;
+            if (p.y > topNear && mu < -0.02f && !nearPlume(p, maps)) {
                 float skip = min((p.y - topNear) / -mu, 1400.0f / max(length(rd.xz), 0.05f));
                 t += max(skip, coarseStep);
                 continue;
             }
-            if (cloudDensity(p, w, maps.base, maps.detail, false, bias) > 0.0f) {
+            if (cloudDensity(p, w, maps.base, maps.detail, false, bias) > 0.0f || plumeCloud(p, maps) > 0.0f) {
                 fine = true;                       // 碰到云了：退回半步，改用细步
                 empty = 0;
                 t = max(t - coarseStep * 0.5f, t0);
@@ -217,8 +247,12 @@ static CloudHit marchClouds(float3 ro, float3 rd, float jitter, constant FrameUn
         }
 
         bool far = t > 15000.0f;              // 15 km 外细节噪声小于一个像素
-        float d = cloudDensity(p, w, maps.base, maps.detail, !far, bias);
+        float cloudD = cloudDensity(p, w, maps.base, maps.detail, !far, bias);
+        float plume = plumeCloud(p, maps);
+        float d = max(cloudD, plume);
         if (d > 0.003f) {
+            // 烟柱是水汽夹着火山灰：比云暗、偏一点褐
+            float3 albedo = plume > cloudD ? float3(0.62f, 0.58f, 0.54f) : float3(1.0f);
             empty = 0;
             float sigmaE = d * sigma;
             float2 lightOD = lightOpticalDepth(p, sunDir, maps, bias, far) * sigma;
@@ -231,7 +265,9 @@ static CloudHit marchClouds(float3 ro, float3 rd, float jitter, constant FrameUn
             float3 sun = mix(A.sunAtCloudBase.rgb, A.sunAtCloudTop.rgb, saturate((p.y - 1000.0f) / 8000.0f));
             float occlusion = mix(0.35f, 1.0f, exp(-lightOD.y * 0.5f));
             float3 ambient = (mix(A.groundBounce.rgb, A.skyRadianceAvg.rgb, sqrt(hf)) + sun * 0.004f) * occlusion;
-            float3 S = sigmaE * (sun * sunVis + ambient);
+            float3 S = sigmaE * albedo * (sun * sunVis + ambient);
+            // 烟柱底下被火山口里的熔岩照得发橙
+            if (plume > cloudD) S += sigmaE * float3(1.6f, 0.42f, 0.08f) * 0.05f * exp(-(p.y - CONE_TOP) / 220.0f);
             float stepT = exp(-sigmaE * fineStep);
             float3 Sint = (S - S * stepT) / sigmaE;   // 一步之内解析积分（Hillaire 2016），步长大也不会亮度失真
             L += T * Sint;

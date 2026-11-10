@@ -30,17 +30,28 @@ final class SceneRenderer: @unchecked Sendable {
         settings.cloudStep = q.cloudStep
     }
 
-    /// 太阳：仰角 32°，在起跳那一刻你面朝方向的左前方 25°（迎光看云有亮边，回头看是顺光的白云）。
-    static let sunDirection: SIMD3<Float> = {
+    /// 太阳（世界方向，指向太阳）。
+    /// 环礁：仰角 32°，在起跳那一刻你面朝方向的左前方 25°（迎光看云有亮边，回头看是顺光的白云）。
+    /// 地形关：仰角 50°，从山谷上游的左后方顺着谷照下来——低的太阳横着照进山谷，两边的山会把整个谷底挡在影子里。
+    static func sunDirection(for scene: JumpScene) -> SIMD3<Float> {
+        if scene.hasTerrain {
+            let elevation: Float = 50 * .pi / 180
+            let horizontal = SIMD2<Float>(-0.888, 0.460)
+            return normalize(SIMD3(horizontal.x * cos(elevation), sin(elevation), horizontal.y * cos(elevation)))
+        }
         let elevation: Float = 32 * .pi / 180
         let azimuth: Float = -25 * .pi / 180
         return normalize(SIMD3(sin(azimuth) * cos(elevation), sin(elevation), -cos(azimuth) * cos(elevation)))
-    }()
+    }
+
+    var sunDirection: SIMD3<Float> { Self.sunDirection(for: scene) }
 
     enum RendererError: Error { case missingFunction(String) }
 
     let device: MTLDevice
     var settings = Settings()
+    /// 这一关（地形、云层高度都按它；换关要新建一个 SceneRenderer）
+    let scene: JumpScene
 
     let baseNoise: MTLTexture
     let detailNoise: MTLTexture
@@ -48,6 +59,22 @@ final class SceneRenderer: @unchecked Sendable {
     let cloudShadow: MTLTexture
     let cloudTopMax: MTLTexture
     let atoll: MTLTexture
+    /// 地形高度图（地面坐标 ±32 km，给云被山挡住、山影用）和山影图（r 太阳、g 环境光遮蔽）
+    let terrainHeightMap: MTLTexture
+    let terrainShade: MTLTexture
+    /// 地面类型图（树林、水和熔岩的边、冰碛、农田……启动时预算，着色时只查一次）
+    let surfaceMap: MTLTexture
+    private let terrainPipeline: MTLRenderPipelineState
+    private let terrainDepthPipeline: MTLRenderPipelineState
+    /// 没有地形时绑给云层 pass 的占位深度
+    private let emptyTerrainDepth: MTLTexture
+    private let patchIndices: MTLBuffer
+    private let patchIndexCount: Int
+    private var nodeBuffers: [MTLBuffer] = []
+    private var nodeBufferIndex = 0
+    private var selectedNodes: [(SIMD2<Double>, Double, Int)] = []
+    /// 上一帧画了多少块地形（离屏测试打印用）
+    private(set) var lastTerrainNodeCount = 0
     private let transmittanceLUT: MTLTexture
     private let multiScatLUT: MTLTexture
     private let skyViewLUT: MTLTexture
@@ -88,8 +115,9 @@ final class SceneRenderer: @unchecked Sendable {
     private var rateMapBufferIndex = 0
 
     init(device: MTLDevice, library: MTLLibrary, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat,
-         maxViewCount: Int, queue: MTLCommandQueue) throws {
+         maxViewCount: Int, queue: MTLCommandQueue, scene: JumpScene = .atoll) throws {
         self.device = device
+        self.scene = scene
 
         func function(_ name: String) throws -> MTLFunction {
             guard let f = library.makeFunction(name: name) else { throw RendererError.missingFunction(name) }
@@ -136,6 +164,10 @@ final class SceneRenderer: @unchecked Sendable {
         cloudShadow = texture(.type2D, .r16Float, 2048, 2048)
         cloudTopMax = texture(.type2D, .r8Unorm, 256, 256)
         atoll = texture(.type2D, .rgba8Unorm, 2048, 2048)
+        let terrainSize = scene.hasTerrain ? 2048 : 4
+        terrainHeightMap = texture(.type2D, .r16Float, terrainSize, terrainSize)
+        terrainShade = texture(.type2D, .rg8Unorm, terrainSize, terrainSize)
+        surfaceMap = texture(.type2D, .rgba8Unorm, terrainSize, terrainSize)
         transmittanceLUT = texture(.type2D, .rgba16Float, 256, 64)
         multiScatLUT = texture(.type2D, .rgba16Float, 32, 32)
         skyViewLUT = texture(.type2D, .rgba16Float, 192, 108)
@@ -149,8 +181,34 @@ final class SceneRenderer: @unchecked Sendable {
                                                 colors: [.rgba16Float, .r16Float], depth: .invalid, blend: false)
         cloudResolvePipeline = try renderPipeline("fullscreenVertex", "cloudResolveFragment",
                                                   colors: [.rgba16Float, .r16Float], depth: .invalid, blend: false)
-        scenePipeline = try renderPipeline("fullscreenVertex", "sceneFragment", colors: [colorFormat],
+        scenePipeline = try renderPipeline("skyVertex", "sceneFragment", colors: [colorFormat],
                                            depth: depthFormat, blend: false)
+        terrainPipeline = try renderPipeline("terrainVertex", "terrainFragment", colors: [colorFormat],
+                                             depth: depthFormat, blend: false)
+        let depthOnly = MTLRenderPipelineDescriptor()
+        depthOnly.label = "terrain depth"
+        depthOnly.vertexFunction = try function("terrainDepthVertex")
+        depthOnly.depthAttachmentPixelFormat = .depth32Float
+        depthOnly.maxVertexAmplificationCount = maxViewCount
+        depthOnly.inputPrimitiveTopology = .triangle
+        terrainDepthPipeline = try device.makeRenderPipelineState(descriptor: depthOnly)
+        let empty = MTLTextureDescriptor()
+        empty.textureType = .type2DArray
+        empty.pixelFormat = .depth32Float
+        empty.width = 1
+        empty.height = 1
+        empty.arrayLength = 2
+        empty.usage = [.shaderRead, .renderTarget]
+        empty.storageMode = .private
+        emptyTerrainDepth = device.makeTexture(descriptor: empty)!
+        let indices = TerrainLOD.patchIndices()
+        patchIndexCount = indices.count
+        patchIndices = device.makeBuffer(bytes: indices, length: MemoryLayout<UInt16>.stride * indices.count,
+                                         options: .storageModeShared)!
+        for _ in 0..<8 {
+            nodeBuffers.append(device.makeBuffer(length: MemoryLayout<TerrainNode>.stride * TerrainLOD.maxNodes,
+                                                 options: .storageModeShared)!)
+        }
         hudPipeline = try renderPipeline("hudVertex", "hudFragment", colors: [colorFormat],
                                          depth: depthFormat, blend: true)
         meshPipeline = try renderPipeline("meshVertex", "objectFragment", colors: [colorFormat],
@@ -223,7 +281,7 @@ final class SceneRenderer: @unchecked Sendable {
         let cb = queue.makeCommandBuffer()!
         cb.label = "Freefall precompute"
         let enc = cb.makeComputeCommandEncoder()!   // 串行派发：前一个写完后一个才读
-        var sun = SIMD4<Float>(Self.sunDirection, 0)
+        var sun = SIMD4<Float>(sunDirection, 0)
 
         enc.setTexture(baseNoise, index: 0)
         dispatch(enc, try kernel("generateBaseNoise"), MTLSize(width: 128, height: 128, depth: 128))
@@ -239,11 +297,27 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setTexture(weather, index: 1)
         dispatch(enc, try kernel("computeCloudTopMax"), MTLSize(width: 256, height: 256, depth: 1))
 
+        var cloudOffset = Float(scene.cloudOffset)
         enc.setTexture(cloudShadow, index: 0)
         enc.setTexture(baseNoise, index: 1)
         enc.setTexture(weather, index: 2)
         enc.setBytes(&sun, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        enc.setBytes(&cloudOffset, length: MemoryLayout<Float>.stride, index: 1)
         dispatch(enc, try kernel("computeCloudShadow"), MTLSize(width: 2048, height: 2048, depth: 1))
+
+        if scene.hasTerrain {
+            var sceneIndex = Int32(scene.rawValue)
+            enc.setTexture(terrainHeightMap, index: 0)
+            enc.setBytes(&sceneIndex, length: MemoryLayout<Int32>.stride, index: 0)
+            dispatch(enc, try kernel("generateTerrainHeight"), MTLSize(width: 2048, height: 2048, depth: 1))
+            enc.setTexture(terrainShade, index: 0)
+            enc.setTexture(terrainHeightMap, index: 1)
+            enc.setBytes(&sun, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+            dispatch(enc, try kernel("computeTerrainShadow"), MTLSize(width: 2048, height: 2048, depth: 1))
+            enc.setTexture(surfaceMap, index: 0)
+            enc.setBytes(&sceneIndex, length: MemoryLayout<Int32>.stride, index: 0)
+            dispatch(enc, try kernel("generateSurfaceMap"), MTLSize(width: 2048, height: 2048, depth: 1))
+        }
 
         enc.setTexture(transmittanceLUT, index: 0)
         dispatch(enc, try kernel("computeTransmittanceLUT"), MTLSize(width: 256, height: 64, depth: 1))
@@ -276,7 +350,7 @@ final class SceneRenderer: @unchecked Sendable {
     }
 
     private func encodeSkyView(_ enc: MTLComputeCommandEncoder, into target: MTLTexture, viewHeightKm: Float) {
-        var sun = SIMD4<Float>(Self.sunDirection, 0)
+        var sun = SIMD4<Float>(sunDirection, 0)
         var height = viewHeightKm
         enc.setTexture(target, index: 0)
         enc.setTexture(transmittanceLUT, index: 1)
@@ -299,9 +373,10 @@ final class SceneRenderer: @unchecked Sendable {
     /// 补全 FrameUniforms 里由渲染器决定的字段（太阳、云和曝光设置）。
     func complete(_ frame: FrameUniforms) -> FrameUniforms {
         var f = frame
-        f.sunDirection = SIMD4(Self.sunDirection, 0)
+        f.sunDirection = SIMD4(sunDirection, 0)
         f.clouds = SIMD4(settings.cloudScale, settings.cloudStep, settings.cloudExtinction, settings.coverageBias)
         f.exposure.x = settings.exposure
+        f.world = scene.worldUniform
         return f
     }
 
@@ -373,6 +448,16 @@ final class SceneRenderer: @unchecked Sendable {
         frame.camera.w = rateMap == nil ? 0 : 1
         let rateBuffer = rateMap.map(rateMapBuffer(for:)) ?? emptyRateMapBuffer
 
+        // 0. 地形：先选块，画一遍深度（云层按它截断）
+        var terrainDraw: TerrainDraw?
+        var terrainDepth = emptyTerrainDepth
+        if scene.hasTerrain, let terrain = objects.terrain, let draw = prepareTerrain(terrain, views: views) {
+            terrainDraw = draw
+            terrainDepth = terrainDepthTexture(group: group, like: colorTexture, layers: max(viewCount, 1))
+            encodeTerrainDepth(commandBuffer, draw, target: terrainDepth, views: &views, frame: &frame,
+                               viewports: viewports, renderTargetArrayLength: renderTargetArrayLength, rateMap: rateMap)
+        }
+
         let cloudWidth = Int((Float(colorTexture.width) * settings.cloudScale).rounded(.up))
         let cloudHeight = Int((Float(colorTexture.height) * settings.cloudScale).rounded(.up))
         let layers = max(viewCount, 2)
@@ -435,6 +520,7 @@ final class SceneRenderer: @unchecked Sendable {
             enc.setFragmentTexture(weather, index: 4)
             enc.setFragmentTexture(multiScatLUT, index: 5)
             enc.setFragmentTexture(cloudTopMax, index: 6)
+            enc.setFragmentTexture(terrainDepth, index: 7)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
@@ -477,8 +563,14 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setViewports(viewports)
         amplify(enc)
 
+        // 地形先画（写深度），天空 pass 再按深度只填地形没盖住的像素
+        if let terrainDraw {
+            encodeTerrain(enc, terrainDraw, views: &views, frame: &frame, rateBuffer: rateBuffer,
+                          cloud: history.history[writeIndex])
+        }
+
         enc.setRenderPipelineState(scenePipeline)
-        enc.setDepthStencilState(alwaysWriteDepth)
+        enc.setDepthStencilState(nearerDepth)
         enc.setFragmentBytes(&views, length: MemoryLayout<ViewUniforms>.stride * viewCount, index: 0)
         enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
         enc.setFragmentBuffer(rateBuffer, offset: 0, index: 2)
@@ -529,6 +621,141 @@ final class SceneRenderer: @unchecked Sendable {
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
         enc.endEncoding()
+    }
+
+    /// 这一帧要画的地形块（深度预渲染和主 pass 共用）
+    private struct TerrainDraw {
+        var buffer: MTLBuffer
+        var count: Int
+        var uniforms: TerrainUniforms
+    }
+
+    /// 地形：选块（视锥裁剪）→ 写进这一帧的块缓冲
+    private func prepareTerrain(_ terrain: TerrainFrame, views: [ViewUniforms]) -> TerrainDraw? {
+        let viewCount = views.count
+        // 头（两只眼的中点）在舞台空间和地面坐标里的位置
+        var head = SIMD3<Float>(0, 0, 0)
+        for v in views { head += SIMD3(v.cameraPosition.x, v.cameraPosition.y, v.cameraPosition.z) }
+        head /= Float(max(viewCount, 1))
+        let c = cos(terrain.heading), s = sin(terrain.heading)
+        let hx = Double(head.x), hz = Double(head.z)
+        let camera = SIMD3(terrain.groundOrigin.x + hx * c + hz * s, Double(head.y) + terrain.stageToAltitude,
+                           terrain.groundOrigin.y - hx * s + hz * c)
+        // 视锥的四个侧面（每只眼一组）
+        var planes: [[SIMD4<Float>]] = []
+        for v in views {
+            let m = v.viewProjection
+            let r0 = SIMD4(m[0][0], m[1][0], m[2][0], m[3][0]), r1 = SIMD4(m[0][1], m[1][1], m[2][1], m[3][1])
+            let r3 = SIMD4(m[0][3], m[1][3], m[2][3], m[3][3])
+            planes.append([r3 + r0, r3 - r0, r3 + r1, r3 - r1].map { $0 / simd_length(SIMD3($0.x, $0.y, $0.z)) })
+        }
+        let origin = terrain.groundOrigin, stageToAltitude = terrain.stageToAltitude
+        TerrainLOD.select(camera: camera, heightRange: scene.heightRange, visible: { center, radius in
+            let rx = center.x - origin.x, rz = center.z - origin.y
+            let d2 = rx * rx + rz * rz
+            let p = SIMD3<Float>(Float(rx * c - rz * s), Float(center.y - stageToAltitude - d2 / (2 * 6_360_000)),
+                                 Float(rx * s + rz * c))
+            let r = Float(radius)
+            return planes.contains { side in side.allSatisfy { simd_dot(SIMD3($0.x, $0.y, $0.z), p) + $0.w >= -r } }
+        }, into: &selectedNodes)
+        lastTerrainNodeCount = selectedNodes.count
+        guard !selectedNodes.isEmpty else { return nil }
+
+        let buffer = nodeBuffers[nodeBufferIndex]
+        nodeBufferIndex = (nodeBufferIndex + 1) % nodeBuffers.count
+        let pointer = buffer.contents().bindMemory(to: TerrainNode.self, capacity: TerrainLOD.maxNodes)
+        for (i, node) in selectedNodes.enumerated() {
+            let rel = node.0 - origin
+            pointer[i] = TerrainNode(origin: SIMD4(Float(node.0.x), Float(node.0.y), Float(node.1), Float(node.2)),
+                                     relative: SIMD4(Float(rel.x), Float(rel.y), 0, 0))
+        }
+        let uniforms = TerrainUniforms(camera: SIMD4(head, Float(scene.rawValue)),
+                                       lod: SIMD4(Float(TerrainLOD.range0), scene == .volcano ? 1 : 0, 0, 0))
+        return TerrainDraw(buffer: buffer, count: selectedNodes.count, uniforms: uniforms)
+    }
+
+    /// 地形的深度预渲染：和主 pass 同样的视口、rate map，只写深度。云层 pass 按它截断视线（山后面的云不算）
+    private func encodeTerrainDepth(_ commandBuffer: MTLCommandBuffer, _ draw: TerrainDraw, target: MTLTexture,
+                                    views: inout [ViewUniforms], frame: inout FrameUniforms, viewports: [MTLViewport],
+                                    renderTargetArrayLength: Int, rateMap: MTLRasterizationRateMap?) {
+        let pass = MTLRenderPassDescriptor()
+        pass.depthAttachment.texture = target
+        pass.depthAttachment.loadAction = .clear
+        pass.depthAttachment.clearDepth = 0
+        pass.depthAttachment.storeAction = .store
+        pass.renderTargetArrayLength = renderTargetArrayLength
+        pass.rasterizationRateMap = rateMap
+        guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
+        enc.label = "Terrain depth"
+        enc.setViewports(viewports)
+        if views.count > 1 {
+            var mappings = (0..<views.count).map {
+                MTLVertexAmplificationViewMapping(viewportArrayIndexOffset: UInt32($0),
+                                                  renderTargetArrayIndexOffset: UInt32($0))
+            }
+            enc.setVertexAmplificationCount(views.count, viewMappings: &mappings)
+        }
+        var tu = draw.uniforms
+        enc.setRenderPipelineState(terrainDepthPipeline)
+        enc.setDepthStencilState(nearerDepth)
+        enc.setVertexBytes(&views, length: MemoryLayout<ViewUniforms>.stride * views.count, index: 0)
+        enc.setVertexBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
+        enc.setVertexBuffer(draw.buffer, offset: 0, index: 2)
+        enc.setVertexBytes(&tu, length: MemoryLayout<TerrainUniforms>.stride, index: 3)
+        enc.setVertexTexture(terrainHeightMap, index: 0)
+        enc.drawIndexedPrimitives(type: .triangle, indexCount: patchIndexCount, indexType: .uint16,
+                                  indexBuffer: patchIndices, indexBufferOffset: 0, instanceCount: draw.count)
+        enc.endEncoding()
+    }
+
+    /// 地形的主 pass：一次实例化画完（着色、空气透视、叠云都在片元里）
+    private func encodeTerrain(_ enc: MTLRenderCommandEncoder, _ draw: TerrainDraw, views: inout [ViewUniforms],
+                               frame: inout FrameUniforms, rateBuffer: MTLBuffer, cloud: MTLTexture) {
+        var tu = draw.uniforms
+        let viewsLength = MemoryLayout<ViewUniforms>.stride * views.count
+        enc.setRenderPipelineState(terrainPipeline)
+        enc.setDepthStencilState(nearerDepth)
+        enc.setVertexBytes(&views, length: viewsLength, index: 0)
+        enc.setVertexBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
+        enc.setVertexBuffer(draw.buffer, offset: 0, index: 2)
+        enc.setVertexBytes(&tu, length: MemoryLayout<TerrainUniforms>.stride, index: 3)
+        enc.setVertexTexture(terrainHeightMap, index: 0)
+        enc.setFragmentBytes(&views, length: viewsLength, index: 0)
+        enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
+        enc.setFragmentBuffer(rateBuffer, offset: 0, index: 2)
+        enc.setFragmentBuffer(atmosphereConstants, offset: 0, index: 3)
+        enc.setFragmentBytes(&tu, length: MemoryLayout<TerrainUniforms>.stride, index: 4)
+        enc.setFragmentTexture(transmittanceLUT, index: 0)
+        enc.setFragmentTexture(skyViewLUT, index: 1)
+        enc.setFragmentTexture(skySeaLUT, index: 2)
+        enc.setFragmentTexture(cloud, index: 3)
+        enc.setFragmentTexture(cloudShadow, index: 4)
+        enc.setFragmentTexture(terrainShade, index: 5)
+        enc.setFragmentTexture(baseNoise, index: 6)
+        enc.setFragmentTexture(surfaceMap, index: 7)
+        enc.drawIndexedPrimitives(type: .triangle, indexCount: patchIndexCount, indexType: .uint16,
+                                  indexBuffer: patchIndices, indexBufferOffset: 0, instanceCount: draw.count)
+    }
+
+    /// 每组视图一张地形深度（和颜色纹理一样大）
+    private var terrainDepthTextures: [Int: MTLTexture] = [:]
+
+    private func terrainDepthTexture(group: Int, like color: MTLTexture, layers: Int) -> MTLTexture {
+        if let t = terrainDepthTextures[group], t.width == color.width, t.height == color.height,
+           t.arrayLength >= layers {
+            return t
+        }
+        let d = MTLTextureDescriptor()
+        d.textureType = .type2DArray
+        d.pixelFormat = .depth32Float
+        d.width = color.width
+        d.height = color.height
+        d.arrayLength = layers
+        d.usage = [.renderTarget, .shaderRead]
+        d.storageMode = .private
+        let t = device.makeTexture(descriptor: d)!
+        terrainDepthTextures[group] = t
+        return t
     }
 
     /// 飞机、伞衣和伞绳、背带和表带。都在天空和云之后画，正常做深度测试（真手按这个深度和画面合成）。

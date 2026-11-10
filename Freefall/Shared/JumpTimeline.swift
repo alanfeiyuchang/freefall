@@ -13,9 +13,14 @@ struct JumpTimeline {
     enum Outcome: Sendable, Equatable {
         case bullseye       // 靶心（3 米内）
         case inTarget       // 进靶（20 米内）
-        case missed         // 落在沙洲上但没进靶
-        case water          // 落水
+        case missed         // 平安落地但没进靶
+        case water          // 落水（海、河、湖）
         case crashed        // 落地速度太快（开伞太晚或没开）
+        case terrain        // 撞上太陡的山坡 / 岩壁
+        case trees          // 落进树林，挂在树上了
+        case lava           // 落进熔岩 / 火山口
+        case crevasse       // 掉进冰裂缝
+        case plume          // 冲进火山口的毒烟
     }
 
     // 飞机：在 30,000 ft 平飞，放人时的空速约 70 m/s（136 节）
@@ -40,6 +45,7 @@ struct JumpTimeline {
     static let maxTurnRate: Double = 0.45
     // 落地
     static let crashSpeed: Double = 8            // 落地时下沉速度超过这个就是摔了
+    static let maxLandingSlope: Float = 32       // 坡度超过这个（度）落不了，算撞山
     static let targetRadius: Double = 20
     static let bullseyeRadius: Double = 3
     static let fadeInDuration: Double = 1.5
@@ -56,8 +62,8 @@ struct JumpTimeline {
     /// 雨滴下落速度（m/s）
     static let rainFallSpeed: Double = 8.5
 
-    /// 这一关的着陆区：靶心位置（云坐标）和地面高度
-    var scene = LandingZone.atoll
+    /// 这一关
+    let scene: JumpScene
 
     private(set) var phase: Phase = .cabin
     private(set) var time: Double = 0
@@ -87,6 +93,8 @@ struct JumpTimeline {
     private(set) var landingDistance: Double = 0
     private(set) var landingSpeed: Double = 0
     private(set) var holdingBar = false
+    /// 脚下地面的海拔（地形场景每步按地形算；环礁是海平面）
+    private(set) var groundHeight: Double = 0
     private var glide: Double = 0
     private var openingStartVertical: Double = 0
     /// 左右操纵环拉下去多少（0…1）
@@ -95,10 +103,14 @@ struct JumpTimeline {
     /// 舞台地板在眼睛下面多少（渲染器在对齐头部时设）：落地时你的脚踩在地上
     var eyeHeight: Double = 1.6
 
-    init() {}
+    init(scene: JumpScene = .atoll) {
+        self.scene = scene
+        groundHeight = scene.groundHeight(at: groundPosition)
+    }
 
     /// 调试用：跳过机舱，从某个高度直接开始自由落体（已经是终端速度）。
-    init(freefallFrom startAltitude: Double) {
+    init(freefallFrom startAltitude: Double, scene: JumpScene = .atoll) {
+        self.scene = scene
         phase = .freefall
         time = 20                       // 跳过开头的淡入
         altitude = startAltitude
@@ -110,6 +122,7 @@ struct JumpTimeline {
         exitTime = 10
         leftRampTime = 12
         planeOffset = SIMD3(0, Self.planeAltitude - startAltitude + 5000, 5000)
+        groundHeight = scene.groundHeight(at: groundPosition)
     }
 
     /// 终端速度（m/s）：∝ 1/√空气密度，密度按 8.5 km 标高指数衰减
@@ -198,14 +211,27 @@ struct JumpTimeline {
         case .canopy:
             fly(dt)
         case .landed:
-            if fadeTime == nil, let landedTime, time - landedTime >= (outcome == .crashed ? 1.2 : Self.landedHold) {
+            if fadeTime == nil, let landedTime, time - landedTime >= (isFatal ? 1.2 : Self.landedHold) {
                 fadeTime = time
             }
         case .done:
             break
         }
-        if phase == .freefall || phase == .opening || phase == .canopy, heightAboveGround <= 0 {
-            touchDown()
+        if phase == .freefall || phase == .opening || phase == .canopy {
+            if scene.hasTerrain { groundHeight = scene.groundHeight(at: groundPosition) }
+            if terrainClearance <= 0 {
+                touchDown()
+            } else if scene == .volcano,
+                      TerrainField.plumeDensity(SIMD2(Float(groundPosition.x), Float(groundPosition.y)),
+                                                altitude: Float(altitude)) > 0.4 {
+                // 冲进烟柱：毒烟、高温，直接失败（人停在半空，画面很快暗下去）
+                outcome = .plume
+                verticalSpeed = 0
+                velocity = .zero
+                turnRate = 0
+                phase = .landed
+                landedTime = time
+            }
         }
         if let fadeTime, time - fadeTime >= fadeDuration { phase = .done }
         // 离开跳板以后，飞机按自己的速度飞走、高度不变
@@ -231,7 +257,7 @@ struct JumpTimeline {
         var speed = Self.canopySpeed * (1 - 0.45 * both)
         var sink = Self.canopySink * (1 - 0.25 * both) + abs(turnRate) / Self.maxTurnRate * 2.5
         // 离地 6 米以内自动拉平：下沉和前进都慢下来，落地是轻轻一顿
-        let flare = 1 - min(max(heightAboveGround / 6, 0), 1)
+        let flare = 1 - min(max(terrainClearance / 6, 0), 1)
         sink += (1.5 - sink) * flare
         speed += (4 - speed) * flare
         verticalSpeed = sink
@@ -243,10 +269,20 @@ struct JumpTimeline {
     private mutating func touchDown() {
         landingSpeed = verticalSpeed
         landingDistance = length(groundPosition - scene.target)
+        let p = SIMD2<Float>(Float(groundPosition.x), Float(groundPosition.y))
+        let hazard = scene.hasTerrain ? TerrainField.hazard(scene, p, Float(groundHeight)) : nil
         if verticalSpeed > Self.crashSpeed {
             outcome = .crashed
-        } else if !scene.isLand(groundPosition) {
+        } else if scene == .atoll ? !LandingZone.atoll.isLand(groundPosition) : hazard == .water {
             outcome = .water
+        } else if hazard == .forest {
+            outcome = .trees
+        } else if hazard == .lava {
+            outcome = .lava
+        } else if hazard == .crevasse {
+            outcome = .crevasse
+        } else if scene.hasTerrain, TerrainField.slopeDegrees(scene, p) > Self.maxLandingSlope {
+            outcome = .terrain
         } else if landingDistance <= Self.bullseyeRadius {
             outcome = .bullseye
         } else if landingDistance <= Self.targetRadius {
@@ -254,7 +290,7 @@ struct JumpTimeline {
         } else {
             outcome = .missed
         }
-        altitude = scene.groundElevation + eyeHeight
+        altitude = groundHeight + eyeHeight
         verticalSpeed = 0
         velocity = .zero
         turnRate = 0
@@ -270,8 +306,17 @@ struct JumpTimeline {
     /// 赢了：落进靶里
     var won: Bool { outcome == .bullseye || outcome == .inTarget }
     var greenLight: Bool { barGrabbedTime != nil }
-    /// 你的脚离地面多高（米）
-    var heightAboveGround: Double { altitude - eyeHeight - scene.groundElevation }
+    /// 高度表的读数（米）：你的脚离着陆区的高度（真的高度表也是在着陆区归零的）
+    var heightAboveGround: Double { altitude - eyeHeight - scene.dzElevation }
+    /// 你的脚离正下方地面多高（米）：山区里可能比高度表的读数小得多
+    var terrainClearance: Double { altitude - eyeHeight - groundHeight }
+    /// 摔了、撞山、掉进岩浆 / 冰裂缝、冲进毒烟：画面很快暗下去
+    var isFatal: Bool {
+        switch outcome {
+        case .crashed, .terrain, .lava, .crevasse, .plume: return true
+        default: return false
+        }
+    }
     /// 高度表的读数：按着陆区归零（英尺）
     var altitudeFeet: Int { Int(max(heightAboveGround, 0) * Self.feetPerMeter) }
     var canDeploy: Bool { heightAboveGround <= Self.alertAGL }
@@ -286,7 +331,7 @@ struct JumpTimeline {
     /// 航向对应的前方（云坐标）
     var forward: SIMD2<Double> { SIMD2(-sin(heading), -cos(heading)) }
 
-    private var fadeDuration: Double { outcome == .crashed ? 0.6 : Self.fadeOutDuration }
+    private var fadeDuration: Double { isFatal ? 0.6 : Self.fadeOutDuration }
 
     /// 画面亮度：开头淡入，最后淡出
     var brightness: Double {
@@ -340,8 +385,17 @@ struct JumpTimeline {
         return exp(-dot(d, d)) * top * bottom
     }
 
+    /// 你离火山烟柱有多近：到烟柱中轴的距离 ÷ 烟柱半径（不在烟柱的高度范围里是很大的数）
+    var plumeProximity: Double {
+        guard scene == .volcano else { return .infinity }
+        let above = altitude - Double(TerrainField.coneTop - 40)
+        guard above > -200, above < 3200 else { return .infinity }
+        let axis = SIMD2<Double>(TerrainField.coneCenter) + SIMD2<Double>(TerrainField.plumeDrift) * max(above, 0)
+        return length(groundPosition - axis) / (90 + 0.22 * max(above, 0))
+    }
+
     /// 你这里的雨有多大
-    var rainIntensity: Double { Self.rain(at: position, altitude: altitude) }
+    var rainIntensity: Double { Self.rain(at: position, altitude: altitude - scene.cloudOffset) }
 
     /// 雨相对你的速度（舞台空间，m/s）：雨往下落（顺风稍微斜一点），你掉得比它快得多，所以雨是往上走的
     var rainVelocity: SIMD3<Double> {
@@ -357,7 +411,7 @@ struct JumpTimeline {
     }
 }
 
-/// 一关的着陆区。现在只有环礁：潟湖里一片白沙洲，靶铺在沙洲上（和 shader 里的 SANDBAR_* 一致）。
+/// 环礁的着陆区：潟湖里一片白沙洲，靶铺在沙洲上（和 shader 里的 SANDBAR_* 一致）。
 struct LandingZone: Sendable {
     var target: SIMD2<Double>
     var groundElevation: Double

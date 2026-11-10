@@ -13,6 +13,10 @@ final class AppModel {
     var watchOnLeft: Bool = UserDefaults.standard.object(forKey: "watchOnLeft") as? Bool ?? true {
         didSet { UserDefaults.standard.set(watchOnLeft, forKey: "watchOnLeft") }
     }
+    /// 跳哪一关（记住上次的选择）
+    var scene: JumpScene = JumpScene(rawValue: UserDefaults.standard.integer(forKey: "scene")) ?? .atoll {
+        didSet { UserDefaults.standard.set(scene.rawValue, forKey: "scene") }
+    }
     /// 上一跳的结果（落地后回到开始窗口时显示）
     var lastResult: String?
 

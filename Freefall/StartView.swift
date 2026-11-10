@@ -26,6 +26,19 @@ struct StartView: View {
                     .font(.headline)
             }
 
+            VStack(spacing: 8) {
+                Picker("跳哪里", selection: $model.scene) {
+                    ForEach(JumpScene.allCases) { scene in
+                        Text(scene.name).tag(scene)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 520)
+                Text(model.scene.blurb)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
             Button {
                 Task { await jump() }
             } label: {
@@ -51,7 +64,7 @@ struct StartView: View {
                 Text("· 你站在运输机放下的尾舱门上。抓住右手边的黄色扶杆，跳伞灯变绿；松手就跳")
                 Text("· 手表在 3,500 英尺报警，这时右手抓住胸前的红色拉手往外拉，开伞")
                 Text("· 伞下伸手抓头两侧的黄色操纵环：拉左边左转，拉右边右转")
-                Text("· 落进沙洲上的红白靶子才算赢。开伞太晚会摔")
+                Text("· 落进地上的红白靶子才算赢。开伞太晚会摔；山区里坡太陡、树林、河、熔岩、冰裂缝都落不了")
                 Text("· 按一下数码表冠随时退出")
             }
             .font(.callout)

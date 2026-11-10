@@ -8,26 +8,28 @@
 //   身边：几米内的雨丝。你往下掉得比雨快得多（55 m/s 对 8 m/s），所以雨丝是往上嗖嗖地掠过去。
 
 /// 雨帘：沿视线在 1,500 ~ 3,200 米这一层里取 8 个点，按雨的分布（范围 × 高度 × 竖着拉长的噪声）积分消光，
-/// 混进灰白的散射光。tMax 是视线碰到海面的距离（没碰到给一个很大的数）。
-static inline float3 rainCurtains(float3 color, Ray r, float tMax, float jitter, constant FrameUniforms &F,
-                                  constant AtmosphereConstants &A, texture3d<float> noise) {
+/// 混进灰白的散射光。tMax 是视线碰到地面 / 海面的距离（没碰到给一个很大的数）。
+/// 返回 rgb 散射进来的光，a 透射率（在云层 pass 里算：分辨率低，算好以后和云一起盖到天空和地形上）。
+static inline float4 rainLayer(Ray r, float tMax, float jitter, constant FrameUniforms &F,
+                               constant AtmosphereConstants &A, texture3d<float> noise) {
     float ch = r.origin.y, mu = r.direction.y;
+    float off = F.world.y;                       // 云层整体抬高了多少，雨也跟着抬
     float tA, tB;
     if (abs(mu) < 1e-4f) {
-        if (ch < 1500.0f || ch > 3200.0f) return color;
+        if (ch < 1500.0f + off || ch > 3200.0f + off) return float4(0.0f, 0.0f, 0.0f, 1.0f);
         tA = 0.0f;
         tB = 25000.0f;
     } else {
-        float t1 = (1500.0f - ch) / mu, t2 = (3200.0f - ch) / mu;
+        float t1 = (1500.0f + off - ch) / mu, t2 = (3200.0f + off - ch) / mu;
         tA = max(min(t1, t2), 0.0f);
         tB = min(max(t1, t2), 25000.0f);
     }
     tB = min(tB, tMax);
-    if (tB <= tA) return color;
+    if (tB <= tA) return float4(0.0f, 0.0f, 0.0f, 1.0f);
     // 粗筛：这一段的两头和中点都离雨区很远就不算了
     float2 o = r.origin.xz + F.ground.xz, d = r.direction.xz;
     float far = max(max(deckMask(o + d * tA), deckMask(o + d * tB)), deckMask(o + d * (0.5f * (tA + tB))));
-    if (far < 0.01f && tB - tA < 6000.0f) return color;
+    if (far < 0.01f && tB - tA < 6000.0f) return float4(0.0f, 0.0f, 0.0f, 1.0f);
 
     const int N = 8;
     float ds = (tB - tA) / float(N);
@@ -41,12 +43,12 @@ static inline float3 rainCurtains(float3 color, Ray r, float tMax, float jitter,
         // 雨帘：竖着拉得很长的噪声（一道道雨柱），慢慢往下移
         float n = noise.sample(linearRepeat, float3(c.x / 300.0f, h / 2600.0f + F.camera.y * 0.003f, c.y / 300.0f),
                                level(0)).r;
-        od += m * rainProfile(h) * saturate(n * 1.8f - 0.35f) * ds;
+        od += m * rainProfile(h - off) * saturate(n * 1.8f - 0.35f) * ds;
     }
     float T = exp(-od * 0.0007f);
     // 雨里的光：四面八方的天光被雨滴散开，灰白偏暗
     float3 rainLight = A.skyIrradianceSea.rgb / PI * 0.8f + A.sunAtCloudBase.rgb * 0.008f;
-    return color * T + rainLight * (1.0f - T);
+    return float4(rainLight * (1.0f - T), T);
 }
 
 /// 和 Swift 的 RainUniforms 一样

@@ -21,6 +21,17 @@ vertex VOut fullscreenVertex(uint vid [[vertex_id]], ushort amp [[amplification_
     return o;
 }
 
+/// 天空 pass：深度固定在极远处（reverse-Z：0 是无穷远；不能写 0，系统会当成没有内容），
+/// 深度测试只让它填地形没盖住的像素（地形先画）。必须比最远的地形（几百公里，深度 ~1e-7）还远，
+/// 之前给的 1e-5 只相当于 5 公里，远山全被天空盖掉了。
+vertex VOut skyVertex(uint vid [[vertex_id]], ushort amp [[amplification_id]]) {
+    float2 p = float2((vid << 1) & 2, vid & 2);
+    VOut o;
+    o.position = float4(p * 2.0f - 1.0f, 1e-10f, 1.0f);
+    o.viewIndex = amp;
+    return o;
+}
+
 // MARK: - 启动时生成的纹理
 
 kernel void generateBaseNoise(texture3d<float, access::write> out [[texture(0)]],
@@ -172,19 +183,20 @@ kernel void computeCloudShadow(texture2d<float, access::write> out [[texture(0)]
                                texture3d<float> baseTex [[texture(1)]],
                                texture2d<float> weather [[texture(2)]],
                                constant float4 &sun [[buffer(0)]],
+                               constant float &offset [[buffer(1)]],
                                uint2 gid [[thread_position_in_grid]]) {
     uint2 size = uint2(out.get_width(), out.get_height());
     if (any(gid >= size)) return;
     float2 xz = ((float2(gid) + 0.5f) / float2(size) - 0.5f) * WEATHER_TILE;
     float3 s = sun.xyz;
-    float sMin = CLOUD_MIN_H / s.y, sMax = CLOUD_MAX_H / s.y;
+    float sMin = (CLOUD_MIN_H + offset) / s.y, sMax = (CLOUD_MAX_H + offset) / s.y;
     const int N = 40;
     float ds = (sMax - sMin) / float(N);
     float od = 0.0f;
     for (int i = 0; i < N; i++) {
         float d = sMin + (float(i) + 0.5f) * ds;
         float3 p = float3(xz.x + s.x * d, s.y * d, xz.y + s.z * d);
-        od += cloudDensity(p, sampleWeather(p.xz, weather), baseTex, baseTex, false, 0.0f) * ds;
+        od += cloudDensity(p, sampleWeather(p.xz, weather, offset), baseTex, baseTex, false, 0.0f) * ds;
     }
     out.write(float4(od, 0.0f, 0.0f, 0.0f), gid);
 }
@@ -315,7 +327,8 @@ fragment CloudOut cloudFreshFragment(VOut in [[stage_in]],
                                      texture3d<float> detailTex [[texture(3)]],
                                      texture2d<float> weather [[texture(4)]],
                                      texture2d<float> msLUT [[texture(5)]],
-                                     texture2d<float> topMax [[texture(6)]]) {
+                                     texture2d<float> topMax [[texture(6)]],
+                                     depth2d_array<float> terrainDepth [[texture(7)]]) {
     // 这个片元负责云层纹理里的哪个像素
     float2 pixel = floor(in.position.xy) * 2.0f + TU.pattern.xy;
     float2 physical = (pixel + 0.5f) / F.clouds.x;
@@ -327,6 +340,22 @@ fragment CloudOut cloudFreshFragment(VOut in [[stage_in]],
     maps.detail = detailTex;
     maps.weather = weather;
     maps.topMax = topMax;
+    maps.offset = F.world.y;
+    maps.landShift = F.ground.yw;
+    maps.scene = int(F.world.x + 0.5f);
+    maps.time = F.camera.y;
+    maps.terrainDistance = 1e9f;
+    if (F.world.z > 0.5f) {
+        // 地形深度（全分辨率、和主 pass 一样按 rate map 光栅化）→ 舞台里的点 → 到眼睛的距离
+        uint2 size = uint2(terrainDepth.get_width(), terrainDepth.get_height());
+        float d = terrainDepth.read(min(uint2(physical), size - 1u), in.viewIndex);
+        if (d > 0.0f) {
+            constant ViewUniforms &v = views[in.viewIndex];
+            float2 uv = (screen - v.viewport.xy) / v.viewport.zw;
+            float4 q = v.inverseViewProjection * float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f, d, 1.0f);
+            maps.terrainDistance = length(q.xyz / q.w - v.cameraPosition.xyz);
+        }
+    }
     float jitter = ign(pixel + TU.pattern.z * 5.588238f);   // IGN 的帧间偏移，几帧就能把抖动平均掉
 #ifdef PROFILE_SKIP_MARCH
     CloudHit h; h.radiance = 0.0f; h.transmittance = 1.0f; h.depth = 0.0f;
@@ -343,9 +372,23 @@ fragment CloudOut cloudFreshFragment(VOut in [[stage_in]],
         h.radiance = h.radiance * ap.transmittance + ap.L * (1.0f - h.transmittance);
     }
 
+    // 雨帘（视线碰到地形 / 海面之前的那一段）：当成在云前面的一层，一起盖上去
+    float rainMax = maps.terrainDistance;
+    float2 seaHit = sphereHits(r.origin.y, r.direction.y, 0.0f);
+    if (seaHit.x > 0.0f) rainMax = min(rainMax, seaHit.x);
+    float4 rain = rainLayer(r, rainMax, jitter, F, A, baseTex);
+    h.radiance = rain.rgb + rain.a * h.radiance;
+    h.transmittance *= rain.a;
+
     CloudOut o;
     o.color = float4(h.radiance, h.transmittance);
     o.depth = h.depth * 0.001f;
+#ifdef DEBUG_TERRAIN_DEPTH
+    // 调试：地形距离（红 = 近，绿 = 远，蓝 = 没读到地形）
+    o.color = maps.terrainDistance < 1e8f ? float4(saturate(1.0f - maps.terrainDistance / 5000.0f),
+                                                    saturate(maps.terrainDistance / 20000.0f), 0.0f, 0.0f)
+                                           : float4(0.0f, 0.0f, 1.0f, 0.0f);
+#endif
     return o;
 }
 
@@ -496,12 +539,7 @@ static inline float3 oceanShade(float3 N, float3 rd, float3 sunDir, float shadow
     return fresnel * sky + sunE * glint + (1.0f - fresnel) * body;
 }
 
-struct SceneOut {
-    float4 color [[color(0)]];
-    float depth [[depth(any)]];
-};
-
-fragment SceneOut sceneFragment(VOut in [[stage_in]],
+fragment float4 sceneFragment(VOut in [[stage_in]],
                                 constant ViewUniforms *views [[buffer(0)]],
                                 constant FrameUniforms &F [[buffer(1)]],
                                 constant rasterization_rate_map_data &rateMap [[buffer(2)]],
@@ -522,11 +560,12 @@ fragment SceneOut sceneFragment(VOut in [[stage_in]],
 
     float2 sea = sphereHits(ch, rd.y, 0.0f);
     bool ground = sea.x > 0.0f;
+    bool terrainScene = F.world.z > 0.5f;    // 地形场景的地面由地形网格画，这里只剩天空
 #ifdef PROFILE_FLAT_SCENE
     float3 color = float3(0.02f);
 #else
     float3 color = skyViewLookup(skyLUT, rd, sunDir, camR, ground);
-    if (ground) {
+    if (ground && !terrainScene) {
         float t = sea.x;
         float2 xz = r.origin.xz + rd.xz * t;
         // 一个像素在海面上盖多大（米）：斜着看拉长
@@ -594,10 +633,9 @@ fragment SceneOut sceneFragment(VOut in [[stage_in]],
             surface = mix(surface, float3(0.75f) * E / PI, surf * (1.0f - land));
         }
         color += surface * transmittanceSegment(transLUT, camR, rd.y, t * 0.001f, true);
-    } else {
+    } else if (!ground) {
         color += sunLight(rd, sunDir, transmittanceToTop(transLUT, camR, rd.y));
     }
-    color = rainCurtains(color, r, ground ? sea.x : 1e9f, ign(in.position.xy + 3.0f), F, A, waveNoise);
 #endif
 
     // 云层是半分辨率的，双线性放大（预乘过的散射光 + 透射率，放大后照样能直接合成）
@@ -612,10 +650,7 @@ fragment SceneOut sceneFragment(VOut in [[stage_in]],
     }
     // 8 位输出前抖动半个色阶，天空渐变不出色带。在 √ 空间里抖（近似 sRGB 曲线，比 pow 便宜得多）
     float3 g = sqrt(color) + (ign(in.position.xy + 17.0f) - 0.5f) / 255.0f;
-    SceneOut o;
-    o.color = float4(g * g, 1.0f);
-    o.depth = 1e-5f;    // 都很远（reverse-Z：0 是无穷远）；不能写 0，系统会当成没有内容
-    return o;
+    return float4(g * g, 1.0f);
 }
 
 // MARK: - 高度表
@@ -747,3 +782,5 @@ fragment float4 panelFragment(HudOut in [[stage_in]],
     float alpha = max(panel * 0.55f, t.a) * opacity;
     return float4(t.rgb * opacity, alpha);
 }
+
+#include "Terrain.h"

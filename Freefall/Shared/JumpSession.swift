@@ -141,6 +141,10 @@ final class JumpSession {
                                                      interaction: interaction,
                                                      cloth: timeline.sinceDeploy == nil ? nil : cloth,
                                                      hands: hands, watchOnLeft: watchOnLeft, proxyHands: proxyHands))
+        if timeline.scene.hasTerrain {
+            o.terrain = TerrainFrame(scene: timeline.scene, groundOrigin: timeline.groundPosition,
+                                     stageToAltitude: timeline.altitude - timeline.eyeHeight, heading: timeline.heading)
+        }
         let rain = Float(timeline.rainIntensity)
         if rain > 0.005 {
             let v = timeline.rainVelocity
@@ -176,6 +180,13 @@ final class JumpSession {
                 let how = usesRealHands ? "拉下左 / 右操纵环转向，两边一起拉减速" : "捏住往下拉：左手左转，右手右转"
                 return how + "\n" + bearing
             }
+            // 山区：脚下的地面比高度表的读数近得多，快撞上了
+            if t.scene.hasTerrain, t.terrainClearance < 150, t.heightAboveGround - t.terrainClearance > 50 {
+                return bearing + "\n离山坡只有 \(Int(t.terrainClearance)) 米，快转开"
+            }
+            if t.scene == .volcano, t.plumeProximity < 2.5 {
+                return bearing + "\n前面是火山口的毒烟，别过去"
+            }
             // 高度管理：直飞还能飞多远（和自动驾驶一样估），比离靶远太多就提醒先飞过去再掉头
             let reach = JumpTimeline.canopySpeed * max(t.heightAboveGround - 6, 0) / JumpTimeline.canopySink + 15
             if distance < 300, reach > distance + 150 { return bearing + "\n高度还多：先飞过靶，再掉头回来" }
@@ -193,9 +204,15 @@ final class JumpSession {
         switch t.outcome {
         case .bullseye: return String(format: "正中靶心！离靶心 %.1f 米", d)
         case .inTarget: return String(format: "进靶了！离靶心 %.1f 米", d)
-        case .missed: return "落在沙洲上，离靶心 \(Int(d)) 米——没进靶"
+        case .missed:
+            return t.scene == .atoll ? "落在沙洲上，离靶心 \(Int(d)) 米——没进靶" : "平安落地，离靶心 \(Int(d)) 米——没进靶"
         case .water: return "掉进水里了——离靶心 \(Int(d)) 米"
         case .crashed: return String(format: "摔了——落地时每秒 %.0f 米，开伞太晚", t.landingSpeed)
+        case .terrain: return "撞上山坡了——那里太陡，落不了"
+        case .trees: return "落进树林，挂在树上了——离靶心 \(Int(d)) 米"
+        case .lava: return "掉进熔岩里了"
+        case .crevasse: return "掉进冰裂缝了"
+        case .plume: return "冲进了火山口的毒烟"
         case nil: return nil
         }
     }
