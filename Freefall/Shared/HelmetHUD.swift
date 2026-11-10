@@ -1,7 +1,7 @@
 import CoreGraphics
 import CoreText
 import Foundation
-import Metal
+@preconcurrency import Metal
 import simd
 
 /// 头盔上的 HUD（钢铁侠那种）：视野左右两侧各一块发光的读数，下沿一行提示，跟着头走（头锁定）。
