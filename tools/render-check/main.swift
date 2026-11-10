@@ -122,7 +122,7 @@ func hands(_ pose: Hands) -> [HandPose] {
 /// 画一帧（两只眼），返回 GPU 耗时（毫秒）。云层是时间累积的：同一个画面连画几帧才收敛。
 @discardableResult
 func render(_ timeline: JumpTimeline, yaw: Float, pitch: Float, hands handPoses: [HandPose],
-            color: MTLTexture, depth: MTLTexture, fovY: Float) -> Double {
+            color: MTLTexture, depth: MTLTexture, fovY: Float, handTracking: Bool = false) -> Double {
     let width = color.width, height = color.height
     let head = rotation(yaw: yaw, pitch: pitch)
     let proj = projection(fovY: fovY, aspect: Float(width) / Float(height), near: 0.05)
@@ -141,8 +141,10 @@ func render(_ timeline: JumpTimeline, yaw: Float, pitch: Float, hands handPoses:
     var frame = FrameUniforms()
     frame.camera = SIMD4(altitude - eyeHeight, Float(timeline.time), Float(timeline.brightness), 0)
     frame.ground = SIMD4(Float(timeline.position.x), 0, Float(timeline.position.y), 0)
-    frame.placeAltimeter(feet: timeline.altitudeFeet, eyeHeight: eyeHeight,
-                         leftHand: handPoses.first(where: { $0.isLeft }))
+    let leftHand = handPoses.first(where: { $0.isLeft })
+    frame.placeAltimeter(feet: timeline.altitudeFeet, eyeHeight: eyeHeight, leftHand: leftHand)
+    // 和真机一样：允许了手部追踪时只有手腕上的表，左手不在视野里就没有高度表
+    if handTracking && leftHand == nil { frame.hudUp.w = 0 }
     let objects = SceneObjects.make(timeline: timeline, eyeHeight: eyeHeight, hands: handPoses, proxyHands: true)
 
     let cb = queue.makeCommandBuffer()!
@@ -317,7 +319,8 @@ if mode == "film" {
         let k = Float(1 - exp(-1.0 / 90 / 0.4))
         yaw += (targetYaw - yaw) * k
         pitch += (targetPitch - pitch) * k
-        render(tl, yaw: yaw, pitch: pitch, hands: hands(pose), color: color, depth: depth, fovY: 64)
+        render(tl, yaw: yaw, pitch: pitch, hands: hands(pose), color: color, depth: depth, fovY: 64,
+               handTracking: true)
         videoTime += 1.0 / 90 / speed
         if videoTime >= nextFrame {
             nextFrame += 1.0 / 30
