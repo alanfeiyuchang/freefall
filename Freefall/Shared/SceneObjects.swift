@@ -52,8 +52,10 @@ struct SceneObjects {
     var risersAnchor: SIMD3<Float>?
     /// 绳子：伞绳、刹车绳
     var lines: [LineSegment] = []
-    /// 离屏测试里代替真手的手
+    /// 离屏测试里代替真手的手（不戴手套时）
     var roundCones: [RoundCone] = []
+    /// 戴手套的手（Glove.swift 按关节蒙皮）
+    var gloveHands: [HandPose] = []
     /// 身边的雨丝（不下雨是 nil）
     var rain: RainUniforms?
     /// 地形（环礁没有）
@@ -75,6 +77,8 @@ struct SceneObjects {
         /// 高度表戴在哪只手上
         var watchOnLeft = true
         var proxyHands = false
+        /// 戴手套（真手藏起来，画手套和跳伞服袖子）
+        var gloves = false
     }
 
     /// 伞绳半径：主伞绳 1.8 毫米粗，刹车绳上段细、下段粗一点
@@ -147,7 +151,13 @@ struct SceneObjects {
                     // 刹车绳：后缘三个挂点汇到一根（分叉点），穿过滑块后面的扣眼、后伸缩带的导向环，拴在操纵环顶上
                     let brakes = cloth.brakeAttachments
                     for (points, toggle, side) in [(brakes.left, toggles.0, Float(-1)), (brakes.right, toggles.1, Float(1))] {
-                        let tab = Gear.toggle(&o.meshVertices, center: toggle, toward: anchor)
+                        // 被哪只手抓着：环套在那只手的手指上；没人抓就竖着挂
+                        let target: Interaction.Target = side < 0 ? .leftToggle : .rightToggle
+                        let holder = input.hands.first { hand in
+                            (hand.isLeft ? input.interaction.left : input.interaction.right).holding == target
+                        }
+                        let tab = holder.map { Gear.heldToggle(&o.meshVertices, hand: $0) }
+                            ?? Gear.toggle(&o.meshVertices, center: toggle, toward: anchor)
                         let guide = anchor + Gear.guideRingPoint(side)
                         let rear = grommets?[side < 0 ? 2 : 3]
                         let mean = points.reduce(SIMD3<Float>(0, 0, 0), +) / Float(points.count)
@@ -165,8 +175,15 @@ struct SceneObjects {
         }
 
         for hand in input.hands {
-            if input.proxyHands { o.roundCones += proxyHandCones(hand) }
-            if hand.isLeft == input.watchOnLeft { Gear.watch(&o.meshVertices, hand: hand) }
+            if input.gloves {
+                o.gloveHands.append(hand)
+                // 肩膀：眼睛往下 24 厘米、往外 19 厘米、稍微往后
+                let shoulder = anchor + SIMD3((hand.isLeft ? -1 : 1) * 0.19, -0.24, 0.05)
+                Gear.sleeve(&o.meshVertices, hand: hand, shoulder: shoulder)
+            } else if input.proxyHands {
+                o.roundCones += proxyHandCones(hand)
+            }
+            if hand.isLeft == input.watchOnLeft { Gear.watch(&o.meshVertices, hand: hand, gloved: input.gloves) }
         }
         return o
     }
@@ -223,13 +240,19 @@ struct SceneObjects {
         return (fw + towardElbow * 0.03, back, cross(towardElbow, back), towardElbow)
     }
 
-    /// 左手腕上的高度表：表盘在表带上方、手背那一侧（离皮肤约 2 厘米，深度在手前面，真手不会盖住它）。
+    /// 表带圈的半径（侧向, 手背方向）：真手手腕宽约 6 厘米、厚约 4 厘米，表带比它大一圈；
+    /// 戴手套时套在手套袖口外面（袖口半径约 3.9 厘米）
+    static func strapRadii(gloved: Bool) -> (Float, Float) {
+        gloved ? (0.047, 0.044) : (0.037, 0.030)
+    }
+
+    /// 高度表：表盘在表带上方、手背那一侧（离皮肤约 2 厘米，深度在手前面，真手不会盖住它）。
     /// 第一版离手腕太近，真机上被手腕「切」掉一块，所以表带圈和表盘都往外放了、表也做大了。
     /// 表面朝手背外。左手：3 点钟指向手；右手反过来（3 点钟指向手肘），这样抬起哪只手看，字都是正的。
     /// 返回 (中心, 右, 上, 直径)。
-    static func watchPlacement(_ h: HandPose) -> (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>, Float) {
+    static func watchPlacement(_ h: HandPose, gloved: Bool) -> (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>, Float) {
         let f = wristFrame(h)
-        let center = f.center + f.back * 0.043
+        let center = f.center + f.back * (strapRadii(gloved: gloved).1 + 0.013)
         let right = h.isLeft ? -f.towardElbow : f.towardElbow
         let up = cross(f.back, right)
         return (center, right, up, 0.056)
@@ -248,10 +271,10 @@ func scale(_ s: SIMD3<Float>) -> simd_float4x4 {
 
 extension FrameUniforms {
     /// 高度表：追踪到戴表的那只手就戴在手腕上（圆表盘），否则是起跳时头前下方的一块面板。
-    mutating func placeAltimeter(feet: Int, eyeHeight: Float, watchHand: HandPose?, alarm: Int) {
+    mutating func placeAltimeter(feet: Int, eyeHeight: Float, watchHand: HandPose?, alarm: Int, gloved: Bool) {
         hudGlyphs = FrameUniforms.glyphs(feet: feet)
         if let watchHand {
-            let (center, right, up, size) = SceneObjects.watchPlacement(watchHand)
+            let (center, right, up, size) = SceneObjects.watchPlacement(watchHand, gloved: gloved)
             hudCenter = SIMD4(center, size)
             hudRight = SIMD4(right, size)
             hudUp = SIMD4(up, 1)

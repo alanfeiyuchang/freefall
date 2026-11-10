@@ -13,5 +13,5 @@ xcrun swiftc -O -swift-version 5 -target arm64-apple-macos15 \
   "$ROOT/tools/render-check/main.swift" \
   "$ROOT/Freefall/Shared/"*.swift \
   -o "$WORK/render-check"
-"$WORK/render-check" "$WORK/Freefall.metallib" "$OUT" "${@:2}"
+GLOVES_DIR="$ROOT/Freefall/Resources/Gloves" "$WORK/render-check" "$WORK/Freefall.metallib" "$OUT" "${@:2}"
 rm -rf "$WORK"

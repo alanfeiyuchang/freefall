@@ -13,6 +13,10 @@ final class AppModel {
     var watchOnLeft: Bool = UserDefaults.standard.object(forKey: "watchOnLeft") as? Bool ?? true {
         didSet { UserDefaults.standard.set(watchOnLeft, forKey: "watchOnLeft") }
     }
+    /// 戴手套（默认）：真手藏起来，画跳伞手套，和装备一样受太阳、伞衣影子、舱里红灯照；关掉就透视真手（记住上次的选择）
+    var gloves: Bool = UserDefaults.standard.object(forKey: "gloves") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(gloves, forKey: "gloves") }
+    }
     /// 跳哪一关（记住上次的选择）
     var scene: JumpScene = JumpScene(rawValue: UserDefaults.standard.integer(forKey: "scene")) ?? .atoll {
         didSet { UserDefaults.standard.set(scene.rawValue, forKey: "scene") }

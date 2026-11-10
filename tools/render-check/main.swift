@@ -30,8 +30,11 @@ let jumpScene = JumpScene(rawValue: Int(env["SCENE"] ?? "0") ?? 0) ?? .atoll
 let device = MTLCreateSystemDefaultDevice()!
 let library = try device.makeLibrary(URL: URL(fileURLWithPath: args[1]))
 let queue = device.makeCommandQueue()!
+/// 戴手套（默认，和 app 一样）；GLOVES=0 画肤色的替身手（代替真机上透视进来的真手）
+let useGloves = env["GLOVES"] != "0"
 let renderer = try SceneRenderer(device: device, library: library, colorFormat: .bgra8Unorm_srgb,
-                                 depthFormat: .depth32Float, maxViewCount: 2, queue: queue, scene: jumpScene)
+                                 depthFormat: .depth32Float, maxViewCount: 2, queue: queue, scene: jumpScene,
+                                 gloveDirectory: env["GLOVES_DIR"].map { URL(fileURLWithPath: $0) })
 if let v = env["EXPOSURE"], let x = Float(v) { renderer.settings.exposure = x }
 if let v = env["SIGMA"], let x = Float(v) { renderer.settings.cloudExtinction = x }
 if let v = env["STEP"], let x = Float(v) { renderer.settings.cloudStep = x }
@@ -182,6 +185,18 @@ func freefallAbove(_ height: Double) -> JumpSession { freefall(jumpScene.dzEleva
 /// 某个时刻之后过了多少秒（还没到是 -1）
 func since(_ moment: Double?, _ t: JumpTimeline) -> Double { moment.map { t.time - $0 } ?? -1 }
 
+extension JumpSession {
+    /// 两只手先张开放到操纵环上，再握拳：抓握判定按「刚握上」算，这样操纵环才算被手抓着
+    func grabbingToggles() -> JumpSession {
+        let t = interaction.toggles ?? layout.toggleRest
+        let open = [grip(left: true, at: t.0, forward: SIMD3(0.3, 1, -0.2), palm: SIMD3(1, 0, 0), curl: 0.2),
+                    grip(left: false, at: t.1, forward: SIMD3(-0.3, 1, -0.2), palm: SIMD3(-1, 0, 0), curl: 0.2)]
+        step(dt: 1.0 / 90, hands: open, layout: layout)
+        step(dt: 1.0 / 90, hands: hands(.toggles, self), layout: layout)
+        return self
+    }
+}
+
 /// 开伞后多少秒
 func deployed(_ seconds: Double) -> JumpSession { at { ($0.sinceDeploy ?? -1) >= seconds } }
 
@@ -236,11 +251,12 @@ func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [
     let turning = Float(min(abs(t.turnRate) / JumpTimeline.maxTurnRate, 1))
     frame.heading = SIMD4(Float(cos(t.heading)), Float(sin(t.heading)), turning * 0.55, 0)
     let watchHand = handPoses.first(where: { $0.isLeft == watchOnLeft })
-    frame.placeAltimeter(feet: t.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand, alarm: t.alarmLevel)
+    frame.placeAltimeter(feet: t.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand, alarm: t.alarmLevel,
+                         gloved: useGloves)
     // 和真机一样：允许了手部追踪时只有手腕上的表，戴表的手不在视野里就没有高度表
     if handTracking && watchHand == nil { frame.hudUp.w = 0 }
-    var objects = session.objects(layout: layout, hands: handPoses, watchOnLeft: watchOnLeft, proxyHands: true,
-                                  head: SIMD3(0, eyeHeight, 0))
+    var objects = session.objects(layout: layout, hands: handPoses, watchOnLeft: watchOnLeft, proxyHands: !useGloves,
+                                  gloves: useGloves, head: SIMD3(0, eyeHeight, 0))
     if env["NOLINES"] != nil { objects.lines = [] }
     if env["NOMESH"] != nil { objects.meshVertices = [] }
     if env["NOSHADOW"] != nil { objects.canopyShadow = nil; objects.bodyTop = nil }
@@ -320,7 +336,8 @@ let gearShots: [Shot] = [
     Shot(name: "x3_risers", session: { deployed(12) }, yaw: 0, pitch: 48, fovY: 75),
     Shot(name: "x4_toggle", session: { deployed(12) }, yaw: -61, pitch: -13, fovY: 30),
     Shot(name: "x5_three_ring", session: { deployed(12) }, yaw: -78, pitch: -50, fovY: 40),
-    Shot(name: "x6_toggles_held", session: { deployed(12) }, yaw: 0, pitch: 18, hands: .toggles, fovY: 80),
+    Shot(name: "x6_toggles_held", session: { deployed(12).grabbingToggles() }, yaw: -50, pitch: -8, hands: .toggles,
+         fovY: 60),
     // 第三人称：从前面看自己（自由落体时、开伞后）
     Shot(name: "x9_front_freefall", session: { alarmFeet(3600) }, yaw: 180, pitch: -12, fovY: 50,
          eye: SIMD3(0, 0.0, -1.1)),
@@ -753,7 +770,8 @@ if mode == "perf" || mode == "all" {
     let start2 = Date()
     var vertexCount = 0, lineCount = 0
     for _ in 0..<300 {
-        let o = s.objects(layout: layout, hands: handPoses, watchOnLeft: true, proxyHands: false, head: SIMD3(0, eyeHeight, 0))
+        let o = s.objects(layout: layout, hands: handPoses, watchOnLeft: true, proxyHands: false, gloves: useGloves,
+                          head: SIMD3(0, eyeHeight, 0))
         vertexCount = o.meshVertices.count; lineCount = o.lines.count
     }
     print(String(format: "  组装网格：每帧 %.3f ms（CPU），%d 个顶点、%d 段绳子", Date().timeIntervalSince(start2) / 300 * 1000,

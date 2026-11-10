@@ -101,6 +101,9 @@ final class SceneRenderer: @unchecked Sendable {
     private let harnessVertexCount: Int
     private let risersMesh: MTLBuffer
     private let risersVertexCount: Int
+    /// 手套（苹果示例的模型，换成跳伞配色）；资源缺了就是 nil，戴手套时什么都不画
+    private let gloves: GloveSet?
+    private let glovePipeline: MTLRenderPipelineState
     /// 绳子，每帧重写
     private var lineBuffers: [MTLBuffer] = []
     private var lineBufferIndex = 0
@@ -123,8 +126,9 @@ final class SceneRenderer: @unchecked Sendable {
     private var rateMapBuffers: [MTLBuffer] = []
     private var rateMapBufferIndex = 0
 
+    /// - Parameter gloveDirectory: 手套的网格和贴图所在的目录（app 里是 bundle 根目录）
     init(device: MTLDevice, library: MTLLibrary, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat,
-         maxViewCount: Int, queue: MTLCommandQueue, scene: JumpScene = .atoll) throws {
+         maxViewCount: Int, queue: MTLCommandQueue, scene: JumpScene = .atoll, gloveDirectory: URL? = nil) throws {
         self.device = device
         self.scene = scene
 
@@ -224,6 +228,9 @@ final class SceneRenderer: @unchecked Sendable {
                                           depth: depthFormat, blend: false)
         conePipeline = try renderPipeline("roundConeVertex", "objectFragment", colors: [colorFormat],
                                           depth: depthFormat, blend: false)
+        glovePipeline = try renderPipeline("gloveVertex", "gloveFragment", colors: [colorFormat],
+                                           depth: depthFormat, blend: false)
+        gloves = gloveDirectory.flatMap { GloveSet(device: device, directory: $0) }
         // 绳子：朝着眼睛的细长条，边缘按覆盖率半透明（预乘 alpha 叠上去）
         linePipeline = try renderPipeline("lineVertex", "lineFragment", colors: [colorFormat],
                                           depth: depthFormat, blend: true)
@@ -829,6 +836,26 @@ final class SceneRenderer: @unchecked Sendable {
             enc.setFragmentBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 3)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: Self.coneVertexCount,
                                instanceCount: cones.count)
+        }
+
+        // 手套：按这只手的关节算 27 个蒙皮矩阵，GPU 上蒙皮
+        if let gloves, !objects.gloveHands.isEmpty {
+            var u = uniforms(matrix_identity_float4x4)
+            enc.setRenderPipelineState(glovePipeline)
+            enc.setDepthStencilState(nearerDepth)
+            enc.setVertexBytes(&views, length: viewsLength, index: 1)
+            enc.setFragmentBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 3)
+            enc.setFragmentTexture(gloves.normal, index: 2)
+            enc.setFragmentTexture(gloves.material, index: 3)
+            for hand in objects.gloveHands {
+                let mesh = hand.isLeft ? gloves.left : gloves.right
+                var skin = GloveRig.skinning(hand, mesh: mesh)
+                enc.setVertexBuffer(mesh.vertexBuffer, offset: 0, index: 0)
+                enc.setVertexBytes(&skin, length: MemoryLayout<simd_float4x4>.stride * skin.count, index: 2)
+                enc.setFragmentTexture(mesh.albedo, index: 1)
+                enc.drawIndexedPrimitives(type: .triangle, indexCount: mesh.indexCount, indexType: .uint32,
+                                          indexBuffer: mesh.indexBuffer, indexBufferOffset: 0)
+            }
         }
 
         // 绳子最后画（半透明的边，只测深度不写深度）

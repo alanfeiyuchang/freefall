@@ -49,14 +49,25 @@ struct StartView: View {
             .disabled(model.isFalling)
             .padding(.top, 4)
 
-            HStack(spacing: 14) {
-                Text("高度表戴在")
-                Picker("高度表戴在", selection: $model.watchOnLeft) {
-                    Text("左手腕").tag(true)
-                    Text("右手腕").tag(false)
+            HStack(spacing: 28) {
+                HStack(spacing: 14) {
+                    Text("高度表戴在")
+                    Picker("高度表戴在", selection: $model.watchOnLeft) {
+                        Text("左手腕").tag(true)
+                        Text("右手腕").tag(false)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 200)
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 240)
+                HStack(spacing: 14) {
+                    Text("手")
+                    Picker("手", selection: $model.gloves) {
+                        Text("跳伞手套").tag(true)
+                        Text("真手").tag(false)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 200)
+                }
             }
 
             VStack(alignment: .leading, spacing: 6) {

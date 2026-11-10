@@ -147,6 +147,72 @@ static inline float3 envBRDF(float3 F0, float roughness, float NdotV) {
     return F0 * ab.x + ab.y;
 }
 
+/// 装备和手套的一个表面
+struct GearSurface {
+    float3 position;      // 舞台空间
+    float3 normal;        // 朝着眼睛
+    float3 albedo;        // 漫反射颜色（金属是 0）
+    float3 F0;            // 正对着看的反射率
+    float roughness;
+    float specScale;      // 镜面反射打几折（织带）
+    float sheen;          // 尼龙的绒光
+    float occlusion;      // 环境光遮蔽（只影响天光和反射）
+    float interior;       // 在机舱里的程度
+};
+
+/// 装备和手套共用的打光：太阳（伞衣的影子、舱里挡掉）、天光（贴着胸口朝里的一面被身体挡掉）、
+/// 天空 / 地面 / 自己身体的反射、舱里的红灯、GGX 高光（几何高光抗锯齿）、尼龙的绒光
+static inline float3 shadeGear(GearSurface s, float3 V, float3 dnx, float3 dny,
+                               constant FrameUniforms &F, constant AtmosphereConstants &A,
+                               texture2d<float> skyLUT) {
+    float3 N = s.normal;
+    float3 L = stageSunDirection(F);
+    float altitude = F.camera.x + s.position.y;
+    float3 sunE = mix(A.sunAtCloudBase.rgb, A.sunAtCloudTop.rgb, saturate((altitude - 1000.0f) / 8000.0f));
+    float3 groundL = A.groundBounce.rgb * (sceneGroundAlbedo(int(F.world.x)) / 0.06f);
+    float3 skyE = A.skyIrradianceSea.rgb * (0.55f + 0.45f * N.y) + groundL * PI * saturate(-N.y) * 0.5f;
+    const float3 cabinRed = float3(0.05f, 0.0045f, 0.0035f);
+    float dl = 1.0f - s.interior;
+    float3 sunVis = canopyShadow(s.position, L, F) * (dl * dl);
+    // 贴着胸口的东西，朝里的一面（+Z 朝着身体）看到的是自己的身体而不是天空
+    float2 torso = F.bodyShadow.xz + float2(0.0f, 0.06f);
+    float nearTorso = F.bodyShadow.w * smoothstep(0.32f, 0.16f, length(s.position.xz - torso));
+    float3 bodyL = 0.04f * A.skyIrradianceSea.rgb / PI;              // 深色跳伞服
+    float3 sky = skyE * (1.0f - 0.55f * nearTorso * saturate(N.z)) * s.occlusion;
+
+    // 几何高光抗锯齿（Tokuyoshi & Kaplanyan）：法线在一个像素里变得越快，高光越宽，细环上不闪
+    float variance = 0.25f * (dot(dnx, dnx) + dot(dny, dny));
+    float a = s.roughness * s.roughness;
+    float a2 = saturate(a * a + min(2.0f * variance, 0.18f));
+    float NdotV = max(dot(N, V), 1e-3f);
+    float NdotL = saturate(dot(N, L));
+    float3 H = normalize(L + V);
+    float NdotH = saturate(dot(N, H));
+    float m = 1.0f - saturate(dot(V, H));
+    float3 Fs = s.F0 + (1.0f - s.F0) * (m * m) * (m * m) * m;
+    float3 spec = Fs * ggx(NdotH, NdotV, NdotL, a2, s.roughness) * NdotL * s.specScale;
+
+    // 天空的反射：反射方向转到世界坐标查天空表；朝下的反射看到地面，朝身体的看到自己
+    float3 R = reflect(-V, N);
+    float3 Rw = rotateHeading(R, F.heading.x, F.heading.y);
+    float camR = ATM_BOTTOM + max(altitude, 1.0f) * 0.001f;
+    float3 env = skyViewLookup(skyLUT, normalize(float3(Rw.x, max(Rw.y, 0.002f), Rw.z)), F.sunDirection.xyz, camR, false);
+    env = mix(env, groundL, smoothstep(0.02f, -0.08f, Rw.y));
+    env = mix(env, bodyL, nearTorso * saturate(R.z * 1.6f + 0.15f) * 0.9f);
+    env = mix(cabinRed * 0.2f / PI, env, dl * dl);
+    float3 specEnv = env * envBRDF(s.F0, s.roughness, NdotV) * s.specScale * s.occlusion;
+
+    float3 diffuse = s.albedo / PI * (sunE * sunVis * NdotL + sky * (0.12f + 0.88f * dl) + cabinRed * s.interior);
+    float3 radiance = diffuse + sunE * sunVis * spec + specEnv;
+    if (s.sheen > 0.0f) {
+        // 尼龙的绒光：掠射角上一层发灰的柔光（黑色织带的轮廓靠它）
+        float rim = pow(1.0f - NdotV, 5.0f);
+        radiance += rim * 0.1f * s.sheen * mix(s.albedo, float3(0.5f), 0.5f) / PI
+                  * (sunE * sunVis * saturate(dot(N, L) + 0.3f) * 0.5f + sky);
+    }
+    return radiance;
+}
+
 fragment float4 objectFragment(ObjectOut in [[stage_in]],
                                constant ViewUniforms *views [[buffer(0)]],
                                constant FrameUniforms &F [[buffer(1)]],
@@ -183,20 +249,17 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
         radiance = albedo * (O.params.x > 0.5f ? 1.0f : 0.004f);
     } else if (material >= MATERIAL_WEBBING) {
         // 装备。室内程度用机舱里的程度（顶点里那一位存的是 uv）
-        float interior = O.params.y;
-        float dl = 1.0f - interior;
-        float3 sunVis = canopyShadow(in.stagePos, L, F) * (dl * dl);
-        // 贴着胸口的装备，朝里的一面（+Z 朝着身体）看到的是自己的身体而不是天空
-        float2 torso = F.bodyShadow.xz + float2(0.0f, 0.06f);
-        float nearTorso = F.bodyShadow.w * smoothstep(0.32f, 0.16f, length(in.stagePos.xz - torso));
-        float3 bodyL = 0.04f * A.skyIrradianceSea.rgb / PI;              // 深色跳伞服
-        float3 sky = skyE * (1.0f - 0.55f * nearTorso * saturate(N.z));
-
-        float roughness, metallic = 0.0f, sheen = 0.0f, specScale = 1.0f;
+        GearSurface g;
+        g.position = in.stagePos;
+        g.interior = O.params.y;
+        g.occlusion = 1.0f;
+        g.sheen = 0.0f;
+        g.specScale = 1.0f;
+        float metallic = 0.0f;
         float3 diffuseAlbedo = albedo;
         if (material == MATERIAL_WEBBING) {
             // 织出来的面不是一整块光滑的面，镜面反射比实心塑料弱得多（黑织带在太阳下也还是黑的）
-            roughness = 0.75f; sheen = 1.0f; specScale = 0.4f;
+            g.roughness = 0.75f; g.sheen = 1.0f; g.specScale = 0.4f;
             // 斜纹：一道道 1.8 毫米的斜棱，按 uv（米）画；小于几个像素就淡掉（VR 里细纹会闪）
             float3 Tu = cross(dpy, N) * duvx.x + cross(N, dpx) * duvy.x;
             float3 Tv = cross(dpy, N) * duvx.y + cross(N, dpx) * duvy.y;
@@ -210,45 +273,16 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
                 N = normalize(N - (Tu * 0.8f + Tv) * (cos(phase) * 0.13f * fade));
             }
         } else if (material == MATERIAL_METAL) {
-            roughness = 0.24f; metallic = 1.0f;
+            g.roughness = 0.24f; metallic = 1.0f;
         } else if (material == MATERIAL_PLASTIC) {
-            roughness = 0.36f;
+            g.roughness = 0.36f;
         } else {
-            roughness = 0.58f;
+            g.roughness = 0.58f;
         }
-        // 几何高光抗锯齿（Tokuyoshi & Kaplanyan）：法线在一个像素里变得越快，高光越宽，细环上不闪
-        float variance = 0.25f * (dot(dnx, dnx) + dot(dny, dny));
-        float a = roughness * roughness;
-        float a2 = saturate(a * a + min(2.0f * variance, 0.18f));
-        float3 F0 = mix(float3(0.04f), albedo, metallic);
-        diffuseAlbedo *= 1.0f - metallic;
-
-        float NdotV = max(dot(N, V), 1e-3f);
-        float NdotL = saturate(dot(N, L));
-        float3 H = normalize(L + V);
-        float NdotH = saturate(dot(N, H));
-        float m = 1.0f - saturate(dot(V, H));
-        float3 Fs = F0 + (1.0f - F0) * (m * m) * (m * m) * m;
-        float3 spec = Fs * ggx(NdotH, NdotV, NdotL, a2, roughness) * NdotL * specScale;
-
-        // 天空的反射：反射方向转到世界坐标查天空表；朝下的反射看到地面，朝身体的看到自己
-        float3 R = reflect(-V, N);
-        float3 Rw = rotateHeading(R, F.heading.x, F.heading.y);
-        float camR = ATM_BOTTOM + max(altitude, 1.0f) * 0.001f;
-        float3 env = skyViewLookup(skyLUT, normalize(float3(Rw.x, max(Rw.y, 0.002f), Rw.z)), F.sunDirection.xyz, camR, false);
-        env = mix(env, groundL, smoothstep(0.02f, -0.08f, Rw.y));
-        env = mix(env, bodyL, nearTorso * saturate(R.z * 1.6f + 0.15f) * 0.9f);
-        env = mix(cabinRed * 0.2f / PI, env, dl * dl);
-        float3 specEnv = env * envBRDF(F0, roughness, NdotV) * specScale;
-
-        float3 diffuse = diffuseAlbedo / PI * (sunE * sunVis * NdotL + sky * (0.12f + 0.88f * dl) + cabinRed * interior);
-        radiance = diffuse + sunE * sunVis * spec + specEnv;
-        if (sheen > 0.0f) {
-            // 尼龙的绒光：掠射角上一层发灰的柔光（黑色织带的轮廓靠它）
-            float rim = pow(1.0f - NdotV, 5.0f);
-            radiance += rim * 0.1f * (mix(albedo, float3(0.5f), 0.5f)) / PI
-                      * (sunE * sunVis * saturate(dot(N, L) + 0.3f) * 0.5f + sky);
-        }
+        g.normal = N;
+        g.F0 = mix(float3(0.04f), albedo, metallic);
+        g.albedo = diffuseAlbedo * (1.0f - metallic);
+        radiance = shadeGear(g, V, dnx, dny, F, A, skyLUT);
     } else if (material == MATERIAL_FABRIC) {
         // 正面挨太阳照；背面看过去是透过来的光（尼龙伞布很薄，逆光下整片发亮）
         float lit = saturate(dot(N, L)), through = saturate(-dot(N, L));
@@ -290,6 +324,85 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
             radiance += rim * 0.35f * (sunE * 0.05f * daylight + skyE * 0.08f + cabinRed * 0.3f * in.interior);
         }
     }
+    float3 c = tonemap(radiance * F.exposure.x) * F.camera.z;
+    return float4(c, 1.0f);
+}
+
+// MARK: - 手套（Shared/Glove.swift：苹果示例的手套，按手部追踪的关节蒙皮）
+
+struct GloveVertex {
+    packed_float3 position;   // 绑定姿势（米）
+    float u;
+    packed_float3 normal;
+    float v;
+    uchar4 joints;
+    uchar4 weights;           // 和 255
+};
+
+struct GloveOut {
+    float4 position [[position]];
+    float3 stagePos;
+    float3 normal;
+    float2 uv;
+    uint viewIndex [[flat]];
+};
+
+vertex GloveOut gloveVertex(uint vid [[vertex_id]],
+                            ushort amp [[amplification_id]],
+                            device const GloveVertex *vertices [[buffer(0)]],
+                            constant ViewUniforms *views [[buffer(1)]],
+                            constant float4x4 *skin [[buffer(2)]]) {
+    GloveVertex v = vertices[vid];
+    float4 w = float4(v.weights) / 255.0f;
+    float4x4 m = skin[v.joints.x] * w.x + skin[v.joints.y] * w.y + skin[v.joints.z] * w.z + skin[v.joints.w] * w.w;
+    float4 p = m * float4(float3(v.position), 1.0f);
+    GloveOut o;
+    o.position = views[amp].viewProjection * p;
+    o.stagePos = p.xyz;
+    o.normal = (m * float4(float3(v.normal), 0.0f)).xyz;
+    o.uv = float2(v.u, v.v);
+    o.viewIndex = amp;
+    return o;
+}
+
+fragment float4 gloveFragment(GloveOut in [[stage_in]],
+                              constant ViewUniforms *views [[buffer(0)]],
+                              constant FrameUniforms &F [[buffer(1)]],
+                              constant AtmosphereConstants &A [[buffer(2)]],
+                              constant ObjectUniforms &O [[buffer(3)]],
+                              texture2d<float> skyLUT [[texture(0)]],
+                              texture2d<float> albedoTex [[texture(1)]],
+                              texture2d<float> normalTex [[texture(2)]],
+                              texture2d<float> materialTex [[texture(3)]]) {
+    constexpr sampler tex(filter::linear, mip_filter::linear, address::repeat, max_anisotropy(8));
+    float3 eye = views[in.viewIndex].cameraPosition.xyz;
+    float3 V = normalize(eye - in.stagePos);
+    float3 n0 = normalize(in.normal);
+    float3 dnx = dfdx(n0), dny = dfdy(n0);
+    float3 dpx = dfdx(in.stagePos), dpy = dfdy(in.stagePos);
+    float2 duvx = dfdx(in.uv), duvy = dfdy(in.uv);
+    float3 Ng = dot(n0, V) < 0.0f ? -n0 : n0;     // 袖口里面
+    // 法线贴图：切线方向用屏幕导数现推（Schüler 的 cotangent frame），不用存切线
+    float3 T = cross(dpy, Ng) * duvx.x + cross(Ng, dpx) * duvy.x;
+    float3 B = cross(dpy, Ng) * duvx.y + cross(Ng, dpx) * duvy.y;
+    float invmax = rsqrt(max(max(dot(T, T), dot(B, B)), 1e-24f));
+    float3 nm = normalTex.sample(tex, in.uv).xyz * 2.0f - 1.0f;
+    nm.y = -nm.y;                                  // 转换时 v 翻过（Metal 纹理原点在左上）
+    float3 N = normalize(T * (invmax * nm.x) + B * (invmax * nm.y) + Ng * max(nm.z, 0.05f));
+    float4 mat = materialTex.sample(tex, in.uv);
+
+    GearSurface g;
+    g.position = in.stagePos;
+    g.normal = N;
+    g.albedo = albedoTex.sample(tex, in.uv).rgb;
+    // 高光贴图原本给的是 RealityKit 的镜面颜色，有的地方（护条、标签）高到像金属；布、胶、塑料的反射率都在 2%~6%
+    g.F0 = float3(min(pow(mat.b, 2.2f) * 0.25f, 0.06f));
+    g.roughness = clamp(mat.r, 0.1f, 1.0f);
+    g.specScale = 1.0f;
+    g.sheen = 0.6f;
+    g.occlusion = mat.g;
+    g.interior = O.params.y;
+    float3 radiance = shadeGear(g, V, dnx, dny, F, A, skyLUT);
     float3 c = tonemap(radiance * F.exposure.x) * F.camera.z;
     return float4(c, 1.0f);
 }

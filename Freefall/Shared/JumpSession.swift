@@ -136,11 +136,12 @@ final class JumpSession {
     // MARK: - 给画面用
 
     func objects(layout: BodyLayout, hands: [HandPose], watchOnLeft: Bool, proxyHands: Bool = false,
-                 head: SIMD3<Float>? = nil) -> SceneObjects {
+                 gloves: Bool = false, head: SIMD3<Float>? = nil) -> SceneObjects {
         var o = SceneObjects.make(SceneObjects.Input(timeline: timeline, eyeHeight: layout.anchor.y, layout: layout,
                                                      interaction: interaction,
                                                      cloth: timeline.sinceDeploy == nil ? nil : cloth,
-                                                     hands: hands, watchOnLeft: watchOnLeft, proxyHands: proxyHands))
+                                                     hands: hands, watchOnLeft: watchOnLeft, proxyHands: proxyHands,
+                                                     gloves: gloves))
         if timeline.scene.hasTerrain {
             o.terrain = TerrainFrame(scene: timeline.scene, groundOrigin: timeline.groundPosition,
                                      stageToAltitude: timeline.altitude - timeline.eyeHeight, heading: timeline.heading)

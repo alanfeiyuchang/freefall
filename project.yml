@@ -33,3 +33,6 @@ targets:
         INFOPLIST_KEY_UIApplicationPreferredDefaultSceneSessionRole: UIWindowSceneSessionRoleApplication
         INFOPLIST_KEY_NSWorldSensingUsageDescription: 用来跟踪你头部的位置和朝向。
         INFOPLIST_KEY_NSHandsTrackingUsageDescription: 用来让你用手抓扶杆、拉开伞拉手和操纵环，并把高度表戴在你的手腕上。
+        # 手套的法线贴图、材质贴图按原始数值读，不让 Xcode 把 PNG 改写成 iOS 专用格式
+        COMPRESS_PNG_FILES: NO
+        STRIP_PNG_TEXT: NO

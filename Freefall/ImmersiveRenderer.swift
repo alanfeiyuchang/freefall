@@ -27,6 +27,8 @@ final class ImmersiveRenderer: @unchecked Sendable {
     /// 允许了手部追踪：用真手抓；否则用系统的捏合手势操作
     private let handsEnabled: Bool
     private let watchOnLeft: Bool
+    /// 戴手套：真手藏起来（FreefallApp 里 upperLimbVisibility = hidden），画手套和跳伞服袖子
+    private let gloves: Bool
     private let inFlight = DispatchSemaphore(value: maxFramesInFlight)
     private let audio: JumpAudio?
     /// 系统捏合手势：主线程上来，渲染线程每帧取
@@ -59,10 +61,12 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var lastQualityChange: CFTimeInterval = 0
     private var lastStatsLog: CFTimeInterval = 0
 
-    init(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, jumpScene: JumpScene) throws {
+    init(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool,
+         jumpScene: JumpScene) throws {
         self.layerRenderer = layerRenderer
         self.handsEnabled = handsEnabled && HandTrackingProvider.isSupported
         self.watchOnLeft = watchOnLeft
+        self.gloves = gloves
         device = layerRenderer.device
         queue = device.makeCommandQueue()!
         guard let library = device.makeDefaultLibrary() else {
@@ -72,7 +76,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
                                   colorFormat: layerRenderer.configuration.colorFormat,
                                   depthFormat: layerRenderer.configuration.depthFormat,
                                   maxViewCount: layerRenderer.properties.viewCount,
-                                  queue: queue, scene: jumpScene)
+                                  queue: queue, scene: jumpScene, gloveDirectory: Bundle.main.resourceURL)
         panel = TextPanel(device: device)
         audio = DebugOptions.mute ? nil : JumpAudio()
         session = JumpSession(timeline: DebugOptions.startAltitude.map { JumpTimeline(freefallFrom: $0, scene: jumpScene) }
@@ -82,11 +86,12 @@ final class ImmersiveRenderer: @unchecked Sendable {
     }
 
     @MainActor
-    static func start(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, scene: JumpScene) {
+    static func start(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool,
+                      scene: JumpScene) {
         let renderer: ImmersiveRenderer
         do {
             renderer = try ImmersiveRenderer(layerRenderer, handsEnabled: handsEnabled, watchOnLeft: watchOnLeft,
-                                             jumpScene: scene)
+                                             gloves: gloves, jumpScene: scene)
         } catch {
             log.error("无法创建渲染器：\(error.localizedDescription)")
             return
@@ -244,9 +249,9 @@ final class ImmersiveRenderer: @unchecked Sendable {
         // 高度表：有手部追踪就戴在选好的那只手腕上（手放下时看不到，抬手才看）；没有就放在前下方
         let watchHand = hands.first(where: { $0.isLeft == watchOnLeft })
         uniforms.placeAltimeter(feet: timeline.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand,
-                                alarm: timeline.alarmLevel)
+                                alarm: timeline.alarmLevel, gloved: gloves)
         if handsEnabled && watchHand == nil { uniforms.hudUp.w = 0 }
-        let objects = session.objects(layout: layout, hands: hands, watchOnLeft: watchOnLeft, head: head)
+        let objects = session.objects(layout: layout, hands: hands, watchOnLeft: watchOnLeft, gloves: gloves, head: head)
         panel.set(session.hint)
         let panelDraw = panel.texture.map {
             (texture: $0, uniforms: panelPlacer.place(head: head, forward: headForward, dt: Float(dt),

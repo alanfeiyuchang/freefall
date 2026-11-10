@@ -382,13 +382,11 @@ enum Gear {
     }
 
     /// 操纵环：一圈硬挺的织带围成的椭圆环（黄色），顶上一小块黑色的布片，操纵绳拴在布片上。
-    /// center 是手握的地方（环的中间），环面朝着人。返回操纵绳的拴点。
+    /// center 是环的中间，up 指向布片（操纵绳那头），facing 是环面的法线（手从这个方向穿过去）。返回操纵绳的拴点。
     @discardableResult
-    static func toggle(_ out: inout [MeshVertex], center: SIMD3<Float>, toward anchor: SIMD3<Float>) -> SIMD3<Float> {
-        var facing = SIMD3<Float>(anchor.x - center.x, 0, anchor.z - center.z)
-        facing = simd_length(facing) > 1e-4 ? simd_normalize(facing) : SIMD3(0, 0, 1)
-        let up = SIMD3<Float>(0, 1, 0)
-        let lateral = simd_cross(up, facing)
+    static func toggle(_ out: inout [MeshVertex], center: SIMD3<Float>, up: SIMD3<Float>,
+                       facing: SIMD3<Float>) -> SIMD3<Float> {
+        let lateral = simd_normalize(simd_cross(up, facing))
         let n = 40
         var pts: [SIMD3<Float>] = [], across: [SIMD3<Float>] = []
         for i in 0..<n {
@@ -405,6 +403,34 @@ enum Gear {
         pillow(&out, center: top + up * 0.011, axes: (lateral, up, facing), half: SIMD3(0.011, 0.013, 0.0055),
                exponent: 0.3, color: SIMD3(0.025, 0.025, 0.028), material: .webbing, segments: 14, rings: 8)
         return top + up * 0.024
+    }
+
+    /// 没人抓的操纵环：竖着挂，环面朝着人
+    @discardableResult
+    static func toggle(_ out: inout [MeshVertex], center: SIMD3<Float>, toward anchor: SIMD3<Float>) -> SIMD3<Float> {
+        var facing = SIMD3<Float>(anchor.x - center.x, 0, anchor.z - center.z)
+        facing = simd_length(facing) > 1e-4 ? simd_normalize(facing) : SIMD3(0, 0, 1)
+        return toggle(&out, center: center, up: SIMD3(0, 1, 0), facing: facing)
+    }
+
+    /// 抓在手里的操纵环：环套在四根手指的第一节上（手指从环里穿过去），布片在食指那头。
+    /// 只按抓握点摆的话，环的中心在手心，整个被拳头包住看不见。
+    @discardableResult
+    static func heldToggle(_ out: inout [MeshVertex], hand h: HandPose) -> SIMD3<Float> {
+        let knuckles: [HandJoint] = [.indexKnuckle, .middleKnuckle, .ringKnuckle, .littleKnuckle]
+        let middles: [HandJoint] = [.indexIntermediateBase, .middleIntermediateBase, .ringIntermediateBase,
+                                    .littleIntermediateBase]
+        var center = SIMD3<Float>(0, 0, 0), along = SIMD3<Float>(0, 0, 0)
+        for (k, m) in zip(knuckles, middles) {
+            center += (h[k] + h[m]) * 0.5
+            along += h[m] - h[k]
+        }
+        center /= 4
+        let up = simd_normalize(h[.indexKnuckle] - h[.littleKnuckle])
+        var facing = along - simd_dot(along, up) * up
+        facing = simd_length(facing) > 1e-5 ? simd_normalize(facing) : simd_normalize(simd_cross(up, SIMD3(0, 1, 0)))
+        // 环的中心比手指的中线往食指那头挪一点（布片露在虎口上面）
+        return toggle(&out, center: center + up * 0.008, up: up, facing: facing)
     }
 
     /// 滑块的扣眼（四个角的金属圈）和中间那块布：布面朝上微微鼓起
@@ -437,18 +463,20 @@ enum Gear {
     }
 
     /// 手表：表带（一圈扁的橡胶带绕着手腕）+ 表壳（黑色，侧面微鼓）+ 金属表圈。表盘本身由 HUD pass 画在表壳顶上。
-    static func watch(_ out: inout [MeshVertex], hand: HandPose) {
+    /// 戴手套时表戴在手套袖口外面（袖口半径约 3.9 厘米），表带放大一圈。
+    static func watch(_ out: inout [MeshVertex], hand: HandPose, gloved: Bool) {
         let f = SceneObjects.wristFrame(hand)
-        let n = 36
+        let (sideRadius, backRadius) = SceneObjects.strapRadii(gloved: gloved)
+        let n = 40
         var pts: [SIMD3<Float>] = [], across: [SIMD3<Float>] = []
         for i in 0..<n {
             let t = 2 * Float.pi * Float(i) / Float(n)
-            pts.append(f.center + f.side * (0.037 * cos(t)) + f.back * (0.030 * sin(t)))
+            pts.append(f.center + f.side * (sideRadius * cos(t)) + f.back * (backRadius * sin(t)))
             across.append(f.towardElbow)
         }
         ribbon(&out, points: pts, across: across, width: 0.022, thickness: 0.0035,
                color: SIMD3(0.02, 0.02, 0.022), material: .rubber, closed: true)
-        let (faceCenter, _, _, size) = SceneObjects.watchPlacement(hand)
+        let (faceCenter, _, _, size) = SceneObjects.watchPlacement(hand, gloved: gloved)
         let axis = f.back
         let r = size / 2
         // 表壳剖面：从表带上起，侧面微鼓，顶上收进表圈（表盘在最上面那一圈里面，比表圈低一点点）
@@ -459,5 +487,61 @@ enum Gear {
               color: SIMD3(0.03, 0.03, 0.033), material: .plastic)
         ring(&out, center: faceCenter - axis * 0.0002, axis: axis, radii: SIMD2(r * 1.03, r * 1.03), tube: 0.0018,
              color: metal, segments: 40, sides: 8)
+    }
+
+    /// 跳伞服的袖子（戴手套时）：从手套袖口外面套上去，顺着前臂到手肘，再弯过去连到肩膀。
+    /// 手部追踪只给到前臂（腕和前臂的方向），手肘按前臂长 27 厘米往回推，肩膀用身体上的固定点。
+    /// 前臂一段截面是扁的（横着宽），越往上越粗越圆，手肘那里布堆起来褶子多。
+    /// 真手藏起来以后，没有袖子手套就像飘在空中；只做到手肘的话，弓身时一眼能看到截断的袖口。
+    static func sleeve(_ out: inout [MeshVertex], hand: HandPose, shoulder: SIMD3<Float>) {
+        let f = SceneObjects.wristFrame(hand)
+        let wrist = hand[.forearmWrist]
+        let arm = f.towardElbow
+        let elbow = wrist + arm * 0.27
+        let path = spline([wrist + arm * 0.034, wrist + arm * 0.14, elbow, elbow + (shoulder - elbow) * 0.5, shoulder],
+                          steps: 8)
+        let n = path.count
+        var length: [Float] = [0]
+        for i in 1..<n { length.append(length[i - 1] + simd_length(path[i] - path[i - 1])) }
+        let total = max(length[n - 1], 1e-3)
+        let elbowAt = length[16] / total                     // 第 3 个控制点（每段 8 步）
+        // 平行移动的标架：从手腕的（侧向, 手背）出发，沿着袖子不扭
+        var side = f.side, back = f.back
+        var frames: [(SIMD3<Float>, SIMD3<Float>)] = []
+        for i in 0..<n {
+            let t = simd_normalize(path[min(i + 1, n - 1)] - path[max(i - 1, 0)])
+            side = simd_normalize(side - simd_dot(side, t) * t)
+            back = simd_normalize(simd_cross(t, side) * (simd_dot(simd_cross(t, side), back) >= 0 ? 1 : -1))
+            frames.append((side, back))
+        }
+        let sides = 24
+        func point(_ i: Int, _ k: Int) -> (SIMD3<Float>, SIMD3<Float>, SIMD2<Float>) {
+            let s = length[i] / total
+            let a = 2 * Float.pi * Float(k % sides) / Float(sides)
+            let r = 0.045 + 0.022 * smoothstep(0, 0.9, s)
+            // 褶子：沿着袖子、绕着袖子两个方向的起伏；手肘那里堆得最多；袖口那头收紧（松紧带）
+            let bunch = exp(-pow((s - elbowAt) / 0.08, 2))
+            let fold = 1 + (0.03 + 0.05 * bunch) * sin(length[i] * 70 + a * 2) * smoothstep(0, 0.05, s)
+                + 0.02 * sin(a * 5 + length[i] * 31)
+            let cuff = 1 - 0.06 * (1 - smoothstep(0, 0.03, s))
+            let flat = 1 - smoothstep(0.1, 0.5, s)              // 前臂扁，上臂圆
+            let rs = r * (1 + 0.08 * flat) * fold * cuff, rb = r * (1 - 0.08 * flat) * fold * cuff
+            let (e1, e2) = frames[i]
+            let normal = simd_normalize(e1 * (cos(a) / rs) + e2 * (sin(a) / rb))
+            return (path[i] + e1 * (rs * cos(a)) + e2 * (rb * sin(a)), normal, SIMD2(length[i], r * a))
+        }
+        let color = SIMD3<Float>(0.028, 0.034, 0.05)      // 深海军蓝的跳伞服
+        for i in 0..<(n - 1) {
+            for k in 0..<sides {
+                let p00 = point(i, k), p10 = point(i + 1, k), p11 = point(i + 1, k + 1), p01 = point(i, k + 1)
+                quad(&out, (p00.0, p10.0, p11.0, p01.0), (p00.1, p10.1, p11.1, p01.1),
+                     (p00.2, p10.2, p11.2, p01.2), color, .webbing)
+            }
+        }
+    }
+
+    private static func smoothstep(_ a: Float, _ b: Float, _ x: Float) -> Float {
+        let t = min(max((x - a) / (b - a), 0), 1)
+        return t * t * (3 - 2 * t)
     }
 }
