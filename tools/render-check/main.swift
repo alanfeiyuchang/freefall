@@ -144,9 +144,12 @@ func hands(_ pose: Hands, _ session: JumpSession) -> [HandPose] {
         return [grip(left: false, at: barPoint + SIMD3(-0.035, 0, 0.02), forward: SIMD3(0.25, -0.1, -1),
                      palm: SIMD3(1, 0, 0), curl: pose == .bar ? 1.5 : 0.35)]
     case .handle:
-        // 左手伸过胸前抓右大臂上的拉环
-        let h = session.interaction.rings[1] ?? layout.ringRest(1)
-        return [grip(left: true, at: h, forward: SIMD3(0.75, 0.15, -0.6), palm: SIMD3(-0.15, 0.1, 1), curl: 1.5)]
+        // 右小臂横在胸前（像看表），左手从下面伸过去抓它上面的拉环
+        let arm = syntheticHand(left: false, wrist: SIMD3(-0.04, eyeHeight - 0.34, -0.36), forward: SIMD3(-1, 0.15, 0.1),
+                                palm: SIMD3(0, -1, 0.15))
+        let rest = SceneObjects.ringMount(arm, gloved: useGloves).rest
+        let h = session.interaction.rings[1] ?? rest
+        return [arm, grip(left: true, at: h, forward: SIMD3(0.45, 0.35, -0.82), palm: SIMD3(0.2, -1, 0.3), curl: 1.5)]
     case .toggles:
         let t = session.interaction.toggles ?? layout.toggleRest
         return [grip(left: true, at: t.0, forward: SIMD3(0.3, 1, -0.2), palm: SIMD3(1, 0, 0), curl: 1.5),
@@ -159,6 +162,9 @@ func hands(_ pose: Hands, _ session: JumpSession) -> [HandPose] {
 func autoSession(from timeline: JumpTimeline = JumpTimeline(scene: jumpScene), deployFeet: Double = 3000) -> JumpSession {
     let s = JumpSession(timeline: timeline, realHands: true, autopilot: Autopilot(deployFeet: deployFeet))
     s.setEyeHeight(eyeHeight)
+    s.gloved = useGloves
+    // 镜头里默认把 HUD 打开看读数（真机默认关，点表才开）；HUDOFF=1 看关着的样子
+    s.hudOn = env["HUDOFF"] == nil
     return s
 }
 
@@ -253,7 +259,7 @@ func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [
     frame.ground = SIMD4(Float(t.position.x), Float(t.landShift.x), Float(t.position.y), Float(t.landShift.y))
     let turning = Float(min(abs(t.turnRate) / JumpTimeline.maxTurnRate, 1))
     let heading = session.displayHeading
-    frame.heading = SIMD4(Float(cos(heading)), Float(sin(heading)), session.snapTurns ? 0 : turning * 0.85, 0)
+    frame.heading = SIMD4(Float(cos(heading)), Float(sin(heading)), turning * 0.85, 0)
     let watchHand = handPoses.first(where: { $0.isLeft == watchOnLeft })
     frame.placeAltimeter(feet: t.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand, alarm: t.alarmLevel,
                          gloved: useGloves)
@@ -267,7 +273,7 @@ func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [
     var headMatrix = head
     headMatrix.columns.3 = SIMD4(eyeOffset.x, eyeHeight + eyeOffset.y, eyeOffset.z, 1)
     let hudPanels = env["NOHUD"] != nil ? [] : helmet.update(session.hudState, head: headMatrix)
-    textPanel.set(showPanel && hudPanels.isEmpty && env["NOHUD"] == nil ? session.hint : "")
+    textPanel.set("")          // 和真机一样：提示都在 HUD 下沿，老的浮动面板不用了
     let forward = (head * SIMD4<Float>(0, 0, -1, 0)).xyz
     let panel = textPanel.texture.map {
         (texture: $0, uniforms: panelPlacer.place(head: SIMD3(0, eyeHeight, 0), forward: forward, dt: 1.0 / 90,
@@ -355,8 +361,8 @@ let alarmFeet = { (feet: Int) in at { $0.altitudeFeet <= feet } }
 
 /// 装备近景：背带、拉手、3 环、伸缩带、操纵环、滑块、表；快落地时地上自己的影子
 let gearShots: [Shot] = [
-    Shot(name: "x1_ring", session: { alarmFeet(3600) }, yaw: -52, pitch: -42, fovY: 50),
-    Shot(name: "x2_handle_pull", session: { alarmFeet(3300) }, yaw: -38, pitch: -40, hands: .handle, fovY: 70),
+    Shot(name: "x1_ring", session: { alarmFeet(3600) }, yaw: -38, pitch: -14, hands: .arch, fovY: 50),
+    Shot(name: "x2_handle_pull", session: { alarmFeet(3300) }, yaw: -24, pitch: -16, hands: .handle, fovY: 70),
     Shot(name: "x3_risers", session: { deployed(12) }, yaw: 0, pitch: 48, fovY: 75),
     Shot(name: "x4_toggle", session: { deployed(12) }, yaw: -61, pitch: -13, fovY: 30),
     Shot(name: "x5_three_ring", session: { deployed(12) }, yaw: -78, pitch: -50, fovY: 40),
@@ -430,7 +436,7 @@ let atollShots: [Shot] = revealShots + cabinShots + cardShots + [
     Shot(name: "r3_rain_curtains", session: { deployed(8) }, yaw: 0, pitch: 0, fovY: 80, lookAtRain: 2000),
     Shot(name: "r4_rain_from_above", session: { freefall(4300) }, yaw: 0, pitch: 0, fovY: 80, lookAtRain: 1500),
     Shot(name: "f4_alarm_watch", session: { alarmFeet(3400) }, yaw: 0, pitch: -50, hands: .watch, fovY: 60),
-    Shot(name: "f5_handle", session: { alarmFeet(3300) }, yaw: -30, pitch: -45, hands: .handle, fovY: 80),
+    Shot(name: "f5_handle", session: { alarmFeet(3300) }, yaw: -20, pitch: -18, hands: .handle, fovY: 80),
     Shot(name: "o1_bag", session: { deployed(0.4) }, yaw: 0, pitch: 72, fovY: 90),
     Shot(name: "o2_lines", session: { deployed(0.9) }, yaw: 0, pitch: 72, fovY: 90),
     Shot(name: "o3_inflate", session: { deployed(1.6) }, yaw: 0, pitch: 70, fovY: 90),
@@ -538,12 +544,12 @@ if mode == "hazards" {
     check(.volcano, "火山锥坡上", TerrainField.coneCenter + SIMD2(300, 0))
     let plume = TerrainField.plumeDensity(TerrainField.coneCenter + TerrainField.plumeDrift * 500, altitude: TerrainField.coneTop + 460)
     print(String(format: "  火山 烟柱里（火山口上方 500 米）：浓度 %.2f（> 0.4 算冲进去）", plume))
-    for s in stride(from: Float(-1600), through: -1200, by: 50) {
-        let p = TerrainField.target + TerrainField.valleyDir * s
-        if TerrainField.hazard(.glacier, p, TerrainField.height(.glacier, p)) == .crevasse { check(.glacier, "冰瀑区（找到的第一条裂缝）", p); break }
-    }
-    check(.glacier, "冰湖", TerrainField.target + TerrainField.valleyDir * 1730)
-    check(.glacier, "靶", TerrainField.target)
+    check(.island, "靶", TerrainField.target)
+    check(.island, "靶前 60 米（海边）", TerrainField.target - TerrainField.valleyDir * 60)
+    check(.island, "靶前 150 米（礁坪）", TerrainField.target - TerrainField.valleyDir * 150)
+    check(.island, "开伞点（海上）", SIMD2(0, -100))
+    check(.island, "岛中间（雨林）", TerrainField.target + TerrainField.valleyDir * 900)
+    check(.island, "山顶附近", TerrainField.target + TerrainField.valleyDir * 1250 + TerrainField.valleySide * 150)
     check(.grassland, "河中间", SIMD2(0, -390 + 110 * sin(0.4) + 45 * sin(2.1)))
     check(.grassland, "池塘", TerrainField.pondCenter)
     check(.alpine, "谷壁上（横向 1.2 km）", TerrainField.target + TerrainField.valleySide * 1200)
@@ -619,6 +625,7 @@ if mode == "hands" || mode == "all" {
     // 真手的抓握逻辑：不开自动驾驶，用合成的手一步步做（握拳 = 抓）
     let s = JumpSession(timeline: JumpTimeline(scene: jumpScene), realHands: true, autopilot: nil)
     s.setEyeHeight(eyeHeight)
+    s.gloved = useGloves
     func step(_ seconds: Double, _ makeHands: () -> [HandPose]) {
         let end = s.timeline.time + seconds
         while s.timeline.time < end, !s.timeline.isOver {
@@ -630,7 +637,7 @@ if mode == "hands" || mode == "all" {
         print(String(format: "  %@ → %@  抓杆 %@  离地 %.0f m  拉手 %@  刹车 %.2f/%.2f  航向 %.1f°  「%@」", what,
                      String(describing: t.phase), t.holdingBar ? "是" : "否", t.heightAboveGround,
                      s.interaction.handlePulled ? "已拉" : "没拉", t.brakeLeft, t.brakeRight, t.heading * 180 / .pi,
-                     s.hint.replacingOccurrences(of: "\n", with: " / ")))
+                     (s.hudHint.isEmpty ? "（HUD 关：" + s.hint + "）" : s.hudHint).replacingOccurrences(of: "\n", with: " / ")))
     }
     print("真手流程：")
     let bar = s.timeline.bar
@@ -655,12 +662,32 @@ if mode == "hands" || mode == "all" {
                   s.timeline.greenLight ? "亮" : "没亮"))
     step(0.3) { barHand(0.35) }
     report("松开")
+    run(s) { $0.phase == .freefall && $0.time > 20 }
+    // 点表开关 HUD：表戴在左手腕上，右手食指点表盘（手指要离开一下才能再点）
+    let watchArm = syntheticHand(left: true, wrist: SIMD3(-0.07, eyeHeight - 0.3, -0.32), forward: SIMD3(1, 0.12, 0.08),
+                                 palm: SIMD3(0, -1, 0.15))
+    func pointing(at target: SIMD3<Float>) -> HandPose {
+        var h = syntheticHand(left: false, wrist: target + SIMD3(0.12, 0.1, 0.05), forward: SIMD3(-0.7, -0.55, -0.3),
+                              palm: SIMD3(0, -0.4, 1), curl: 0.15)
+        let offset = target - h[.indexTip]
+        h.joints = h.joints.map { $0 + offset }
+        return h
+    }
+    let face = SceneObjects.watchPlacement(watchArm, gloved: s.gloved).0
+    for label in ["第一次", "第二次", "第三次"] {
+        step(0.3) { [watchArm, pointing(at: face + SIMD3(0, 0.12, 0))] }
+        step(0.2) { [watchArm, pointing(at: face)] }
+        print("  右手食指点左手腕上的表（\(label)）→ HUD \(s.hudOn ? "开" : "关")")
+    }
+    step(0.3) { [watchArm, pointing(at: face + SIMD3(0, 0.12, 0))] }
     run(s) { $0.phase == .freefall && $0.heightAboveGround < 1500 }
-    // 还没报警就去拉：拉不动
+    // 还没报警就去拉：拉不动。右手弓身摆在头右边，左手去抓右小臂上的拉环，往左上方拉
     var reach: Float = 0
+    let ringArm = syntheticHand(left: false, wrist: SIMD3(0.33, eyeHeight - 0.1, -0.36), forward: SIMD3(0.35, 0.22, -1),
+                                palm: SIMD3(0, -1, -0.3))
     func handleHand(_ pull: Float, _ curl: Float) -> [HandPose] {
-        let p = layout.ringRest(1) + normalize(SIMD3<Float>(0.45, -0.1, -0.9)) * pull
-        return [grip(left: true, at: p, forward: SIMD3(0.75, 0.15, -0.6), palm: SIMD3(-0.15, 0.1, 1), curl: curl)]
+        let p = SceneObjects.ringMount(ringArm, gloved: s.gloved).rest + normalize(SIMD3<Float>(-0.6, 0.5, 0.2)) * pull
+        return [ringArm, grip(left: true, at: p, forward: SIMD3(1, -0.15, -0.35), palm: SIMD3(0, -1, 0.1), curl: curl)]
     }
     step(0.3) { handleHand(0, 0.35) }
     step(0.3) { handleHand(0, 1.5) }
@@ -692,6 +719,17 @@ if mode == "hands" || mode == "all" {
     let h1 = s.timeline.heading
     step(3.0) { toggleHands(0, 0.25) }
     report(String(format: "拉右环 3 秒（航向变了 %+.1f°，应该往右 = 负）", (s.timeline.heading - h1) * 180 / .pi))
+    let sinkBefore = s.timeline.verticalSpeed
+    step(1.0) { toggleHands(0, 0) }
+    let level = s.timeline.verticalSpeed
+    step(2.5) {
+        let r = layout.toggleRest
+        let push = SIMD3<Float>(0, 0, -0.28)
+        return [grip(left: true, at: r.0 + push, forward: SIMD3(0.3, 1, -0.2), palm: SIMD3(1, 0, 0), curl: 1.5),
+                grip(left: false, at: r.1 + push, forward: SIMD3(-0.3, 1, -0.2), palm: SIMD3(-1, 0, 0), curl: 1.5)]
+    }
+    report(String(format: "两手往前推 2.5 秒（俯冲：下沉 %.1f m/s，平飞时 %.1f，刚才转弯时 %.1f）", s.timeline.verticalSpeed,
+                  level, sinkBefore))
     step(0.5) {
         let r = layout.toggleRest
         return [grip(left: true, at: r.0 - SIMD3(0, 0.1, 0), forward: SIMD3(0.3, 1, -0.2), palm: SIMD3(1, 0, 0), curl: 0.3),
@@ -842,6 +880,28 @@ if mode == "perf" || mode == "all" {
     }
     print(String(format: "  组装网格：每帧 %.3f ms（CPU），%d 个顶点、%d 段绳子", Date().timeIntervalSince(start2) / 300 * 1000,
                  vertexCount, lineCount))
+    // CPU：头盔 HUD 重画一次（两侧两块 + 提示条，CoreGraphics 按两倍分辨率画，每秒 15 次）
+    let hudTest = HelmetHUD(device: device)
+    var hudStateTest = HelmetHUD.State()
+    hudStateTest.boot = 1
+    hudStateTest.hintBoot = 1
+    hudStateTest.hint = "开伞！\n用另一只手抓住小臂上的红色拉环，往外拉"
+    hudStateTest.altitudeFeet = 3300
+    hudStateTest.alarm = 1
+    hudStateTest.targetBearingDeg = 20
+    hudStateTest.targetDistance = 640
+    // 渲染线程上只是取画好的贴图、摆位置；重画在后台（一次 4~5 毫秒），这里两个都量
+    var renderThread = 0.0
+    let start3 = Date()
+    for i in 0..<60 {
+        hudStateTest.time = Float(i) / 15
+        let t0 = Date()
+        _ = hudTest.update(hudStateTest, head: matrix_identity_float4x4)
+        renderThread += Date().timeIntervalSince(t0)
+        Thread.sleep(forTimeInterval: 0.008)
+    }
+    print(String(format: "  头盔 HUD：渲染线程上每次 %.3f ms；后台一秒 15 次，60 次共 %.0f ms（含等待）", renderThread / 60 * 1000,
+                 Date().timeIntervalSince(start3) * 1000))
 }
 
 if mode == "maps" || mode == "all" {

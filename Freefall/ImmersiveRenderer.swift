@@ -54,6 +54,9 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var grabsHeard = 0
     private var dingSent = false
     private var bodyYaw = BodyYaw()
+    /// 袖子用的身体朝向：伞下也不锁（人在椅子上转了，肩膀得跟着转，不然袖子会横过脸前）
+    private var armYaw = BodyYaw()
+    private var tapsHeard = 0
     private var revealSent = false
     private var deploySent = false
     private var landingSent = false
@@ -65,7 +68,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var lastQualityChange: CFTimeInterval = 0
     private var lastStatsLog: CFTimeInterval = 0
 
-    init(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool, snapTurns: Bool,
+    init(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool,
          jumpScene: JumpScene) throws {
         self.layerRenderer = layerRenderer
         self.handsEnabled = handsEnabled && HandTrackingProvider.isSupported
@@ -88,16 +91,17 @@ final class ImmersiveRenderer: @unchecked Sendable {
                                   ?? JumpTimeline(scene: jumpScene),
                               realHands: self.handsEnabled,
                               autopilot: DebugOptions.autopilot ? Autopilot(deployFeet: DebugOptions.autoDeployFeet) : nil)
-        session.snapTurns = snapTurns
+        session.gloved = gloves
+        session.watchOnLeft = watchOnLeft
     }
 
     @MainActor
     static func start(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool,
-                      snapTurns: Bool, scene: JumpScene) {
+                      scene: JumpScene) {
         let renderer: ImmersiveRenderer
         do {
             renderer = try ImmersiveRenderer(layerRenderer, handsEnabled: handsEnabled, watchOnLeft: watchOnLeft,
-                                             gloves: gloves, snapTurns: snapTurns, jumpScene: scene)
+                                             gloves: gloves, jumpScene: scene)
         } catch {
             log.error("无法创建渲染器：\(error.localizedDescription)")
             return
@@ -240,6 +244,8 @@ final class ImmersiveRenderer: @unchecked Sendable {
         let neck = SIMD3<Float>(head.x, eyeHeight, head.z) - flatForward * 0.09
         let bodyForward = SIMD3<Float>(-sin(yaw), 0, -cos(yaw))
         let layout = BodyLayout(anchor: neck + bodyForward * 0.09, yaw: yaw)
+        let armsYaw = armYaw.update(head: head, headForward: headForward, hands: hands, dt: Float(dt), locked: false)
+        let armsLayout = BodyLayout(anchor: neck + SIMD3(-sin(armsYaw), 0, -cos(armsYaw)) * 0.09, yaw: armsYaw)
         // 等对齐好头部朝向再开始（第一帧之前时间不走）
         if stageFromOrigin != nil {
             let (began, touches) = pinches.withLock { s -> (Int, [PinchState.Touch]) in
@@ -256,20 +262,22 @@ final class ImmersiveRenderer: @unchecked Sendable {
         uniforms.camera = SIMD4(stageToAltitude, Float(timeline.time), Float(timeline.brightness), 0)
         uniforms.ground = SIMD4(Float(timeline.position.x), Float(timeline.landShift.x),
                                 Float(timeline.position.y), Float(timeline.landShift.y))
-        // 转弯时视野四周收窄压暗（转向是世界绕着你转，余光里的转动最容易晕）；分段转向不连续转，不用压
+        // 转弯时视野四周收窄压暗（转向是世界绕着你转，余光里的转动最容易晕）
         let turning = Float(min(abs(timeline.turnRate) / JumpTimeline.maxTurnRate, 1))
         let heading = session.displayHeading
-        uniforms.heading = SIMD4(Float(cos(heading)), Float(sin(heading)), session.snapTurns ? 0 : turning * 0.85, 0)
+        uniforms.heading = SIMD4(Float(cos(heading)), Float(sin(heading)), turning * 0.85, 0)
         // 高度表：有手部追踪就戴在选好的那只手腕上（手放下时看不到，抬手才看）；没有就放在前下方
         let watchHand = hands.first(where: { $0.isLeft == watchOnLeft })
         uniforms.placeAltimeter(feet: timeline.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand,
                                 alarm: timeline.alarmLevel, gloved: gloves)
         if handsEnabled && watchHand == nil { uniforms.hudUp.w = 0 }
-        let objects = session.objects(layout: layout, hands: hands, watchOnLeft: watchOnLeft, gloves: gloves, head: head)
+        let objects = session.objects(layout: layout, armsLayout: armsLayout, hands: hands, watchOnLeft: watchOnLeft,
+                                      gloves: gloves, head: head)
         let hudState = session.hudState
         let hudPanels = helmet.update(hudState, head: stageFromDevice)
         var hudDirty = helmet.dirty
-        panel.set(hudPanels.isEmpty ? session.hint : "")
+        // 提示都在头盔 HUD 的下沿（HUD 关着时只有舱里开场的提示），老的浮动面板不用了
+        panel.set("")
         let panelDraw = panel.texture.map {
             (texture: $0, uniforms: panelPlacer.place(head: head, forward: headForward, dt: Float(dt),
                                                       width: $0.width, height: $0.height))
@@ -376,6 +384,8 @@ final class ImmersiveRenderer: @unchecked Sendable {
         wasHoldingBar = t.holdingBar
         audioParams.grabs += session.grabs - grabsHeard        // 抓住拉手、操纵环
         grabsHeard = session.grabs
+        audioParams.taps += session.watchTaps - tapsHeard        // 点表开关 HUD
+        tapsHeard = session.watchTaps
         if t.barGrabbedTime != nil && !revealSent {        // 握住扶杆：飞机开始长出来
             revealSent = true
             audioParams.reveals += 1

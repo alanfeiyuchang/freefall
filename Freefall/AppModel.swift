@@ -17,10 +17,6 @@ final class AppModel {
     var gloves: Bool = UserDefaults.standard.object(forKey: "gloves") as? Bool ?? true {
         didSet { UserDefaults.standard.set(gloves, forKey: "gloves") }
     }
-    /// 分段转向（防晕）：伞下转弯时画面一次跳 15°，不连续转（记住上次的选择）
-    var snapTurns: Bool = UserDefaults.standard.bool(forKey: "snapTurns") {
-        didSet { UserDefaults.standard.set(snapTurns, forKey: "snapTurns") }
-    }
     /// 真手现在藏没藏起来（戴手套时：开场在房间里还看得到真手，握住扶杆、手套长出来以后才藏，见 FreefallApp）
     var realHandsHidden = false
     /// 跳哪一关（记住上次的选择）
@@ -29,7 +25,7 @@ final class AppModel {
     }
     /// 上一跳的结果（落地后回到开始窗口时显示）
     var lastResult: JumpResult?
-    /// 每关落进靶里离靶心最近的一次（米，按关的编号；记住）
+    /// 每关落地时离靶心最近的一次（米，按关的编号；记住）。摔了、撞山、掉进熔岩这种不算
     var bestDistance: [Int: Double] = {
         let stored = UserDefaults.standard.dictionary(forKey: "bestDistance") as? [String: Double] ?? [:]
         return Dictionary(uniqueKeysWithValues: stored.compactMap { k, v in Int(k).map { ($0, v) } })
@@ -38,6 +34,12 @@ final class AppModel {
             UserDefaults.standard.set(Dictionary(uniqueKeysWithValues: bestDistance.map { (String($0.key), $0.value) }),
                                       forKey: "bestDistance")
         }
+    }
+
+    /// 所有关里最近的一次（米，哪一关）
+    var overallBest: (distance: Double, scene: JumpScene)? {
+        bestDistance.compactMap { key, d in JumpScene(rawValue: key).map { (distance: d, scene: $0) } }
+            .min { $0.distance < $1.distance }
     }
 
     /// 开始窗口关掉以后就没有视图能拿到这两个环境动作了，所以先存下来，落完时用。
@@ -51,7 +53,7 @@ final class AppModel {
         if let result {
             lastResult = result
             let key = result.scene.rawValue
-            if result.won, result.distance < bestDistance[key] ?? .infinity { bestDistance[key] = result.distance }
+            if result.landed, result.distance < bestDistance[key] ?? .infinity { bestDistance[key] = result.distance }
         }
         openWindow?(id: StartView.windowID)
         Task { await dismissImmersiveSpace?() }

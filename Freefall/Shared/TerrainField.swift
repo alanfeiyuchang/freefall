@@ -198,61 +198,41 @@ enum TerrainField {
         return h
     }
 
-    // MARK: - 冰川
+    // MARK: - 海岛：四面环海的热带小岛。开伞点在海上，靶在岛西岸沙滩后面的草地上；
+    // 岸边一圈浅浅的珊瑚礁坪，礁外一下子掉进深海；往岛里是两座长满雨林的山
 
-    static let glacierHalfWidth: Float = 720
-    static let glacierLakeS: Float = 1350
+    /// 岛的中心和半轴（山谷坐标：沿 valleyDir、沿 valleySide，米）
+    static let islandCenter = SIMD2<Float>(1250, 150)
+    static let islandAxes = SIMD2<Float>(1330, 1050)
 
-    static func glacierFloor(_ s: Float) -> Float {
-        1900 + 0.05 * max(-s, 0) + 0.00003 * s * s * (0 >= s ? 1 : 0) - 0.045 * max(s, 0)
+    /// 离海岸多远（按岛的半轴归一化）：> 0 在岛上，< 0 在海里。海岸弯弯曲曲（海湾、岬角），靶前面那一段规整一点
+    static func islandLand(_ p: SIMD2<Float>) -> Float {
+        let q = (valleyCoords(p) - islandCenter) / islandAxes
+        let r = simd_length(p - target)
+        return 1 - simd_length(q) + 0.07 * fbm(p / 700 + SIMD2(3.1, 7.7), 4) * smooth(250, 700, r)
     }
 
-    static func glacierHeight(_ p: SIMD2<Float>) -> Float {
-        let sl = valleyCoords(p)
-        let s = sl.x, l = sl.y
-        let floorH = glacierFloor(s)
-        let across = l / glacierHalfWidth
-        let onIce: Float = 1 >= abs(across) ? 1 : 0
-        let ice = 35 * (1 - across * across) * onIce
-        let m = (abs(l) - glacierHalfWidth - 40) / 60
-        let moraine = 28 * exp(-m * m)
-        let lp = max(abs(l) - glacierHalfWidth - 60, 0)
-        let wall = 2400 * (1 - exp(-pow(lp / 1100, 1.6)))
-        let steep = smooth(0, 450, lp)
-        let mountains = eroded(p / 2600 + SIMD2(1.9, 6.6), 10)
-        var h = floorH + ice + moraine + wall + mountains * mix(8, 1000, steep) + 1.2 * fbm(p / 90, 3) * (1 - steep)
-        h += 6 * smooth(-1700, -1300, s) * smooth(-700, -1000, s) * abs(sin(s / 9)) * onIce
+    static func islandHeight(_ p: SIMD2<Float>) -> Float {
+        let land = islandLand(p)
+        // 海里：岸边水深一两米的礁坪，礁外掉到四十多米深
+        let sea = -0.6 - 1.2 * smooth(-0.005, -0.06, land) - 42 * smooth(-0.11, -0.2, land) + 0.6 * fbm(p / 60, 3)
+        // 岸上：沙滩、平地，再往里两座山（四五百米）
+        let hills = 470 * pow(smooth(0.1, 0.75, land), 1.3) * (0.75 + 0.45 * eroded(p / 1300 + SIMD2(5.5, 2.5), 7))
+        let ground = 2.6 * smooth(-0.01, 0.03, land) + 1.5 * smooth(0.03, 0.12, land) + hills + 0.5 * fbm(p / 45, 3)
+        var h = mix(sea, ground, smooth(-0.012, 0.004, land))
+        // 着陆区：靶周围一片平的草地（只在岸上压平，不往海里填）
         let r = simd_length(p - target)
-        h = mix(1900 + 35 * (1 - across * across) + 0.3 * fbm(p / 40, 3), h, smooth(80, 220, r))
-        let lake = smooth(1, 0.82, glacierLake(p))
-        h = mix(h, min(h, glacierFloor(glacierLakeS) - 25), lake)
+        h = mix(h, 3.5 + 0.25 * fbm(p / 40, 3), (1 - smooth(70, 190, r)) * smooth(0, 0.02, land))
         return h
     }
 
-    static func glacierLake(_ p: SIMD2<Float>) -> Float {
-        let sl = valleyCoords(p)
-        let d = (sl - SIMD2(glacierLakeS + 380, 0)) / SIMD2(430, 620)
-        return simd_length(d) + 0.22 * noise(p / 260 + SIMD2(4, 1))
+    /// 雨林（> 0.5 算树林）：沙滩后面一条之外全是；靶周围两百米是一片空地
+    static func islandForest(_ p: SIMD2<Float>) -> Float {
+        let land = islandLand(p)
+        let patches = fbm(p / 380 + SIMD2(8.8, 1.4), 4)
+        return smooth(0.05, 0.09, land + 0.04 * patches) * smooth(180, 240, simd_length(p - target))
     }
 
-    static func glacierCrevasse(_ p: SIMD2<Float>) -> Float {
-        let sl = valleyCoords(p)
-        let s = sl.x, l = sl.y
-        if abs(l) > glacierHalfWidth { return 0 }
-        let wobble = 6 * noise(p / 70) + 3 * noise(p / 23)
-        let segments = smooth(-0.25, 0.15, noise(SIMD2(s / 16, l / 45) + SIMD2(7, 3)))
-        let width = 1 + 0.6 * noise(SIMD2(s / 16, l / 30))
-        let transverse = smooth(-1900, -1500, s) * smooth(-500, -800, s) * segments
-        let t = abs(fract((s + wobble) / 16) - 0.5) * 16 / width
-        let edge = smooth(420, 560, abs(l))
-        let diag = (s + abs(l)) * 0.7071
-        let e = abs(fract((diag + wobble) / 22) - 0.5) * 22
-        let patchZone = smooth(0.15, 0.3, fbm(p / 400 + SIMD2(5.5, 3.2), 3)) * smooth(150, 260, simd_length(p - target))
-        let c = max(transverse * smooth(1.6, 0.9, t), max(edge, patchZone) * segments * smooth(1.3, 0.7, e / width))
-        return c * smooth(150, 200, simd_length(p - target))
-    }
-
-    @inline(__always)
     static func fract(_ x: Float) -> Float { x - x.rounded(.down) }
 
     // MARK: - 火山
@@ -312,7 +292,7 @@ enum TerrainField {
         case .grassland: return grasslandHeight(p)
         case .alpine: return alpineHeight(p)
         case .snow: return snowHeight(p)
-        case .glacier: return glacierHeight(p)
+        case .island: return islandHeight(p)
         case .volcano: return volcanoHeight(p)
         case .atoll: return 0
         }
@@ -329,10 +309,9 @@ enum TerrainField {
             if alpineStreamDistance(valleyCoords(p)) < 5 { return .water }
             if alpineForest(p, h) > 0.5 { return .forest }
             return nil
-        case .glacier:
-            let sl = valleyCoords(p)
-            if glacierLake(p) < 0.92 && sl.x > glacierLakeS - 100 { return .water }
-            if glacierCrevasse(p) > 0.5 { return .crevasse }
+        case .island:
+            if h < 0.3 { return .water }
+            if islandForest(p) > 0.5 { return .forest }
             return nil
         case .volcano:
             if h < 0.5 { return .water }

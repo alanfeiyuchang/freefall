@@ -1,19 +1,19 @@
 #pragma once
 #include "Common.h"
 
-// 地形场景的高度和地面类型：草原、高山、雪山、冰川、火山（环礁是平的海，不走这里）。
+// 地形场景的高度和地面类型：草原、高山、雪山、海岛、火山（环礁是平的海，不走这里）。
 // 高度是程序生成的函数：GPU 用它画地形网格、生成高度图（云被山挡住、山的影子）；
-// Swift 的 TerrainField.swift 逐行照抄了一份，CPU 用它判断落地、撞山、掉进河里 / 树林 / 岩浆 / 冰裂缝。
+// Swift 的 TerrainField.swift 逐行照抄了一份，CPU 用它判断落地、撞山、掉进河里 / 海里 / 树林 / 岩浆。
 // **改这里必须同步改那边**（tools/render-check 的 terrain 模式会比对两边的高度）。
 //
 // 所有地形场景共用一个着陆点：靶在地面坐标 LZ_TARGET，开伞点大约在 (0, -100)，从开伞点到靶的方向是 VALLEY_DIR。
-// 山谷、河、冰川都顺着这个方向摆，正常开伞以后顺着谷飞就能到靶。
+// 山谷、河都顺着这个方向摆，正常开伞以后顺着谷飞就能到靶。
 
 #define SCENE_ATOLL 0
 #define SCENE_GRASSLAND 1
 #define SCENE_ALPINE 2
 #define SCENE_SNOW 3
-#define SCENE_GLACIER 4
+#define SCENE_ISLAND 4
 #define SCENE_VOLCANO 5
 
 #define LZ_TARGET float2(380.0f, -620.0f)
@@ -132,7 +132,7 @@ static inline float dzElevation(int scene) {
     case SCENE_GRASSLAND: return 240.0f;
     case SCENE_ALPINE: return 1150.0f;
     case SCENE_SNOW: return 2750.0f;
-    case SCENE_GLACIER: return 1935.0f;
+    case SCENE_ISLAND: return 3.5f;
     case SCENE_VOLCANO: return 620.0f;
     default: return 0.0f;
     }
@@ -239,67 +239,37 @@ static inline float snowHeight(float2 p) {
     return h;
 }
 
-// MARK: - 冰川：一条从上游流下来的冰川，中间有暗色的中碛，上游有冰瀑和裂缝区，下游是冰湖
+// MARK: - 海岛：四面环海的热带小岛（和 Swift 的 TerrainField.islandHeight 逐行对应）
 
-static inline float glacierFloor(float s) { return 1900.0f + 0.05f * max(-s, 0.0f) + 0.00003f * s * s * step(s, 0.0f) - 0.045f * max(s, 0.0f); }
+#define ISLAND_CENTER float2(1250.0f, 150.0f)
+#define ISLAND_AXES float2(1330.0f, 1050.0f)
 
-#define GLACIER_HALF_WIDTH 720.0f
-#define GLACIER_LAKE_S 1350.0f
-
-/// 冰湖：< 0.92 是水（椭圆加噪声的湖岸）
-static inline float glacierLake(float2 p) {
-    float2 sl = valleyCoords(p);
-    float2 d = (sl - float2(GLACIER_LAKE_S + 380.0f, 0.0f)) / float2(430.0f, 620.0f);
-    return length(d) + 0.22f * tNoise(p / 260.0f + float2(4.0f, 1.0f));
+/// 离海岸多远（按岛的半轴归一化）：> 0 在岛上，< 0 在海里
+static inline float islandLand(float2 p) {
+    float2 q = (valleyCoords(p) - ISLAND_CENTER) / ISLAND_AXES;
+    float r = length(p - LZ_TARGET);
+    return 1.0f - length(q) + 0.07f * tFbm(p / 700.0f + float2(3.1f, 7.7f), 4) * tSmooth(250.0f, 700.0f, r);
 }
 
-
-static inline float glacierHeight(float2 p) {
-    float2 sl = valleyCoords(p);
-    float s = sl.x, l = sl.y;
-    float floorH = glacierFloor(s);
-    // 冰面横截面微微拱起，边上是侧碛的土垄
-    float across = l / GLACIER_HALF_WIDTH;
-    float ice = 35.0f * (1.0f - across * across) * step(abs(across), 1.0f);
-    float m = (abs(l) - GLACIER_HALF_WIDTH - 40.0f) / 60.0f;
-    float moraine = 28.0f * precise::exp(-m * m);
-    float lp = max(abs(l) - GLACIER_HALF_WIDTH - 60.0f, 0.0f);
-    float wall = 2400.0f * (1.0f - precise::exp(-precise::pow(lp / 1100.0f, 1.6f)));
-    float steep = tSmooth(0.0f, 450.0f, lp);
-    float mountains = tEroded(p / 2600.0f + float2(1.9f, 6.6f), 10);
-    float h = floorH + ice + moraine + wall + mountains * mix(8.0f, 1000.0f, steep)
-            + 1.2f * tFbm(p / 90.0f, 3) * (1.0f - steep);
-    // 冰瀑：上游一段坡陡了，冰面一棱一棱的（横向的裂缝把冰切成冰塔）
-    h += 6.0f * tSmooth(-1700.0f, -1300.0f, s) * tSmooth(-700.0f, -1000.0f, s) * abs(precise::sin(s / 9.0f))
-       * step(abs(across), 1.0f);
+static inline float islandHeight(float2 p) {
+    float land = islandLand(p);
+    float sea = -0.6f - 1.2f * tSmooth(-0.005f, -0.06f, land) - 42.0f * tSmooth(-0.11f, -0.2f, land)
+              + 0.6f * tFbm(p / 60.0f, 3);
+    float hills = 470.0f * precise::pow(tSmooth(0.1f, 0.75f, land), 1.3f)
+                * (0.75f + 0.45f * tEroded(p / 1300.0f + float2(5.5f, 2.5f), 7));
+    float ground = 2.6f * tSmooth(-0.01f, 0.03f, land) + 1.5f * tSmooth(0.03f, 0.12f, land) + hills
+                 + 0.5f * tFbm(p / 45.0f, 3);
+    float h = mix(sea, ground, tSmooth(-0.012f, 0.004f, land));
     float r = length(p - LZ_TARGET);
-    h = mix(1900.0f + 35.0f * (1.0f - across * across) + 0.3f * tFbm(p / 40.0f, 3), h, tSmooth(80.0f, 220.0f, r));
-    // 冰湖：冰川末端前面，湖岸弯弯曲曲
-    float lake = tSmooth(1.0f, 0.82f, glacierLake(p));
-    h = mix(h, min(h, glacierFloor(GLACIER_LAKE_S) - 25.0f), lake);
+    h = mix(h, 3.5f + 0.25f * tFbm(p / 40.0f, 3), (1.0f - tSmooth(70.0f, 190.0f, r)) * tSmooth(0.0f, 0.02f, land));
     return h;
 }
 
-/// 冰裂缝（> 0.5 算裂缝）：冰瀑那一段横贯整条冰川，两边边缘斜着裂；着陆区附近 150 米内没有
-static inline float glacierCrevasse(float2 p) {
-    float2 sl = valleyCoords(p);
-    float s = sl.x, l = sl.y;
-    if (abs(l) > GLACIER_HALF_WIDTH) return 0.0f;
-    float wobble = 6.0f * tNoise(p / 70.0f) + 3.0f * tNoise(p / 23.0f);
-    // 裂缝一段一段的（几十米长），宽窄不一
-    float segments = tSmooth(-0.25f, 0.15f, tNoise(float2(s / 16.0f, l / 45.0f) + float2(7.0f, 3.0f)));
-    float width = 1.0f + 0.6f * tNoise(float2(s / 16.0f, l / 30.0f));
-    // 冰瀑区：横向裂缝，间距 16 米左右
-    float transverse = tSmooth(-1900.0f, -1500.0f, s) * tSmooth(-500.0f, -800.0f, s) * segments;
-    float t = abs(fract((s + wobble) / 16.0f) - 0.5f) * 16.0f / width;
-    // 边缘：斜 45° 往上游的裂缝
-    float edge = tSmooth(420.0f, 560.0f, abs(l));
-    float diag = (s + abs(l)) * 0.7071f;
-    float e = abs(fract((diag + wobble) / 22.0f) - 0.5f) * 22.0f;
-    // 再零散加一片：下游中间一块受挤压的区域
-    float patchZone = tSmooth(0.15f, 0.3f, tFbm(p / 400.0f + float2(5.5f, 3.2f), 3)) * tSmooth(150.0f, 260.0f, length(p - LZ_TARGET));
-    float c = max(transverse * tSmooth(1.6f, 0.9f, t), max(edge, patchZone) * segments * tSmooth(1.3f, 0.7f, e / width));
-    return c * tSmooth(150.0f, 200.0f, length(p - LZ_TARGET));
+/// 雨林（> 0.5 算树林）：沙滩后面一条之外全是；靶周围两百米是一片空地
+static inline float islandForest(float2 p) {
+    float land = islandLand(p);
+    float patches = tFbm(p / 380.0f + float2(8.8f, 1.4f), 4);
+    return tSmooth(0.05f, 0.09f, land + 0.04f * patches) * tSmooth(180.0f, 240.0f, length(p - LZ_TARGET));
 }
 
 // MARK: - 火山：破火山口（一大片平地，四周是陡的口壁），里面一座正在喷的小火山锥，熔岩往外流
@@ -365,7 +335,7 @@ static inline float terrainHeight(int scene, float2 p) {
     case SCENE_GRASSLAND: return grasslandHeight(p);
     case SCENE_ALPINE: return alpineHeight(p);
     case SCENE_SNOW: return snowHeight(p);
-    case SCENE_GLACIER: return glacierHeight(p);
+    case SCENE_ISLAND: return islandHeight(p);
     case SCENE_VOLCANO: return volcanoHeight(p);
     default: return 0.0f;
     }
@@ -382,12 +352,10 @@ static inline int terrainHazard(int scene, float2 p, float h) {
         if (alpineStreamDistance(valleyCoords(p)) < 5.0f) return MAT_WATER;
         if (alpineForest(p, h) > 0.5f) return MAT_FOREST;
         return 0;
-    case SCENE_GLACIER: {
-        float2 sl = valleyCoords(p);
-        if (glacierLake(p) < 0.92f && sl.x > GLACIER_LAKE_S - 100.0f) return MAT_WATER;
-        if (glacierCrevasse(p) > 0.5f) return MAT_CREVASSE;
+    case SCENE_ISLAND:
+        if (h < 0.3f) return MAT_WATER;
+        if (islandForest(p) > 0.5f) return MAT_FOREST;
         return 0;
-    }
     case SCENE_VOLCANO:
         if (h < 0.5f) return MAT_WATER;
         if (volcanoLava(p)) return MAT_LAVA;

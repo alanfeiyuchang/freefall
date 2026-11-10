@@ -806,20 +806,20 @@ fragment float4 helmetHudFragment(HudOut in [[stage_in]],
                                   constant PanelUniforms &P [[buffer(1)]],
                                   constant FrameUniforms &F [[buffer(2)]],
                                   texture2d<float> art [[texture(0)]]) {
-    constexpr sampler mipped(filter::linear, mip_filter::linear, address::clamp_to_zero);
+    constexpr sampler mipped(filter::linear, mip_filter::linear, address::clamp_to_zero, max_anisotropy(4));
     float2 uv = in.uv;
-    float4 base = art.sample(mipped, uv, level(0.0f));
-    float4 bloom = art.sample(mipped, uv, level(3.0f)) * 0.8f + art.sample(mipped, uv, level(5.0f)) * 0.7f;
+    // 贴图按两倍分辨率画的：按屏幕上的大小自动选 mip，字边干净不闪（第一版固定取第 0 级，加上很强的辉光和扫描线，看着发糊）
+    float4 base = art.sample(mipped, uv);
+    float4 bloom = art.sample(mipped, uv, level(4.0f)) * 0.3f + art.sample(mipped, uv, level(6.0f)) * 0.2f;
     float boot = P.up.w;
     // 开机：上面先亮；亮的边界扫过一道亮线，刚亮起来的那几行闪一闪
     float front = boot * 1.25f - 0.1f;
     float shown = smoothstep(front + 0.02f, front - 0.02f, uv.y);
     float scanBand = exp(-abs(uv.y - front) * 60.0f) * step(boot, 0.999f);
     float flicker = boot < 1.0f ? 0.75f + 0.25f * step(0.5f, fract(sin(floor(F.camera.y * 30.0f) * 91.7f) * 437.5f)) : 1.0f;
-    float scanlines = 0.9f + 0.1f * sin(uv.y * 1800.0f);
     float3 glow = bloom.rgb * float3(0.55f, 0.9f, 1.0f);
-    float3 color = (base.rgb * scanlines + glow) * shown * flicker + float3(0.4f, 0.85f, 1.0f) * scanBand * 0.6f;
-    float alpha = max(base.a, saturate(bloom.a * 0.45f)) * shown * flicker + scanBand * 0.3f;
+    float3 color = (base.rgb + glow) * shown * flicker + float3(0.4f, 0.85f, 1.0f) * scanBand * 0.6f;
+    float alpha = max(base.a, saturate(bloom.a * 0.3f)) * shown * flicker + scanBand * 0.3f;
     float k = F.camera.z;
     if (alpha * k < 0.004f) discard_fragment();
     return float4(color * k, saturate(alpha) * k);

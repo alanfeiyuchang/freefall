@@ -21,14 +21,9 @@ struct BodyLayout {
         translation(anchor) * simd_float4x4(simd_quatf(angle: yaw, axis: SIMD3(0, 1, 0)))
     }
 
-    /// 开伞拉环：左右大臂前面各一个（side -1 左、1 右），拉哪个都行（见 Gear.ringRest）
-    func ringRest(_ side: Float) -> SIMD3<Float> { place(Gear.ringRest(side)) }
     /// 左右操纵环：挂在后背带上，垂到下巴两侧前方
     var toggleRest: (SIMD3<Float>, SIMD3<Float>) {
         (place(SIMD3(-0.27, -0.07, -0.15)), place(SIMD3(0.27, -0.07, -0.15)))
-    }
-    var shoulders: (SIMD3<Float>, SIMD3<Float>) {
-        (place(SIMD3(-0.17, -0.22, 0.04)), place(SIMD3(0.17, -0.22, 0.04)))
     }
     /// 背带上端（伞绳汇到这里）
     var links: (SIMD3<Float>, SIMD3<Float>) {
@@ -36,10 +31,20 @@ struct BodyLayout {
     }
 }
 
+/// 开伞拉环在小臂上的挂法（SceneObjects.ringMount）：rest 环的中心，toward 从环指向布片（拴钢索的那头），
+/// facing 环面的法线，tab 布片的中心，normal 小臂表面朝外的方向
+struct RingMount {
+    var rest: SIMD3<Float>
+    var toward: SIMD3<Float>
+    var facing: SIMD3<Float>
+    var tab: SIMD3<Float>
+    var normal: SIMD3<Float>
+}
+
 /// 身体朝哪：身体没有追踪，只能按头和手猜。
 /// - 只转头的时候身体不动；头转出去超过 40°，身体被带着转到 40° 以内；头一直偏着，身体几秒内慢慢跟过去。
 /// - 两只手都在面前时，身体大致朝着两只手中间（手一般在身体前面），跟得快一些，也不按头的角度硬拽。
-/// - 伞下身体挂在伞绳上，锁回正前方（和伞同一个朝向）。
+/// - 伞下身体挂在伞绳上，伸缩带、操纵环锁回正前方（和伞同一个朝向）；袖子另用一份不锁的（人在椅子上转了，肩膀也要跟着转）。
 struct BodyYaw {
     private(set) var yaw: Float = 0
     private var started = false
@@ -78,7 +83,7 @@ struct BodyYaw {
 
 /// 手的抓握判定和「手里抓着什么」。真机上每帧用 ARKit 的手更新；离屏测试直接摆状态。
 struct Interaction {
-    /// handle(0) 左大臂的拉环，handle(1) 右大臂的
+    /// handle(0) 左小臂上的拉环（右手拉），handle(1) 右小臂上的（左手拉）
     enum Target: Equatable { case bar, handle(Int), leftToggle, rightToggle }
 
     enum Event: Equatable {
@@ -100,8 +105,12 @@ struct Interaction {
 
     var left = Hand()
     var right = Hand()
-    /// 两个开伞拉环现在的位置（0 左、1 右；被抓着时跟着手；拉出来的那个松手后是 nil = 扔掉了）
+    /// 两个开伞拉环现在的位置（0 左小臂、1 右小臂；被抓着时跟着手；那只手追踪不到、或者拉出来的那个松手后是 nil）
     var rings: [SIMD3<Float>?] = [nil, nil]
+    /// 两个拉环挂在小臂上的位置（那只手追踪不到时是 nil；正被拉着的那个留着最后一次的位置）
+    var mounts: [RingMount?] = [nil, nil]
+    /// 真手藏起来画手套时，拉环挂在袖子外面（远一点）
+    var gloved = true
     var handlePulled = false
     /// 拉开伞的是哪个环
     var pulledRing: Int?
@@ -110,6 +119,9 @@ struct Interaction {
     var toggles: (SIMD3<Float>, SIMD3<Float>)?
     var brakeLeft: Float = 0
     var brakeRight: Float = 0
+    /// 抓着操纵环往前推了多少（0…1）：俯冲
+    var diveLeft: Float = 0
+    var diveRight: Float = 0
 
     /// 手是不是在抓：捏住（拇指尖碰食指尖）或者握拳，带一点迟滞避免抖动。返回抓的点。
     static func grasp(_ h: HandPose, wasGrasping: Bool) -> (Bool, SIMD3<Float>) {
@@ -129,7 +141,15 @@ struct Interaction {
 
     mutating func update(hands: [HandPose], layout: BodyLayout, bar: Bar?, timeline: JumpTimeline) -> [Event] {
         var events: [Event] = []
-        let rests = [layout.ringRest(-1), layout.ringRest(1)]
+        for i in 0..<2 {
+            let held = left.holding == .handle(i) || right.holding == .handle(i)
+            if let arm = hands.first(where: { $0.isLeft == (i == 0) }) {
+                mounts[i] = SceneObjects.ringMount(arm, gloved: gloved)
+            } else if !held {
+                mounts[i] = nil
+            }
+        }
+        let rests = mounts.map { $0?.rest }
         for i in 0..<2 where rings[i] == nil && pulledRing != i { rings[i] = rests[i] }
         let restToggles = layout.toggleRest
         if toggles == nil { toggles = restToggles }
@@ -157,11 +177,9 @@ struct Interaction {
                    point.y > bar.bottom, point.y < bar.top {
                     hand.holding = .bar
                     events.append(.grabbedBar)
-                } else if timeline.phase == .freefall,
-                          let i = (0..<2).min(by: { a, b in
-                              (rings[a].map { distance(point, $0) } ?? .infinity) < (rings[b].map { distance(point, $0) } ?? .infinity)
-                          }), let ring = rings[i], distance(point, ring) < 0.1 {
-                    hand.holding = .handle(i)
+                } else if timeline.phase == .freefall, let ring = rings[isLeft ? 1 : 0], distance(point, ring) < 0.1 {
+                    // 只能用另一只手去拉（左手拉右小臂上的，右手拉左小臂上的）
+                    hand.holding = .handle(isLeft ? 1 : 0)
                     events.append(.grabbedHandle)
                 } else if let toggles, timeline.phase == .opening || timeline.phase == .canopy {
                     let dl = distance(point, toggles.0), dr = distance(point, toggles.1)
@@ -177,7 +195,7 @@ struct Interaction {
 
             switch hand.holding {
             case .handle(let i):
-                let rest = rests[i]
+                guard let rest = rests[i] else { break }
                 let pull = distance(point, rest)
                 if pull > 0.2 {
                     if timeline.canDeploy {
@@ -215,6 +233,12 @@ struct Interaction {
             // 往下拉 32 厘米 = 拉到底
             brakeLeft = min(max((restToggles.0.y - t.0.y) / 0.32, 0), 1)
             brakeRight = min(max((restToggles.1.y - t.1.y) / 0.32, 0), 1)
+            // 抓着往前推：超过 8 厘米开始，推出 28 厘米到底（松手就没了）
+            let forward = layout.direction(SIMD3(0, 0, -1))
+            let heldL = left.holding == .leftToggle || right.holding == .leftToggle
+            let heldR = left.holding == .rightToggle || right.holding == .rightToggle
+            diveLeft = heldL ? min(max((dot(t.0 - restToggles.0, forward) - 0.08) / 0.2, 0), 1) : 0
+            diveRight = heldR ? min(max((dot(t.1 - restToggles.1, forward) - 0.08) / 0.2, 0), 1) : 0
         }
         return events
     }

@@ -46,8 +46,6 @@ struct SceneObjects {
     var inCabin: Float = 0
     /// 每帧重建的网格（舞台空间）：伞衣（布料模拟）、滑块、拉手、操纵环、表、落地后垂下来的伸缩带
     var meshVertices: [MeshVertex] = []
-    /// 背带（Gear.harness，身体坐标）→ 舞台：BodyLayout.transform（跟着身体的位置和朝向）；nil 不画
-    var harnessTransform: simd_float4x4?
     /// 伸缩带、连接环、导向环（Gear.risers）：开伞以后、落地以前
     var risersTransform: simd_float4x4?
     /// 绳子：伞绳、刹车绳
@@ -77,6 +75,8 @@ struct SceneObjects {
         var timeline: JumpTimeline
         var eyeHeight: Float
         var layout: BodyLayout
+        /// 袖子用的身体朝向（伞下不锁）；nil 就用 layout
+        var armsLayout: BodyLayout?
         var interaction: Interaction
         var cloth: CanopyCloth?
         var hands: [HandPose]
@@ -105,15 +105,21 @@ struct SceneObjects {
         let anchor = layout.anchor
         o.meshVertices.reserveCapacity(24_000)
 
-        // 背带（含拉手口袋、钢索软管）：落地以前一直在，低头看得到。出了舱门身体才在阳光下投影子
-        if timeline.phase != .done { o.harnessTransform = layout.transform }
+        // 没有背带（低头会挡视线）。出了舱门身体才在阳光下投影子
         if timeline.phase != .cabin { o.bodyTop = layout.place(SIMD3(0, 0.1, 0.05)) }
 
-        // 开伞拉环（左右大臂各一个）：报警时红色握把一闪一闪；拉出来的那个连着一截钢索，松手就扔掉了
+        // 开伞拉环（左右小臂各一个，用另一只手拉）：报警时红色握把一闪一闪；拉出来的那个连着一截钢索，松手就扔掉了
         if timeline.phase != .done {
             let glow: Float = timeline.alarmLevel > 0 ? 1 + 1.6 * max(0, sin(Float(timeline.time) * 12)) : 1
-            for (i, ring) in input.interaction.rings.enumerated() {
-                if let ring { Gear.pullRing(&o.meshVertices, side: i == 0 ? -1 : 1, at: ring, layout: layout, glow: glow) }
+            let ia = input.interaction
+            for i in 0..<2 {
+                // 挂的位置按这一帧的手算（离屏测试的手没经过交互也画得出来）；手追踪不到时用交互里留下的
+                let arm = input.hands.first { $0.isLeft == (i == 0) }
+                guard let mount = arm.map({ ringMount($0, gloved: input.gloves) }) ?? ia.mounts[i] else { continue }
+                let held = ia.left.holding == .handle(i) || ia.right.holding == .handle(i)
+                // 被抓着、拉出来了：跟着交互里的位置（拉出来扔掉了是 nil）；平时挂在小臂上
+                let position = held || ia.pulledRing == i ? ia.rings[i] : mount.rest
+                if let position { Gear.pullRing(&o.meshVertices, mount: mount, at: position, glow: glow) }
             }
         }
 
@@ -185,9 +191,7 @@ struct SceneObjects {
         for hand in input.hands {
             if input.gloves {
                 o.gloveHands.append(hand)
-                // 肩膀：眼睛往下 24 厘米、往外 19 厘米、稍微往后
-                let shoulder = layout.place(SIMD3((hand.isLeft ? -1 : 1) * 0.19, -0.24, 0.05))
-                Gear.sleeve(&o.meshVertices, hand: hand, shoulder: shoulder)
+                Gear.sleeve(&o.meshVertices, hand: hand, shoulder: shoulder(hand, layout: input.armsLayout ?? layout))
             } else if input.proxyHands {
                 o.roundCones += proxyHandCones(hand)
             }
@@ -235,6 +239,31 @@ struct SceneObjects {
         c.append(RoundCone(w, 0.018, h[.thumbKnuckle], 0.013, skinColor, .soft))
         c.append(RoundCone(h[.forearmWrist], 0.024, h[.forearmArm], 0.032, skinColor, .soft))
         return c
+    }
+
+    /// 肩膀（袖子上臂那一段的终点）。身体没有追踪：先按身体朝向放在脖子两侧（眼睛往下 24 厘米、往外 19 厘米、稍微往后），
+    /// 再在 -35° ~ +45° 里绕着脖子往这只手的手肘那边转（真的肩膀离手肘不会超过一条上臂）。
+    /// 这样身体朝向猜错了（比如人在椅子上转了半圈），袖子也只是肩膀那头歪一点，不会横过脸前。
+    static func shoulder(_ hand: HandPose, layout: BodyLayout) -> SIMD3<Float> {
+        let side: Float = hand.isLeft ? -1 : 1
+        let center = layout.place(SIMD3(0, -0.24, 0.05))
+        let out = layout.direction(SIMD3(side, 0, 0)), forward = layout.direction(SIMD3(0, 0, -1))
+        let f = wristFrame(hand)
+        let elbow = hand[.forearmWrist] + f.towardElbow * 0.27
+        let e = elbow - center
+        var angle = atan2(dot(e, forward), dot(e, out))          // 0 = 正侧面，正 = 往前
+        angle = min(max(angle, -35 * .pi / 180), 45 * .pi / 180)
+        return center + (out * cos(angle) + forward * sin(angle)) * 0.19
+    }
+
+    /// 开伞拉环挂在小臂上的位置：腕关节往手肘 13 厘米、手背那一侧（袖子外面，或者真手的皮肤外面）
+    static func ringMount(_ hand: HandPose, gloved: Bool) -> RingMount {
+        let f = wristFrame(hand)
+        let surface: Float = gloved ? 0.045 : 0.03
+        let tab = f.center + f.towardElbow * 0.10 + f.back * (surface + 0.004)
+        // 环立在布片上，往手腕那边歪 30°（另一只手的手指从手腕那头勾进去）
+        let toward = normalize(-f.back * 0.87 + f.towardElbow * 0.5)
+        return RingMount(rest: tab - toward * (0.028 + 0.004), toward: toward, facing: f.side, tab: tab, normal: f.back)
     }
 
     /// 手腕上的一个局部坐标系：表戴在腕关节往手肘方向 3 厘米处；back 指向手背，side 指向手腕侧面。

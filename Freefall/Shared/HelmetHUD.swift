@@ -5,18 +5,22 @@ import Metal
 import simd
 
 /// 头盔上的 HUD（钢铁侠那种）：视野左右两侧各一块发光的读数，下沿一行提示，跟着头走（头锁定）。
-/// 视野中间 ±24° 完全空着，不挡你看外面；底色是透明的，只有细线、刻度和字，背后垫一圈很淡的暗晕保证在白云前面也看得清。
+/// 两块读数在左右 17° 处（第一版放在 31°，太靠外，眼睛转过去还在镜片糊的地方），视野中间 ±10° 空着不挡；
+/// 每块背后垫一层很淡的暗底，在白云前面也看得清。默认关着，点一下手腕上的表开 / 关；下沿的提示开场就有。
 ///
-/// 读数用 CoreGraphics 画到贴图上（一秒 15 次，三张贴图轮流用），GPU 上再加发光（取模糊的 mip）、扫描线、
-/// 开机时从上往下一行行亮起来的动画（Freefall.metal 的 helmetHudFragment）。
+/// 读数用 CoreGraphics 按两倍分辨率画到贴图上（一秒 15 次，三张贴图轮流用；在后台线程画，一次 4~5 毫秒，
+/// 放在渲染线程上会让那一帧超时），GPU 上按 mip 采样（不闪），
+/// 加一点发光、开机时从上往下扫出来的动画（Freefall.metal 的 helmetHudFragment）。
 ///
 /// - 左边：阶段、高度（英尺，大字）、离地高度、下落速度、一条随高度滚动的高度带（3,500 ft 以下橙色、2,000 ft 以下红色）
 /// - 右边：航向罗盘（N/E/S/W 跟着你转），靶的方位（橙色菱形）和距离、地速；伞下还有左右操纵环拉了多少；舱里是跳伞灯
-/// - 报警时左边一块「PULL」一闪一闪，指向两边大臂上的拉环
+/// - 报警时左边一块「PULL」一闪一闪，指向两只小臂上的拉环
 final class HelmetHUD: @unchecked Sendable {
     struct State {
-        /// 开场实体化完成以后才开机：0…1 开机动画，< 0 不显示
+        /// 两侧的读数：0…1 开机动画，< 0 不显示（HUD 关着，或者开场还没长完）
         var boot: Float = -1
+        /// 下沿的提示：0…1 开场的淡入，< 0 不显示
+        var hintBoot: Float = -1
         var phase = "STANDBY"
         var altitudeFeet = 0
         var aglMeters = 0
@@ -28,6 +32,8 @@ final class HelmetHUD: @unchecked Sendable {
         var targetDistance: Int?
         var groundSpeedKmh = 0
         var brakes = SIMD2<Float>(0, 0)
+        /// 往前推（俯冲）了多少，0…1
+        var dive: Float = 0
         var underCanopy = false
         var inCabin = false
         var greenLight = false
@@ -42,17 +48,28 @@ final class HelmetHUD: @unchecked Sendable {
     }
 
     private let device: MTLDevice
-    private static let distance: Float = 1.25
-    // 贴图尺寸（像素）和在 1.25 米外的大小（米）：一个像素约 0.66 毫米，和头显的像素差不多一比一
-    private static let sideSize = (width: 512, height: 600, meters: SIMD2<Float>(0.34, 0.40))
-    private static let hintSize = (width: 1200, height: 150, meters: SIMD2<Float>(0.80, 0.10))
+    private static let distance: Float = 1.2
+    /// 画图用的坐标（逻辑像素）和在 1.2 米外的大小（米）；贴图按 scale 倍画，比头显的像素密一些，按 mip 采样
+    private static let sideSize = (width: 512, height: 600, meters: SIMD2<Float>(0.27, 0.316))
+    private static let hintSize = (width: 1200, height: 150, meters: SIMD2<Float>(0.66, 0.0825))
+    private static let scale = 2
+    /// 两块读数的位置（度）：左右偏多少、往下多少；提示在正前方往下多少
+    private static let sideYaw: Float = 17, sidePitch: Float = -8, hintPitch: Float = -15
+    /// 开场握扶杆的提示（右边画一串往右跳的箭头，指向扶杆）
+    static let barPrompt = "伸出右手，握住右边的黄色扶杆"
 
     private var leftTextures: [MTLTexture] = [], rightTextures: [MTLTexture] = [], hintTextures: [MTLTexture] = []
+    /// 现在显示的是哪一组贴图
     private var slot = 0
     private var lastDraw: Float = -1
     private var lastHint = ""
+    private var lastSides = false
     private(set) var dirty: [MTLTexture] = []
-    private var state = State()
+    /// 后台画图：一次只画一组；画好的那一组下一帧换上来
+    private let drawQueue = DispatchQueue(label: "com.feiyuchang.freefall.hud", qos: .userInitiated)
+    private let lock = NSLock()
+    private var drawing = false
+    private var finished: (slot: Int, sides: Bool, hint: Bool)?
 
     init(device: MTLDevice) {
         self.device = device
@@ -62,33 +79,66 @@ final class HelmetHUD: @unchecked Sendable {
             return device.makeTexture(descriptor: d)!
         }
         for _ in 0..<3 {
-            leftTextures.append(make(Self.sideSize.width, Self.sideSize.height))
-            rightTextures.append(make(Self.sideSize.width, Self.sideSize.height))
-            hintTextures.append(make(Self.hintSize.width, Self.hintSize.height))
+            leftTextures.append(make(Self.sideSize.width * Self.scale, Self.sideSize.height * Self.scale))
+            rightTextures.append(make(Self.sideSize.width * Self.scale, Self.sideSize.height * Self.scale))
+            hintTextures.append(make(Self.hintSize.width * Self.scale, Self.hintSize.height * Self.scale))
         }
     }
 
-    /// 更新读数（一秒最多重画 15 次；提示文字变了马上重画）。返回要画的面板（头锁定，按 headFromStage 摆）。
+    /// 更新读数（一秒最多重画 15 次；提示文字变了、开关了马上重画，都在后台画）。返回要画的面板（头锁定，按 headFromStage 摆）。
+    /// dirty 是这一帧刚换上来的贴图（渲染器给它们生成 mipmap）
     func update(_ s: State, head: simd_float4x4) -> [Panel] {
-        state = s
-        guard s.boot >= 0 else { return [] }
-        if s.time - lastDraw >= 1.0 / 15 || s.hint != lastHint || lastDraw < 0 {
+        let sides = s.boot >= 0
+        let hint = s.hintBoot >= 0 && !s.hint.isEmpty
+        dirty = []
+        lock.lock()
+        let done = finished
+        finished = nil
+        let busy = drawing
+        lock.unlock()
+        if let done {
+            slot = done.slot
+            if done.sides { dirty += [leftTextures[slot], rightTextures[slot]] }
+            if done.hint { dirty.append(hintTextures[slot]) }
+        }
+        guard sides || hint else { return [] }
+        let due = s.time - lastDraw >= 1.0 / 15 || s.hint != lastHint || sides != lastSides || lastDraw < 0
+        if due, !busy {
             lastDraw = s.time
             lastHint = s.hint
-            slot = (slot + 1) % 3
-            drawLeft(leftTextures[slot])
-            drawRight(rightTextures[slot])
-            drawHint(hintTextures[slot])
-            dirty = [leftTextures[slot], rightTextures[slot], hintTextures[slot]]
-        } else {
-            dirty = []
+            lastSides = sides
+            // 画进下一组（三组轮着用：GPU 可能还在读刚换下去的那组）
+            let next = (slot + 1) % 3
+            let (left, right, hintTexture) = (leftTextures[next], rightTextures[next], hintTextures[next])
+            lock.lock()
+            drawing = true
+            lock.unlock()
+            drawQueue.async { [self] in
+                if sides {
+                    drawLeft(left, s)
+                    drawRight(right, s)
+                }
+                if hint { drawHint(hintTexture, s) }
+                lock.lock()
+                finished = (next, sides, hint)
+                drawing = false
+                lock.unlock()
+            }
         }
-        let boot = min(max(s.boot, 0), 1)
-        return [
-            Panel(texture: leftTextures[slot], uniforms: place(head, yaw: -31, pitch: -4, size: Self.sideSize.meters, boot: boot)),
-            Panel(texture: rightTextures[slot], uniforms: place(head, yaw: 31, pitch: -4, size: Self.sideSize.meters, boot: boot)),
-            Panel(texture: hintTextures[slot], uniforms: place(head, yaw: 0, pitch: -27, size: Self.hintSize.meters, boot: boot)),
-        ]
+        var panels: [Panel] = []
+        if sides {
+            let boot = min(s.boot, 1)
+            panels.append(Panel(texture: leftTextures[slot], uniforms: place(head, yaw: -Self.sideYaw, pitch: Self.sidePitch,
+                                                                              size: Self.sideSize.meters, boot: boot)))
+            panels.append(Panel(texture: rightTextures[slot], uniforms: place(head, yaw: Self.sideYaw, pitch: Self.sidePitch,
+                                                                               size: Self.sideSize.meters, boot: boot)))
+        }
+        if hint {
+            panels.append(Panel(texture: hintTextures[slot], uniforms: place(head, yaw: 0, pitch: Self.hintPitch,
+                                                                              size: Self.hintSize.meters,
+                                                                              boot: min(s.hintBoot, 1))))
+        }
+        return panels
     }
 
     /// 头锁定：面板中心在头前方（偏航、俯仰）1.25 米处，正对着眼睛
@@ -137,6 +187,7 @@ final class HelmetHUD: @unchecked Sendable {
         return width
     }
 
+    /// 按 scale 倍分辨率画：画图代码里用的是逻辑像素（贴图尺寸 ÷ scale）
     private func withContext(_ texture: MTLTexture, _ draw: (CGContext, Int, Int) -> Void) {
         let w = texture.width, h = texture.height
         var pixels = [UInt8](repeating: 0, count: w * h * 4)
@@ -145,12 +196,26 @@ final class HelmetHUD: @unchecked Sendable {
                                       space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
             ctx.setLineCap(.round)
-            draw(ctx, w, h)
+            ctx.scaleBy(x: CGFloat(Self.scale), y: CGFloat(Self.scale))
+            draw(ctx, w / Self.scale, h / Self.scale)
         }
         pixels.withUnsafeBytes { raw in
             texture.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: raw.baseAddress!,
                             bytesPerRow: w * 4)
         }
+    }
+
+    /// 面板的底：很淡的暗色圆角矩形 + 一圈细边（y 向下的坐标）
+    private func plate(_ ctx: CGContext, _ rect: CGRect, h: Int) {
+        let r = CGRect(x: rect.minX, y: CGFloat(h) - rect.maxY, width: rect.width, height: rect.height)
+        let path = CGPath(roundedRect: r, cornerWidth: 22, cornerHeight: 22, transform: nil)
+        ctx.addPath(path)
+        ctx.setFillColor(CGColor(red: 0.0, green: 0.025, blue: 0.05, alpha: 0.42))
+        ctx.fillPath()
+        ctx.addPath(path)
+        ctx.setStrokeColor(CGColor(red: 0.42, green: 0.88, blue: 1.0, alpha: 0.22))
+        ctx.setLineWidth(1.5)
+        ctx.strokePath()
     }
 
     /// y 向下的线段
@@ -163,15 +228,15 @@ final class HelmetHUD: @unchecked Sendable {
         ctx.strokePath()
     }
 
-    private var accent: CGColor {
-        switch state.alarm {
+    private func accent(_ s: State) -> CGColor {
+        switch s.alarm {
         case 2: return Self.red
         case 1: return Self.amber
         default: return Self.cyan
         }
     }
 
-    private var blink: Bool { state.alarm == 0 || sin(state.time * (state.alarm == 2 ? 18 : 7)) > -0.2 }
+    private func blink(_ s: State) -> Bool { s.alarm == 0 || sin(s.time * (s.alarm == 2 ? 18 : 7)) > -0.2 }
 
     private static func grouped(_ n: Int) -> String {
         let f = NumberFormatter()
@@ -180,31 +245,32 @@ final class HelmetHUD: @unchecked Sendable {
         return f.string(from: NSNumber(value: n)) ?? String(n)
     }
 
-    private func drawLeft(_ texture: MTLTexture) {
-        let s = state
+    private func drawLeft(_ texture: MTLTexture, _ s: State) {
         withContext(texture) { ctx, w, h in
-            let a = accent
+            let a = accent(s)
+            let blink = blink(s)
+            plate(ctx, CGRect(x: 18, y: 18, width: 476, height: 564), h: h)
             // 阶段：一个小方块 + 字距拉开的英文
             ctx.setFillColor(a)
-            ctx.fill(CGRect(x: 40, y: CGFloat(h) - 52, width: 10, height: 10))
-            text(ctx, s.phase, x: 60, y: 52, size: 26, color: a, tracking: 4, height: h)
-            line(ctx, 40, 70, 330, 70, h: h, color: Self.cyanDim, width: 1.5)
-            line(ctx, 40, 70, 90, 70, h: h, color: a, width: 3)
+            ctx.fill(CGRect(x: 40, y: CGFloat(h) - 56, width: 12, height: 12))
+            text(ctx, s.phase, x: 62, y: 56, size: 30, color: a, tracking: 4, height: h)
+            line(ctx, 40, 74, 330, 74, h: h, color: Self.cyanDim, width: 1.5)
+            line(ctx, 40, 74, 90, 74, h: h, color: a, width: 3)
             // 高度
-            text(ctx, "ALT", x: 40, y: 104, size: 22, color: Self.cyanDim, tracking: 3, height: h)
+            text(ctx, "ALT", x: 40, y: 108, size: 24, color: Self.cyanDim, tracking: 3, height: h)
             let alt = Self.grouped(s.altitudeFeet)
-            let wNum = text(ctx, alt, x: 40, y: 190, size: 80, color: s.alarm > 0 && !blink ? a : Self.white, mono: true,
+            let wNum = text(ctx, alt, x: 36, y: 196, size: 88, color: s.alarm > 0 && !blink ? a : Self.white, mono: true,
                             height: h)
-            text(ctx, "FT", x: 48 + wNum, y: 186, size: 26, color: Self.cyan, tracking: 2, height: h)
+            text(ctx, "FT", x: 42 + wNum, y: 192, size: 28, color: Self.cyan, tracking: 2, height: h)
             // 离地高度、下落速度
-            text(ctx, "AGL", x: 40, y: 240, size: 22, color: Self.cyanDim, tracking: 3, height: h)
-            text(ctx, Self.grouped(s.aglMeters) + " M", x: 100, y: 242, size: 30, color: Self.white, mono: true, height: h)
-            text(ctx, "V/S", x: 40, y: 290, size: 22, color: Self.cyanDim, tracking: 3, height: h)
-            text(ctx, "▼ \(s.fallSpeedKmh) KM/H", x: 100, y: 292, size: 30, color: Self.white, mono: true, height: h)
+            text(ctx, "AGL", x: 40, y: 246, size: 24, color: Self.cyanDim, tracking: 3, height: h)
+            text(ctx, Self.grouped(s.aglMeters) + " M", x: 104, y: 249, size: 36, color: Self.white, mono: true, height: h)
+            text(ctx, "V/S", x: 40, y: 298, size: 24, color: Self.cyanDim, tracking: 3, height: h)
+            text(ctx, "▼ \(s.fallSpeedKmh) KM/H", x: 104, y: 301, size: 36, color: Self.white, mono: true, height: h)
             // 下落速度条（0…300 km/h）
             let speedFrac = CGFloat(min(Float(s.fallSpeedKmh) / 300, 1))
-            line(ctx, 40, 310, 330, 310, h: h, color: Self.cyanDim, width: 1)
-            line(ctx, 40, 310, 40 + 290 * speedFrac, 310, h: h, color: Self.cyan, width: 4)
+            line(ctx, 40, 318, 330, 318, h: h, color: Self.cyanDim, width: 1)
+            line(ctx, 40, 318, 40 + 290 * speedFrac, 318, h: h, color: Self.cyan, width: 4)
 
             // 滚动的高度带：当前高度在中间（y = 320），上下各 4,000 ft，每 500 ft 一格
             let tapeX: CGFloat = 400, top: CGFloat = 90, bottom: CGFloat = 550
@@ -221,7 +287,7 @@ final class HelmetHUD: @unchecked Sendable {
                     let color: CGColor = mark <= 2000 ? Self.red : (mark <= 3500 ? Self.amber : Self.cyan)
                     line(ctx, tapeX, y, tapeX + (major ? 26 : 14), y, h: h, color: color, width: major ? 2.5 : 1.5)
                     if mark % 2000 == 0 {
-                        text(ctx, "\(mark / 1000)K", x: tapeX + 34, y: y + 8, size: 20, color: Self.cyanDim, mono: true,
+                        text(ctx, "\(mark / 1000)K", x: tapeX + 32, y: y + 9, size: 24, color: Self.cyan, mono: true,
                              height: h)
                     }
                 }
@@ -243,42 +309,42 @@ final class HelmetHUD: @unchecked Sendable {
             ctx.addLine(to: CGPoint(x: tapeX - 30, y: CGFloat(h) - mid + 9))
             ctx.fillPath()
 
-            // 报警：PULL 一闪一闪，两个箭头指向两边大臂上的拉环
+            // 报警：PULL 一闪一闪，下面一行指向两只小臂上的拉环
             if s.alarm > 0, s.phase == "FREEFALL" {
                 if blink {
                     ctx.setStrokeColor(a)
                     ctx.setLineWidth(3)
-                    ctx.stroke(CGRect(x: 40, y: CGFloat(h) - 470, width: 290, height: 110))
-                    text(ctx, "PULL", x: 185, y: 448, size: 64, color: a, anchor: 0.5, tracking: 10, height: h)
+                    ctx.stroke(CGRect(x: 40, y: CGFloat(h) - 474, width: 290, height: 114))
+                    text(ctx, "PULL", x: 185, y: 452, size: 70, color: a, anchor: 0.5, tracking: 10, height: h)
                 }
-                text(ctx, "◀ 大臂上的拉环 ▶", x: 185, y: 512, size: 26, color: a, bold: false, anchor: 0.5, height: h)
+                text(ctx, "小臂上的拉环", x: 185, y: 520, size: 32, color: a, anchor: 0.5, height: h)
             } else {
-                text(ctx, "DEPLOY 3,500 FT", x: 40, y: 400, size: 22, color: Self.cyanDim, tracking: 2, height: h)
-                line(ctx, 40, 414, 330, 414, h: h, color: Self.cyanDim, width: 1)
+                text(ctx, "DEPLOY 3,500 FT", x: 40, y: 404, size: 24, color: Self.cyan, tracking: 2, height: h)
+                line(ctx, 40, 420, 330, 420, h: h, color: Self.cyanDim, width: 1)
                 if s.phase == "FREEFALL", s.altitudeFeet > 3500, s.fallSpeedKmh > 10 {
                     let seconds = Float(s.altitudeFeet - 3500) / 3.281 / (Float(s.fallSpeedKmh) / 3.6)
-                    text(ctx, String(format: "T-%02d S", Int(seconds)), x: 40, y: 460, size: 34, color: Self.white,
+                    text(ctx, String(format: "T-%02d S", Int(seconds)), x: 40, y: 470, size: 42, color: Self.white,
                          mono: true, height: h)
                 }
             }
         }
     }
 
-    private func drawRight(_ texture: MTLTexture) {
-        let s = state
+    private func drawRight(_ texture: MTLTexture, _ s: State) {
         withContext(texture) { ctx, w, h in
-            let a = accent
-            text(ctx, "NAV", x: 470, y: 52, size: 26, color: a, anchor: 1, tracking: 4, height: h)
+            let a = accent(s)
+            plate(ctx, CGRect(x: 18, y: 18, width: 476, height: 564), h: h)
+            text(ctx, "NAV", x: 452, y: 56, size: 30, color: a, anchor: 1, tracking: 4, height: h)
             ctx.setFillColor(a)
-            ctx.fill(CGRect(x: 476, y: CGFloat(h) - 52, width: 10, height: 10))
-            line(ctx, 180, 70, 472, 70, h: h, color: Self.cyanDim, width: 1.5)
-            line(ctx, 422, 70, 472, 70, h: h, color: a, width: 3)
+            ctx.fill(CGRect(x: 460, y: CGFloat(h) - 56, width: 12, height: 12))
+            line(ctx, 150, 74, 472, 74, h: h, color: Self.cyanDim, width: 1.5)
+            line(ctx, 422, 74, 472, 74, h: h, color: a, width: 3)
             let heading = (Int(s.headingDeg.rounded()) % 360 + 360) % 360
-            text(ctx, String(format: "HDG %03d°", heading), x: 470, y: 108, size: 28, color: Self.white, mono: true,
+            text(ctx, String(format: "HDG %03d°", heading), x: 470, y: 114, size: 34, color: Self.white, mono: true,
                  anchor: 1, height: h)
 
             // 罗盘：刻度、N E S W 跟着航向转，顶上一个固定的指示
-            let cx: CGFloat = 300, cy: CGFloat = 300, r: CGFloat = 150
+            let cx: CGFloat = 290, cy: CGFloat = 310, r: CGFloat = 145
             let cgCy = CGFloat(h) - cy
             ctx.setStrokeColor(Self.cyanDim)
             ctx.setLineWidth(1.5)
@@ -293,7 +359,7 @@ final class HelmetHUD: @unchecked Sendable {
                 line(ctx, x0, y0, x1, y1, h: h, color: major ? Self.cyan : Self.cyanDim, width: major ? 2.5 : 1.5)
                 if deg % 90 == 0 {
                     let label = ["N", "E", "S", "W"][deg / 90]
-                    text(ctx, label, x: cx + sin(rel) * (r - 36), y: cy - cos(rel) * (r - 36) + 10, size: 26,
+                    text(ctx, label, x: cx + sin(rel) * (r - 38), y: cy - cos(rel) * (r - 38) + 11, size: 30,
                          color: deg == 0 ? a : Self.white, anchor: 0.5, height: h)
                 }
             }
@@ -316,59 +382,82 @@ final class HelmetHUD: @unchecked Sendable {
                 line(ctx, cx + sin(rel) * 40, cy - cos(rel) * 40, cx + sin(rel) * (r - 22), cy - cos(rel) * (r - 22),
                      h: h, color: Self.amber.copy(alpha: 0.7) ?? Self.amber, width: 2)
                 ctx.setLineDash(phase: 0, lengths: [])
-                text(ctx, "TGT", x: cx, y: cy - 10, size: 22, color: Self.amber, anchor: 0.5, tracking: 3, height: h)
+                text(ctx, "TGT", x: cx, y: cy - 12, size: 24, color: Self.amber, anchor: 0.5, tracking: 3, height: h)
                 text(ctx, distance >= 1000 ? String(format: "%.1f KM", Float(distance) / 1000) : "\(distance) M",
-                     x: cx, y: cy + 28, size: 32, color: Self.white, mono: true, anchor: 0.5, height: h)
+                     x: cx, y: cy + 32, size: 40, color: Self.white, mono: true, anchor: 0.5, height: h)
             }
 
             // 下面：地速；伞下有左右操纵环拉了多少；舱里是跳伞灯
-            text(ctx, "GS", x: 180, y: 506, size: 22, color: Self.cyanDim, tracking: 3, height: h)
-            text(ctx, "\(s.groundSpeedKmh) KM/H", x: 470, y: 508, size: 30, color: Self.white, mono: true, anchor: 1,
+            text(ctx, "GS", x: 150, y: 508, size: 24, color: Self.cyanDim, tracking: 3, height: h)
+            text(ctx, "\(s.groundSpeedKmh) KM/H", x: 470, y: 511, size: 36, color: Self.white, mono: true, anchor: 1,
                  height: h)
-            line(ctx, 180, 522, 472, 522, h: h, color: Self.cyanDim, width: 1)
+            line(ctx, 150, 526, 472, 526, h: h, color: Self.cyanDim, width: 1)
             if s.underCanopy {
+                if s.dive > 0.05 {
+                    text(ctx, "DIVE", x: 150, y: 484, size: 28, color: Self.amber, tracking: 3, height: h)
+                    ctx.setFillColor(Self.amber)
+                    ctx.fill(CGRect(x: 230, y: CGFloat(h) - 478, width: 70 * CGFloat(min(s.dive, 1)), height: 10))
+                }
                 for (i, label) in ["L", "R"].enumerated() {
                     let x: CGFloat = 250 + CGFloat(i) * 130
                     let frac = CGFloat(i == 0 ? s.brakes.x : s.brakes.y)
                     ctx.setStrokeColor(Self.cyanDim)
                     ctx.setLineWidth(1.5)
-                    ctx.stroke(CGRect(x: x, y: CGFloat(h) - 584, width: 90, height: 16))
+                    ctx.stroke(CGRect(x: x, y: CGFloat(h) - 568, width: 90, height: 18))
                     ctx.setFillColor(Self.cyan)
-                    ctx.fill(CGRect(x: x + 2, y: CGFloat(h) - 582, width: 86 * frac, height: 12))
-                    text(ctx, label, x: x - 12, y: 582, size: 22, color: Self.cyan, anchor: 1, height: h)
+                    ctx.fill(CGRect(x: x + 2, y: CGFloat(h) - 566, width: 86 * frac, height: 14))
+                    text(ctx, label, x: x - 12, y: 567, size: 26, color: Self.cyan, anchor: 1, height: h)
                 }
             } else if s.inCabin {
                 ctx.setFillColor(s.greenLight ? Self.green : Self.red)
-                ctx.fillEllipse(in: CGRect(x: 182, y: CGFloat(h) - 580, width: 18, height: 18))
-                text(ctx, s.greenLight ? "JUMP  GO" : "JUMP  HOLD", x: 212, y: 578, size: 26,
+                ctx.fillEllipse(in: CGRect(x: 152, y: CGFloat(h) - 570, width: 20, height: 20))
+                text(ctx, s.greenLight ? "JUMP  GO" : "JUMP  HOLD", x: 184, y: 569, size: 30,
                      color: s.greenLight ? Self.green : Self.red, tracking: 3, height: h)
             }
         }
     }
 
-    private func drawHint(_ texture: MTLTexture) {
-        let s = state
+    private func drawHint(_ texture: MTLTexture, _ s: State) {
         withContext(texture) { ctx, w, h in
+            let accent = accent(s)
             let lines = s.hint.split(separator: "\n").map(String.init)
             guard !lines.isEmpty else { return }
-            // 两端一对括号，中间一行字（两行时上下排）
-            let size: CGFloat = lines.count > 1 ? 40 : 46
-            let font = CTFontCreateUIFontForLanguage(.system, size, "zh-Hans" as CFString)!
-            var widths: [CGFloat] = []
+            // 两端一对括号，中间一行字（两行时上下排），背后垫一层暗底
+            let size: CGFloat = lines.count > 1 ? 42 : 50
+            let font = CTFontCreateUIFontForLanguage(.emphasizedSystem, size, "zh-Hans" as CFString)!
+            var built: [(CTLine, CGFloat)] = []
             for (i, l) in lines.prefix(2).enumerated() {
                 let attributes: [NSAttributedString.Key: Any] = [
                     NSAttributedString.Key(kCTFontAttributeName as String): font,
                     NSAttributedString.Key(kCTForegroundColorAttributeName as String): i == 0 ? Self.white : Self.cyan,
                 ]
                 let line = CTLineCreateWithAttributedString(NSAttributedString(string: l, attributes: attributes))
-                let width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
-                widths.append(width)
-                let y = lines.count > 1 ? (i == 0 ? 66 : 122) : 92
+                built.append((line, CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))))
+            }
+            let half = (built.map(\.1).max() ?? 0) / 2 + 40
+            let c = CGFloat(w) / 2
+            let prompt = s.hint == Self.barPrompt
+            let extra: CGFloat = prompt ? 120 : 0
+            plate(ctx, CGRect(x: c - half - 30, y: 10, width: 2 * half + 60 + extra, height: CGFloat(h) - 20), h: h)
+            for (i, (line, width)) in built.enumerated() {
+                let y = lines.count > 1 ? (i == 0 ? 68 : 124) : 94
                 ctx.textPosition = CGPoint(x: (CGFloat(w) - width) / 2, y: CGFloat(h) - CGFloat(y))
                 CTLineDraw(line, ctx)
             }
-            let half = (widths.max() ?? 0) / 2 + 40
-            let c = CGFloat(w) / 2
+            if prompt {
+                // 开场：右边一串往右跳的箭头，指向扶杆
+                for k in 0..<3 {
+                    let alpha = 0.25 + 0.75 * max(0, sin(CGFloat(s.time) * 6 - CGFloat(k) * 0.9))
+                    let x = c + half + 14 + CGFloat(k) * 34
+                    ctx.setStrokeColor(Self.amber.copy(alpha: alpha) ?? Self.amber)
+                    ctx.setLineWidth(6)
+                    ctx.setLineJoin(.round)
+                    ctx.move(to: CGPoint(x: x, y: CGFloat(h) / 2 + 20))
+                    ctx.addLine(to: CGPoint(x: x + 18, y: CGFloat(h) / 2))
+                    ctx.addLine(to: CGPoint(x: x, y: CGFloat(h) / 2 - 20))
+                    ctx.strokePath()
+                }
+            }
             for sign: CGFloat in [-1, 1] {
                 let x = c + sign * half
                 line(ctx, x, 24, x, CGFloat(h) - 24, h: h, color: accent, width: 3)

@@ -169,17 +169,8 @@ kernel void generateSurfaceMap(texture2d<float, access::write> out [[texture(0)]
     } else if (scene == SCENE_SNOW) {
         v.b = tSmooth(0.32f, 0.4f, tFbm(p / 160.0f + float2(6.0f, 2.0f), 3))           // 雪坡上露出来的岩石
             * tSmooth(120.0f, 200.0f, length(p - LZ_TARGET));
-    } else if (scene == SCENE_GLACIER) {
-        float2 sl = valleyCoords(p);
-        v.r = sl.x > GLACIER_LAKE_S - 100.0f ? encodeEdge((glacierLake(p) - 0.92f) * 600.0f) : 1.0f;
-        // 中碛：冰面上两条暗色的碎石带，宽窄、浓淡都不均匀（碎石是一堆一堆的）
-        float w1 = 30.0f + 18.0f * tNoise(float2(sl.x / 180.0f, 1.0f));
-        float w2 = 24.0f + 14.0f * tNoise(float2(sl.x / 150.0f, 5.0f));
-        float clumps = tSmooth(-0.3f, 0.3f, tFbm(p / 35.0f + float2(9.0f, 4.0f), 3));
-        float c1 = 240.0f + 35.0f * sin(sl.x / 300.0f) + 12.0f * tNoise(p / 90.0f);
-        float c2 = 330.0f + 28.0f * sin(sl.x / 260.0f + 1.0f) + 10.0f * tNoise(p / 80.0f);
-        v.b = saturate((tSmooth(w1, w1 * 0.35f, abs(sl.y - c1)) + tSmooth(w2, w2 * 0.35f, abs(sl.y + c2)))
-                       * (0.45f + 0.55f * clumps));
+    } else if (scene == SCENE_ISLAND) {
+        v.g = islandForest(p);
     } else if (scene == SCENE_VOLCANO) {
         v.a = encodeEdge(min(lavaFlowDistance(p) - 14.0f, length(p - CONE_CENTER) - (CRATER_RADIUS - 20.0f)));
         v.b = tSmooth(0.0f, 0.12f, tFbm(p / 380.0f + float2(9.0f, 1.0f), 4));            // 老的熔岩流
@@ -264,27 +255,22 @@ static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, flo
         s.albedo = mix(rock * float3(0.9f, 0.92f, 1.0f), snowy, cover);
         s.specular = cover * 0.05f;
         s.material = cover > 0.5f ? MAT_SNOW : MAT_ROCK;
-    } else if (scene == SCENE_GLACIER) {
-        float2 sl = valleyCoords(p);
-        float across = abs(sl.y) / GLACIER_HALF_WIDTH;
-        float onIce = tSmooth(1.02f, 0.97f, across);
-        // 上游积雪区是白的，下游裸露的冰发蓝、有流动的纹
-        float accumulation = tSmooth(-700.0f, -1100.0f, sl.x);
-        float flowBands = 0.5f + 0.5f * sin(sl.y / 11.0f + 6.0f * (n1 - 0.5f));
-        float3 bareIce = float3(0.50f, 0.64f, 0.74f) * (0.92f + 0.12f * flowBands + vary * 0.3f);
-        float3 iceColor = mix(bareIce, snow, accumulation);
-        float3 debris = float3(0.14f, 0.13f, 0.12f) * (1.0f + vary);
-        iceColor = mix(iceColor, debris, sm.b * (1.0f - accumulation));
-        float crev = onIce > 0.0f ? glacierCrevasse(p) : 0.0f;
-        // 裂缝只有一两米宽：远了一个像素盖好几道，就淡成一片偏蓝的颜色（不然会闪）
-        float crevSeen = mix(tSmooth(0.3f, 0.7f, crev), crev * 0.35f, saturate(footprint / 1.2f - 0.3f));
-        iceColor = mix(iceColor, float3(0.02f, 0.07f, 0.13f), crevSeen);
-        float3 valley = mix(rock, scree, tSmooth(0.7f, 0.85f, flatness));
-        valley = mix(valley, snow, tSmooth(2700.0f, 2950.0f, h) * tSmooth(0.62f, 0.75f, flatness));
-        s.albedo = mix(valley, iceColor, onIce);
-        s.specular = onIce * (0.06f - 0.05f * accumulation);
-        s.roughness = 0.12f;
-        s.material = onIce > 0.5f ? (crev > 0.5f ? MAT_CREVASSE : MAT_ICE) : MAT_ROCK;
+    } else if (scene == SCENE_ISLAND) {
+        // 白沙滩（靠水的一条被浪打湿了发暗），后面是热带的草地，再往里是雨林；山上太陡的地方露出黑色的火山岩
+        float land = islandLand(p);
+        float3 sand = float3(0.62f, 0.57f, 0.46f) * (1.0f + vary * 0.22f);
+        float3 lawn = mix(float3(0.07f, 0.17f, 0.04f), float3(0.13f, 0.20f, 0.06f), saturate(n1 * 1.4f - 0.3f))
+                    * (1.0f + vary * 0.7f);
+        float3 jungle = float3(0.02f, 0.075f, 0.022f) * (0.5f + 1.1f * n2);
+        float3 basalt = float3(0.11f, 0.10f, 0.095f) * (1.0f + vary * 0.4f);
+        float beach = tSmooth(0.045f, 0.028f, land + (n1 - 0.5f) * 0.006f);
+        float3 ground = mix(lawn, sand, beach);
+        ground = mix(sand * 0.6f, ground, tSmooth(0.35f, 1.1f, h));
+        ground = mix(ground, jungle, tSmooth(0.35f, 0.65f, forestV));
+        ground = mix(basalt, ground, tSmooth(0.68f, 0.8f, flatness));
+        s.albedo = ground;
+        s.material = forestV > 0.5f ? MAT_FOREST : (beach > 0.5f ? MAT_SAND : MAT_GRASS);
+        if (h < 0.3f) s.material = MAT_WATER;
     } else {   // SCENE_VOLCANO
         float2 kc = float2(150.0f, -350.0f);
         float rk = length(p - kc);
@@ -371,7 +357,7 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
         bump += float3(c0 - cx, 0.0f, c0 - cz) * (fade * rough * 1.4f);
     }
     // 雪原：风吹出来的一道道雪纹（顺着风向的波纹），近处才有
-    if (scene == SCENE_SNOW || (scene == SCENE_GLACIER && valleyCoords(p).x < -900.0f)) {
+    if (scene == SCENE_SNOW) {
         float fade = saturate(3.0f / (footprint * 8.0f) - 1.0f);
         float2 wind = float2(0.8f, 0.6f);
         float phase = dot(p, wind) * 1.6f + 6.0f * (n[1] - 0.5f);
@@ -400,12 +386,30 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
     float NdotL = saturate(dot(N, sunDir));
     float3 color;
     if (s.material == MAT_WATER && onTarget < 0.5f) {
-        // 河、湖、海：和环礁的海面一样的着色；湖是冰川融水的青绿色
+        // 河、湖、海：和环礁的海面一样的着色
         float residual;
-        float2 slope = waveSlope(p, F.camera.y, footprint, noise, residual) * (scene == SCENE_VOLCANO ? 1.0f : 0.35f);
+        bool sea = scene == SCENE_VOLCANO || scene == SCENE_ISLAND;
+        float2 slope = waveSlope(p, F.camera.y, footprint, noise, residual) * (sea ? 1.0f : 0.35f);
         float3 Nw = normalize(float3(-slope.x, 1.0f, -slope.y));
-        float3 waterAlbedo = scene == SCENE_GLACIER ? float3(0.02f, 0.10f, 0.11f) : float3(0.006f, 0.02f, 0.025f);
+        float3 waterAlbedo = float3(0.006f, 0.02f, 0.025f);
+        float foam = 0.0f;
+        if (scene == SCENE_ISLAND) {
+            // 海岛：浅的礁坪透出白沙底和一丛丛珊瑚（碧绿），越深越蓝；礁边浪一阵阵碎开，岸边一条冲上沙滩的白沫
+            float depth = max(-h, 0.0f);
+            float coral = tSmooth(0.2f, 0.6f, n[0]) * tSmooth(6.0f, 1.0f, depth);
+            float3 shallow = mix(float3(0.10f, 0.42f, 0.40f), float3(0.05f, 0.22f, 0.20f), coral);
+            waterAlbedo = mix(shallow, float3(0.006f, 0.022f, 0.03f), tSmooth(1.5f, 22.0f, depth));
+            float c = (islandLand(p) + 0.115f) / 0.008f;
+            float crest = exp(-c * c) * (0.55f + 0.45f * sin(F.camera.y * 0.9f + dot(p, float2(0.03f, 0.021f)) + 6.0f * n[0]));
+            float shore = tSmooth(-0.5f, 0.1f, h) * (0.6f + 0.4f * sin(F.camera.y * 1.3f + dot(p, float2(0.05f, 0.04f))));
+            foam = saturate(max(crest, shore) * (0.6f + 0.6f * n[1]));
+        }
         color = oceanShade(Nw, rd, sunDir, dot(sunVis, float3(0.3333f)), 0.006f + residual, waterAlbedo, A, skySeaLUT);
+        if (foam > 0.0f) {
+            float3 white = float3(0.82f, 0.85f, 0.87f) / PI
+                         * (sunE * saturate(sunDir.y) * dot(sunVis, float3(0.3333f)) + skyE);
+            color = mix(color, white, foam * 0.8f);
+        }
     } else {
         // 背阴的陡坡还会被对面照亮的山坡、谷底反射一点暖光（不然阴面只剩蓝天光，发蓝发暗）
         float3 bounce = sunE * 0.12f * float3(1.0f, 0.95f, 0.85f) * saturate(1.0f - N.y) * shade.g;

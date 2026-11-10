@@ -35,6 +35,8 @@ final class JumpAudio: @unchecked Sendable {
         var reveals = 0
         /// 舱里的声音（风、发动机）有多闷 0…1：开场先像隔着墙听，飞机长出来的过程中慢慢变清楚
         var muffle: Float = 0
+        /// 点表开关 HUD：「嘀」一声
+        var taps = 0
     }
 
     private let engine = AVAudioEngine()
@@ -115,8 +117,8 @@ final class JumpDSP: @unchecked Sendable {
     // 报警
     private var alarmTime: Float = 0, alarmPhase: Float = 0
     // 一次性事件
-    private var counters = [Int](repeating: 0, count: 10)
-    private var eventTime = [Float](repeating: -1, count: 10)
+    private var counters = [Int](repeating: 0, count: 11)
+    private var eventTime = [Float](repeating: -1, count: 11)
     // 开场实体化：低沉的气流声（低通截止频率跟着波前往上走）+ 稀疏的细碎「叮」粒子 + 最后舱门那一声闷响
     private var revealLow: [Float] = [0, 0], revealLow2: [Float] = [0, 0]
     private var grainTime: [Float] = [-1, -1, -1, -1, -1, -1, -1, -1]
@@ -127,7 +129,7 @@ final class JumpDSP: @unchecked Sendable {
     private var deployLow: Float = 0, deployBand: Float = 0
     private var splashLow: Float = 0
 
-    private enum Event: Int { case ding, grab, rip, deploy, thud, crash, splash, win, fail, reveal }
+    private enum Event: Int { case ding, grab, rip, deploy, thud, crash, splash, win, fail, reveal, tap }
 
     init(sampleRate: Float) {
         self.sampleRate = sampleRate
@@ -146,7 +148,7 @@ final class JumpDSP: @unchecked Sendable {
     func render(frameCount: Int, into list: UnsafeMutablePointer<AudioBufferList>, params: JumpAudio.Params) {
         let buffers = UnsafeMutableAudioBufferListPointer(list)
         let counts = [params.dings, params.grabs, params.rips, params.deploys, params.thuds, params.crashes,
-                      params.splashes, params.wins, params.fails, params.reveals]
+                      params.splashes, params.wins, params.fails, params.reveals, params.taps]
         for i in 0..<counts.count where counts[i] != counters[i] {
             counters[i] = counts[i]
             eventTime[i] = 0
@@ -475,6 +477,10 @@ final class JumpDSP: @unchecked Sendable {
         }
         if let t = advance(.ding, 1.2) {
             out += (sin(2 * .pi * 880 * t) + 0.5 * sin(2 * .pi * 1320 * t)) * exp(-t * 5) * 0.12
+        }
+        if let t = advance(.tap, 0.14) {           // 点表：电子表那种短促的两声「嘀嘀」
+            let local = t < 0.07 ? t : t - 0.07
+            if local < 0.035 { out += sin(2 * .pi * 3200 * t) * sin(.pi * local / 0.035) * 0.05 }
         }
         if let t = advance(.grab, 0.25) {          // 金属扶杆、拉环：短促的「叮」
             out += (sin(2 * .pi * 1850 * t) + 0.6 * sin(2 * .pi * 2770 * t)) * exp(-t * 28) * 0.08

@@ -106,6 +106,9 @@ struct JumpTimeline {
     /// 左右操纵环拉下去多少（0…1）
     private(set) var brakeLeft: Double = 0
     private(set) var brakeRight: Double = 0
+    /// 左右往前推了多少（0…1）：像拉前组伸缩带，伞头往下栽，俯冲
+    private(set) var diveLeft: Double = 0
+    private(set) var diveRight: Double = 0
     /// 舞台地板在眼睛下面多少（渲染器在对齐头部时设）：落地时你的脚踩在地上
     var eyeHeight: Double = 1.6
 
@@ -171,6 +174,12 @@ struct JumpTimeline {
     mutating func setBrakes(left: Double, right: Double) {
         brakeLeft = min(max(left, 0), 1)
         brakeRight = min(max(right, 0), 1)
+    }
+
+    /// 左右往前推了多少（0…1）
+    mutating func setDive(left: Double, right: Double) {
+        diveLeft = min(max(left, 0), 1)
+        diveRight = min(max(right, 0), 1)
     }
 
     /// 落地以后捏一下手指：提前结束
@@ -259,18 +268,22 @@ struct JumpTimeline {
         altitude -= verticalSpeed * dt
     }
 
-    /// 伞下：两边拉环的差决定转向，一起拉减速（快落地时自动拉平飘一下）
+    /// 伞下：两边拉环的差决定转向，一起拉减速；两手往前推（真的跳伞是拉下两根前组伸缩带）伞头往下栽，
+    /// 下沉和前进都变快，用来在高度太多时掉得快一点，不用一直滑翔；只推一边是往那边俯冲着转（快落地时自动拉平飘一下）
     private mutating func fly(_ dt: Double) {
         let both = min(brakeLeft, brakeRight)
+        let dive = min(diveLeft, diveRight)
         let targetTurn = Self.maxTurnRate * (brakeLeft - brakeRight)       // 拉左边往左转（heading 增大）
+            + Self.maxTurnRate * 0.7 * (diveLeft - diveRight)
         // 伞转起来、停下来都有个过程：两级一阶滞后（S 形），角加速度是慢慢起来的，不会一拉就猛地开始转。
         // VR 里转向晕主要来自角加速度的突变，转得匀不怎么晕
         let k = min(dt / 0.32, 1)
         turnRateMid += (targetTurn - turnRateMid) * k
         turnRate += (turnRateMid - turnRate) * k
         heading += turnRate * dt
-        var speed = Self.canopySpeed * (1 - 0.45 * both)
-        var sink = Self.canopySink * (1 - 0.25 * both) + abs(turnRate) / Self.maxTurnRate * 2.5
+        var speed = Self.canopySpeed * (1 - 0.45 * both) * (1 + 0.3 * dive)
+        var sink = Self.canopySink * (1 - 0.25 * both) * (1 + 0.8 * dive) + abs(turnRate) / Self.maxTurnRate * 2.5
+            + abs(diveLeft - diveRight) * 2
         // 离地 6 米以内自动拉平：下沉和前进都慢下来，落地是轻轻一顿
         let flare = 1 - min(max(terrainClearance / 6, 0), 1)
         sink += (1.5 - sink) * flare

@@ -37,11 +37,25 @@ final class JumpSession {
     static let mistPuffs: Float = 180
     /// 淋湿的程度 0…1：在雨里、云里越来越湿，出来以后被风吹得慢慢干一点
     private(set) var wetness: Double = 0
+    /// 戴手套（拉环挂在袖子外面）、高度表戴在哪只手腕上：渲染器开场设一次
+    var gloved = true { didSet { interaction.gloved = gloved } }
+    var watchOnLeft = true
+    /// 头盔 HUD 开没开（两侧的读数和提示）。默认关，点一下手腕上的表开 / 关；舱里开场的提示（握住扶杆、绿灯松手）不管开没开都显示。
+    /// 没有手部追踪时点不了表，一直开着
+    var hudOn = false {
+        didSet { if hudOn != oldValue { hudToggleTime = timeline.time } }
+    }
+    private var hudToggleTime: Double = -100
+    /// 另一只手的食指正碰着表盘（离开 5 厘米以后才能再点一次）
+    private var touchingWatch = false
+    /// 点了几次表（给声音用）
+    private(set) var watchTaps = 0
 
     init(timeline: JumpTimeline = JumpTimeline(), realHands: Bool, autopilot: Autopilot?) {
         self.timeline = timeline
         self.realHands = realHands
         self.autopilot = autopilot
+        self.hudOn = !realHands
     }
 
     /// 舞台空间里起跳那一刻眼睛的高度（落地时脚踩在地上）
@@ -59,11 +73,13 @@ final class JumpSession {
               layout: BodyLayout) {
         let events = interaction.update(hands: realHands ? hands : [], layout: layout, bar: timeline.bar,
                                         timeline: timeline)
+        if handsDriving { checkWatchTap(hands) }
         if autopilot != nil {
             autopilot!.drive(&timeline)
         } else if realHands {
             for event in events { handle(event) }
             timeline.setBrakes(left: Double(interaction.brakeLeft), right: Double(interaction.brakeRight))
+            timeline.setDive(left: Double(interaction.diveLeft), right: Double(interaction.diveRight))
         } else {
             pinchControls(began: pinchesBegan, touches: touches)
         }
@@ -71,7 +87,6 @@ final class JumpSession {
         if pinchesBegan > 0, timeline.phase == .landed { timeline.requestEnd() }
 
         timeline.step(dt)
-        updateDisplayHeading()
 
         let v = timeline.rainVelocity
         rainOffset += SIMD3(Float(v.x), Float(v.y), Float(v.z)) * Float(dt)
@@ -101,6 +116,26 @@ final class JumpSession {
                                                     brakeRight: Float(timeline.brakeRight),
                                                     turnRate: Float(timeline.turnRate), landed: landed,
                                                     verticalSpeed: Float(timeline.verticalSpeed)))
+        }
+    }
+
+    /// 点表：另一只手的食指尖碰到表盘（表盘边上 1.5 厘米以内），开 / 关 HUD。表跟着飞机一起长出来，长完才点得到
+    private func checkWatchTap(_ hands: [HandPose]) {
+        guard timeline.phase != .cabin || timeline.revealProgress >= 1,
+              let watch = hands.first(where: { $0.isLeft == watchOnLeft }),
+              let finger = hands.first(where: { $0.isLeft != watchOnLeft }) else {
+            touchingWatch = false
+            return
+        }
+        let (center, _, _, size) = SceneObjects.watchPlacement(watch, gloved: gloved)
+        let d = distance(finger[.indexTip], center)
+        let free = (finger.isLeft ? interaction.left : interaction.right).holding == nil
+        if !touchingWatch, free, d < size / 2 + 0.015 {
+            touchingWatch = true
+            hudOn.toggle()
+            watchTaps += 1
+        } else if touchingWatch, d > size / 2 + 0.05 {
+            touchingWatch = false
         }
     }
 
@@ -150,23 +185,14 @@ final class JumpSession {
 
     // MARK: - 给画面用
 
-    /// 分段转向（防晕）：画面上的航向一次跳 15°，中间不连续转（飞行本身照样连续转）
-    var snapTurns = false
-    static let snapStep = 15.0 * .pi / 180
-    /// 画面用的航向：平滑转向时就是真的航向；分段转向时差出一格才跳一格
-    private(set) var displayHeading: Double = 0
+    /// 画面用的航向（世界绕你转多少）
+    var displayHeading: Double { timeline.heading }
 
-    private func updateDisplayHeading() {
-        let h = timeline.heading
-        guard snapTurns else { displayHeading = h; return }
-        let steps = ((h - displayHeading) / Self.snapStep).rounded(.towardZero)
-        if steps != 0 { displayHeading += steps * Self.snapStep }
-    }
-
-    func objects(layout: BodyLayout, hands: [HandPose], watchOnLeft: Bool, proxyHands: Bool = false,
-                 gloves: Bool = false, head: SIMD3<Float>? = nil) -> SceneObjects {
+    /// armsLayout：袖子用的身体朝向（伞下不锁，人转了肩膀也跟着转），nil 就用 layout
+    func objects(layout: BodyLayout, armsLayout: BodyLayout? = nil, hands: [HandPose], watchOnLeft: Bool,
+                 proxyHands: Bool = false, gloves: Bool = false, head: SIMD3<Float>? = nil) -> SceneObjects {
         var o = SceneObjects.make(SceneObjects.Input(timeline: timeline, eyeHeight: layout.anchor.y, layout: layout,
-                                                     interaction: interaction,
+                                                     armsLayout: armsLayout, interaction: interaction,
                                                      cloth: timeline.sinceDeploy == nil ? nil : cloth,
                                                      hands: hands, watchOnLeft: watchOnLeft, proxyHands: proxyHands,
                                                      gloves: gloves))
@@ -198,13 +224,19 @@ final class JumpSession {
         return o
     }
 
-    /// 头盔 HUD 的读数（HelmetHUD）：开场实体化完成以后才开机
+    /// 头盔 HUD 的读数（HelmetHUD）。两侧的读数要 HUD 开着、开场实体化也完成了才开机（1.2 秒的开机动画），关掉时 0.3 秒收回去；
+    /// 下沿那一行提示开场就在（舱里的提示一直显示，其他的跟着 HUD 开关）
     var hudState: HelmetHUD.State {
         let t = timeline
         var h = HelmetHUD.State()
-        if let grabbed = t.barGrabbedTime {
-            h.boot = Float((t.time - grabbed - JumpTimeline.revealDuration) / 1.4)
+        if hudOn {
+            // 开场实体化完成以后才开机（直接从空中开始的没有开场）
+            let ready = t.barGrabbedTime.map { $0 + JumpTimeline.revealDuration } ?? (t.phase == .cabin ? .infinity : 0)
+            h.boot = Float((t.time - max(hudToggleTime, ready)) / 1.2)
+        } else if t.time - hudToggleTime < 0.3 {
+            h.boot = Float(1 - (t.time - hudToggleTime) / 0.3)
         }
+        h.hintBoot = Float(min(t.time / 0.6, 1))
         switch t.phase {
         case .cabin: h.phase = t.greenLight ? "READY" : "STANDBY"
         case .exit: h.phase = "EXIT"
@@ -227,12 +259,25 @@ final class JumpSession {
         }
         h.groundSpeedKmh = Int(length(t.velocity) * 3.6)
         h.brakes = SIMD2(Float(t.brakeLeft), Float(t.brakeRight))
+        h.dive = Float(max(t.diveLeft, t.diveRight))
         h.underCanopy = t.phase == .opening || t.phase == .canopy
         h.inCabin = t.phase == .cabin
         h.greenLight = t.greenLight
-        h.hint = hint
+        h.hint = hudHint
         h.time = Float(t.time)
         return h
+    }
+
+    /// HUD 下沿那一行：舱里的提示（握住扶杆、绿灯松手）一直有，HUD 关着时长完以后再加一行「点一下手表」（点过一次就不提醒了）；
+    /// 出了舱门的提示跟着 HUD 开关
+    var hudHint: String {
+        let t = timeline
+        var lines: [String] = []
+        if t.phase == .cabin || hudOn, !hint.isEmpty { lines.append(hint) }
+        if !hudOn, handsDriving, watchTaps == 0, t.phase == .cabin, t.revealProgress >= 1 {
+            lines.append("点一下手表，打开 HUD")
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// 浮在面前的提示（空 = 不显示）
@@ -241,7 +286,7 @@ final class JumpSession {
         switch t.phase {
         case .cabin:
             if t.barGrabbedTime == nil {
-                return usesRealHands ? "伸出右手，握住右边的黄色扶杆" : "捏住手指 = 握住扶杆"
+                return usesRealHands ? HelmetHUD.barPrompt : "捏住手指 = 握住扶杆"
             }
             if !t.greenLight {
                 // 飞机正在长出来：别打扰，松手了就提醒再抓住
@@ -254,7 +299,7 @@ final class JumpSession {
         case .freefall:
             if let until = tooEarlyUntil, t.time < until { return "还没到开伞高度\n等手表报警再拉" }
             if t.alarmLevel > 0 {
-                return usesRealHands ? "开伞！\n抓住大臂上的红色拉环，往外拉（左右都行）" : "开伞！捏一下手指"
+                return usesRealHands ? "开伞！\n用另一只手抓住小臂上的红色拉环，往外拉" : "开伞！捏一下手指"
             }
             if let left = t.leftRampTime, t.time - left < 6 { return "手表在 3,500 英尺报警，那时再开伞" }
             return ""
@@ -262,7 +307,8 @@ final class JumpSession {
             let (clock, distance) = t.targetBearing
             let bearing = distance < 25 ? "靶就在你下面" : "靶在 \(clock) 点钟方向 · \(Int(distance / 10) * 10) 米"
             if let since = t.sinceDeploy, since < 14 {
-                let how = usesRealHands ? "拉下左 / 右操纵环转向，两边一起拉减速" : "捏住往下拉：左手左转，右手右转"
+                let how = usesRealHands ? "拉下左 / 右操纵环转向，两边一起拉减速，两手往前推俯冲"
+                    : "捏住往下拉：左手左转，右手右转"
                 return how + "\n" + bearing
             }
             // 山区：脚下的地面比高度表的读数近得多，快撞上了
@@ -274,7 +320,9 @@ final class JumpSession {
             }
             // 高度管理：直飞还能飞多远（和自动驾驶一样估），比离靶远太多就提醒先飞过去再掉头
             let reach = JumpTimeline.canopySpeed * max(t.heightAboveGround - 6, 0) / JumpTimeline.canopySink + 15
-            if distance < 300, reach > distance + 150 { return bearing + "\n高度还多：先飞过靶，再掉头回来" }
+            if distance < 300, reach > distance + 150 {
+                return bearing + (usesRealHands ? "\n高度还多：两手往前推俯冲，或者先飞过靶再掉头" : "\n高度还多：先飞过靶，再掉头回来")
+            }
             if reach < distance - 30 { return bearing + "\n高度不够了，对准靶直飞" }
             return bearing
         case .landed, .done:

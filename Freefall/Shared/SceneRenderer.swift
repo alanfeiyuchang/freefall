@@ -100,8 +100,6 @@ final class SceneRenderer: @unchecked Sendable {
     private var meshBufferIndex = 0
     private static let maxMeshVertices = 40_000
     /// 身上不动的装备（背带、伸缩带）：启动时生成一次，画的时候平移到身体的位置
-    private let harnessMesh: MTLBuffer
-    private let harnessVertexCount: Int
     private let risersMesh: MTLBuffer
     private let risersVertexCount: Int
     /// 手套（苹果示例的模型，换成跳伞配色）；资源缺了就是 nil，戴手套时什么都不画
@@ -283,10 +281,7 @@ final class SceneRenderer: @unchecked Sendable {
             lineBuffers.append(device.makeBuffer(length: MemoryLayout<LineSegment>.stride * Self.maxLines,
                                                  options: .storageModeShared)!)
         }
-        let harness = Gear.harness, risers = Gear.risers
-        harnessVertexCount = harness.count
-        harnessMesh = device.makeBuffer(bytes: harness, length: MemoryLayout<MeshVertex>.stride * harness.count,
-                                        options: .storageModeShared)!
+        let risers = Gear.risers
         risersVertexCount = risers.count
         risersMesh = device.makeBuffer(bytes: risers, length: MemoryLayout<MeshVertex>.stride * risers.count,
                                        options: .storageModeShared)!
@@ -876,7 +871,6 @@ final class SceneRenderer: @unchecked Sendable {
         }
 
         if let plane = objects.planeTransform { draw(planeMesh, count: planeVertexCount, model: plane) }
-        if let model = objects.harnessTransform { draw(harnessMesh, count: harnessVertexCount, model: model) }
         if let model = objects.risersTransform { draw(risersMesh, count: risersVertexCount, model: model) }
 
         if !objects.meshVertices.isEmpty {
