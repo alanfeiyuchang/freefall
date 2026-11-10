@@ -2,6 +2,7 @@
 #include "Noise.h"
 #include "Atmosphere.h"
 #include "Clouds.h"
+#include "Objects.h"
 
 // 每帧：
 //   1. computeSkyViewLUT     — 按你现在的高度重算天空视图表（192×108，很便宜）
@@ -380,12 +381,12 @@ fragment CloudOut cloudResolveFragment(VOut in [[stage_in]],
     float2 screen = screenPosition(physical, layer, F.camera.w > 0.5f, rateMap);
     Ray r = viewRay(screen, views[layer], 0.0f);
     float3 p = r.origin + r.direction * (depthKm * 1000.0f);
-    p.y += TU.motion.x;                 // 你掉了多少，上一帧舞台里的同一点就高多少
+    p += TU.motion.xyz;                 // 你掉了多少、往哪边滑了多少，上一帧舞台里的同一点就差多少
     float4 clip = prevViews[layer].viewProjection * float4(p, 1.0f);
     float2 ndc = clip.xy / max(clip.w, 1e-6f);
     float2 prevScreen = prevViews[layer].viewport.xy
                       + float2(ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f) * prevViews[layer].viewport.zw;
-    float2 prevPhysical = screenToPhysical(prevScreen, layer, TU.motion.y > 0.5f, prevRateMap);
+    float2 prevPhysical = screenToPhysical(prevScreen, layer, TU.motion.w > 0.5f, prevRateMap);
     float2 prevPixel = prevPhysical * F.clouds.x;
     float2 size = float2(history.get_width(), history.get_height());
     bool valid = TU.pattern.w > 0.5f && clip.w > 0.0f && all(prevPixel >= 0.5f) && all(prevPixel <= size - 0.5f);
@@ -443,6 +444,25 @@ static inline float2 waveSlope(float2 xz, float time, float footprint, texture3d
         }
     }
     return slope;
+}
+
+/// B 样条双三次采样（4 次双线性）：环礁图被放大几十倍看时，双线性的等值线是一格一格的台阶，这个是平滑的
+static inline float4 sampleBicubic(texture2d<float> tex, float2 uv) {
+    float2 size = float2(tex.get_width(), tex.get_height());
+    float2 p = uv * size - 0.5f;
+    float2 f = fract(p);
+    float2 i = floor(p);
+    float2 w0 = (1.0f - f) * (1.0f - f) * (1.0f - f) / 6.0f;
+    float2 w1 = (4.0f - 6.0f * f * f + 3.0f * f * f * f) / 6.0f;
+    float2 w2 = (1.0f + 3.0f * f + 3.0f * f * f - 3.0f * f * f * f) / 6.0f;
+    float2 w3 = f * f * f / 6.0f;
+    float2 g0 = w0 + w1, g1 = w2 + w3;
+    float2 h0 = (w1 / g0) - 1.0f + i + 0.5f, h1 = (w3 / g1) + 1.0f + i + 0.5f;
+    float4 a = tex.sample(linearClamp, float2(h0.x, h0.y) / size, level(0));
+    float4 b = tex.sample(linearClamp, float2(h1.x, h0.y) / size, level(0));
+    float4 c = tex.sample(linearClamp, float2(h0.x, h1.y) / size, level(0));
+    float4 d = tex.sample(linearClamp, float2(h1.x, h1.y) / size, level(0));
+    return g0.y * (g0.x * a + g1.x * b) + g1.y * (g0.x * c + g1.x * d);
 }
 
 static inline float3 oceanShade(float3 N, float3 rd, float3 sunDir, float shadow, float m2, float3 waterAlbedo,
@@ -512,7 +532,7 @@ fragment SceneOut sceneFragment(VOut in [[stage_in]],
         float2 slope = waveSlope(xz + F.ground.xz, F.camera.y, footprint, waveNoise, residual);
         float3 sphereN = float3(xz.x / EARTH_R, 1.0f, xz.y / EARTH_R);
         float3 N = normalize(sphereN + float3(-slope.x, 0.0f, -slope.y));
-        float od = cloudShadow.sample(linearRepeat, xz / WEATHER_TILE + 0.5f, level(0)).r;
+        float od = cloudShadow.sample(linearRepeat, (xz + F.ground.xz) / WEATHER_TILE + 0.5f, level(0)).r;
         float shadow = exp(-od * F.clouds.z * 0.5f);
 
         // 水下的颜色：深海往上散出来的光 + 浅处的白沙底（红光被水吸收得最快，越浅越青绿）
@@ -520,19 +540,26 @@ fragment SceneOut sceneFragment(VOut in [[stage_in]],
         float land = 0.0f, vegetation = 0.0f, surf = 0.0f;
         float2 atollUV = (xz + F.ground.xz - ATOLL_CENTER) / ATOLL_SIZE + 0.5f;
         if (all(atollUV > 0.0f) && all(atollUV < 1.0f)) {
-            float4 atoll = atollMap.sample(linearClamp, atollUV, level(0));
+            float4 atoll = sampleBicubic(atollMap, atollUV);
             float depth = ATOLL_MAX_DEPTH * atoll.g * atoll.g;
             const float3 absorption = float3(0.45f, 0.065f, 0.035f);   // 每米
             waterAlbedo += float3(0.55f, 0.6f, 0.55f) * exp(-2.0f * absorption * depth);
-            land = atoll.r;
-            vegetation = atoll.b;
-            surf = atoll.a;
+            // 环礁图一格 7.8 米，低空近看边缘是糊的：用细节噪声把沙洲、植被、浪花的边打碎
+            float2 g = xz + F.ground.xz;
+            float detail = waveNoise.sample(linearRepeat, float3(g.x / 40.0f, 0.37f, g.y / 40.0f), level(0)).g;
+            float canopyNoise = waveNoise.sample(linearRepeat, float3(g.x / 13.0f, 0.71f, g.y / 13.0f), level(0)).r;
+            float jitter = (detail - 0.55f) * 0.5f;
+            land = smoothstep(0.38f, 0.62f, atoll.r + jitter);
+            vegetation = smoothstep(0.35f, 0.65f, atoll.b + jitter * 1.3f) * (0.75f + 0.5f * canopyNoise);
+            surf = saturate(atoll.a * (1.0f + jitter * 2.0f));
         }
         float3 surface = oceanShade(N, rd, sunDir, shadow, 0.006f + residual, waterAlbedo, A, skySeaLUT);
         if (land + surf > 0.0f) {
             // 沙洲和白浪：漫反射（沙滩、椰林、浪花）
             float3 E = A.sunAtSea.rgb * shadow * saturate(dot(sphereN, sunDir)) + A.skyIrradianceSea.rgb;
-            float3 landAlbedo = mix(float3(0.62f, 0.56f, 0.44f), float3(0.08f, 0.15f, 0.05f), vegetation);
+            // 沙滩；椰林一团一团深浅不一（树冠之间有阴影）
+            float3 forest = float3(0.07f, 0.15f, 0.045f) * (0.6f + 0.8f * saturate(vegetation - 0.25f));
+            float3 landAlbedo = mix(float3(0.62f, 0.56f, 0.44f), forest, saturate(vegetation * 1.3f));
             surface = mix(surface, landAlbedo * E / PI, land);
             surface = mix(surface, float3(0.75f) * E / PI, surf * (1.0f - land));
         }
@@ -585,24 +612,45 @@ vertex HudOut hudVertex(uint vid [[vertex_id]],
 fragment float4 hudFragment(HudOut in [[stage_in]],
                             constant FrameUniforms &F [[buffer(1)]],
                             texture2d<float> atlas [[texture(0)]]) {
+    bool watch = F.hudStyle.x > 0.5f;          // 手腕上的圆表盘；否则是前方的圆角面板
     float aspect = F.hudCenter.w / F.hudRight.w;
     float2 p = in.uv * float2(aspect, 1.0f);              // 以面板高度为单位，y 向下
 
     float2 halfSize = float2(aspect, 1.0f) * 0.5f;
-    const float radius = 0.24f;
+    float radius = watch ? 0.5f : 0.24f;                   // 半径 0.5 的「圆角」就是圆
     float2 q = abs(p - halfSize) - (halfSize - radius);
     float sd = length(max(q, 0.0f)) + min(max(q.x, q.y), 0.0f) - radius;
     float aa = max(fwidth(sd), 1e-4f);
     float panel = saturate(0.5f - sd / aa);
-    float rim = saturate(1.0f - abs(sd + 0.035f) / (aa * 1.2f)) * panel;
+    float rim = saturate(1.0f - abs(sd + (watch ? 0.025f : 0.035f)) / (aa * 1.2f)) * panel;
 
-    float gh = 0.64f, gw = gh * GLYPH_ASPECT;
-    float y0 = 0.5f - gh * 0.52f;
-    float x = 0.2f;
-    float text = 0.0f;
+    // 表盘外圈的橙色弧：从 12 点顺时针，扫过的比例 = 高度 / 30,000 ft（像指针式高度表）
+    float arc = 0.0f;
+    if (watch) {
+        float2 d = p - 0.5f;
+        float angle = atan2(d.x, -d.y);                    // 12 点方向为 0，顺时针为正
+        float sweep = fract(angle / (2.0f * PI) + 1.0f);
+        float ring = saturate(1.0f - abs(length(d) - 0.43f) / 0.035f);
+        arc = ring * step(sweep, F.hudStyle.y) * smoothstep(0.0f, aa * 2.0f, F.hudStyle.y - sweep + aa);
+    }
+
+    // 文字：先量总宽度再居中
+    float gh = watch ? 0.22f : 0.64f, gw = gh * GLYPH_ASPECT;
+    float y0 = 0.5f - gh * (watch ? 0.45f : 0.52f);
+    uint glyphs[9];
+    float total = 0.0f;
+    uint count = 0;
     for (uint i = 0; i < 9; i++) {
         uint g = i < 8 ? (F.hudGlyphs[i / 4] >> ((i % 4) * 8)) & 0xFFu : 255u;
         if (g == 255u) g = 11u;                             // 数字写完接「ft」
+        glyphs[count++] = g;
+        total += g == 10u ? gw * 0.36f : gw * 0.86f;
+        if (g == 11u) break;
+    }
+    float x = watch ? 0.5f * aspect - total * 0.5f : 0.2f;
+    float text = 0.0f;
+    for (uint i = 0; i < count; i++) {
+        uint g = glyphs[i];
         bool comma = g == 10u;
         float advance = comma ? gw * 0.36f : gw * 0.86f;
         float cellX = x - (comma ? (gw - advance) * 0.5f : 0.0f);
@@ -611,12 +659,13 @@ fragment float4 hudFragment(HudOut in [[stage_in]],
             float2 auv = float2((float(g) + local.x) / GLYPH_CELLS, local.y);
             text = max(text, atlas.sample(linearClamp, auv, level(0)).r);
         }
-        if (g == 11u) break;
         x += advance;
     }
 
     float opacity = F.hudUp.w * F.camera.z;
-    float alpha = max(panel * 0.42f, max(text, rim * 0.5f)) * opacity;
-    float3 rgb = (text + rim * 0.5f * (1.0f - text)) * opacity;   // 预乘，白字
+    float background = watch ? 0.92f : 0.42f;              // 表盘是实心的黑表面
+    float alpha = max(panel * background, max(max(text, arc), rim * 0.5f)) * opacity;
+    const float3 orange = float3(1.0f, 0.42f, 0.08f);
+    float3 rgb = (text + rim * (watch ? 0.35f : 0.5f) * (1.0f - text) + arc * orange * (1.0f - text)) * opacity;
     return float4(rgb, alpha);
 }

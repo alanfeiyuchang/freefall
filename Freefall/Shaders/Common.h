@@ -16,19 +16,20 @@ struct ViewUniforms {
 struct FrameUniforms {
     float4 sunDirection;     // xyz 指向太阳（世界坐标，朝向和舞台一致）
     float4 camera;           // x 舞台 y 加上它 = 海拔（米），y 时间（秒），z 画面亮度（淡入淡出），w 有注视点 rate map
-    float4 ground;           // xz 海面和岛相对你的水平偏移（米），yw 未用
+    float4 ground;           // xz 你在云 / 海面坐标里的水平位置（米；云坐标原点 = 天气图中心），yw 未用
     float4 clouds;           // x 云层 pass 的分辨率比例，y 步长倍数（越大越省），z 消光系数（每米），w 覆盖率偏移
     float4 exposure;         // x 曝光，yzw 未用
     float4 hudCenter;        // 高度表中心（舞台空间），w 宽（米）
     float4 hudRight;         // 右方向，w 高（米）
     float4 hudUp;            // 上方向，w 不透明度
     uint4 hudGlyphs;         // 高度数字的字形，每字节一个（0-9 数字、10 逗号、255 结束）
+    float4 hudStyle;         // x 样式（0 前方面板，1 手腕表盘），y 表盘外圈弧的比例（高度 / 30,000 ft）
 };
 
 /// 云的时间累积（见 Freefall.metal 的 cloudResolveFragment）
 struct TemporalUniforms {
     float4 pattern;          // xy 这一帧重算的是 2×2 块里的哪个像素，z 帧序号，w 历史有效（0/1）
-    float4 motion;           // x 这一帧到上一帧的海拔差（舞台坐标要加的 y），y 有上一帧的 rate map，zw 未用
+    float4 motion;           // xyz 这一帧到上一帧你在云坐标里的位移（x、海拔、z；舞台坐标要加的量），w 有上一帧的 rate map
 };
 
 struct AtmosphereConstants {

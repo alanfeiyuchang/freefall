@@ -7,18 +7,18 @@ import simd
 ///
 /// - `-autoEnter YES`：启动后直接跳
 /// - `-mute YES`：不出风声（测试一律静音）
-/// - `-lookDown <度>` / `-turnLeft <度>`：模拟器的头不会动，用它低头 / 左转。
+/// - `-lookDown <度>` / `-lookUp <度>` / `-turnLeft <度>`：模拟器的头不会动，用它低头 / 抬头 / 左转。
 ///   参数值不能写负数：UserDefaults 会把 `-30` 当成下一个参数名，所以每个方向各用一个正数参数。
-/// - `-startAltitude <米>`：从别的高度开始（默认 9144 = 30,000 英尺）
+/// - `-startAltitude <米>`：跳过机舱，从这个高度直接开始自由落体
 /// - `-timeScale <倍>`：时间快进
 enum DebugOptions {
 #if DEBUG || targetEnvironment(simulator)
     static let autoEnter = UserDefaults.standard.bool(forKey: "autoEnter")
     static let mute = UserDefaults.standard.bool(forKey: "mute")
-    static let pitch = -Float(UserDefaults.standard.double(forKey: "lookDown"))
+    static let pitch = Float(UserDefaults.standard.double(forKey: "lookUp") - UserDefaults.standard.double(forKey: "lookDown"))
     static let yaw = Float(UserDefaults.standard.double(forKey: "turnLeft"))
-    static let startAltitude = UserDefaults.standard.object(forKey: "startAltitude") != nil
-        ? UserDefaults.standard.double(forKey: "startAltitude") : FallSimulation.startAltitude
+    static let startAltitude: Double? = UserDefaults.standard.object(forKey: "startAltitude") != nil
+        ? UserDefaults.standard.double(forKey: "startAltitude") : nil
     static let timeScale = UserDefaults.standard.object(forKey: "timeScale") != nil
         ? UserDefaults.standard.double(forKey: "timeScale") : 1
 #else
@@ -26,7 +26,7 @@ enum DebugOptions {
     static let mute = false
     static let pitch: Float = 0
     static let yaw: Float = 0
-    static let startAltitude = FallSimulation.startAltitude
+    static let startAltitude: Double? = nil
     static let timeScale: Double = 1
 #endif
 

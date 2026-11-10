@@ -7,7 +7,8 @@
 //   形状噪声（128³）：Perlin-Worley，把天气图里一团团的覆盖率侵蚀成花椰菜一样的积云。
 //   细节噪声（32³）：Worley，再啃出边缘的小卷和丝。
 // 光照：朝太阳走 6 步估光学深度，Wrenninge 的多次散射八度近似，加环境光（上方天空、下方海面反光）。
-// 云相对你不水平移动（人和云都随风漂），所以云的坐标就是以起跳点为原点的世界坐标。
+// 云坐标 = 舞台坐标 + 你在云坐标里的水平位置（F.ground.xz）：机舱里飞机以 70 m/s 掠过云层，出舱后惯性滑行，
+// 开伞后往前飞。没有单独的风：人和云都随风漂，相对位置不受风影响。
 // 单位：米。地球半径和大气模型的地面一致（6360 km），云层和海面都是同心球壳。
 
 #define EARTH_R 6360000.0f
@@ -18,8 +19,9 @@
 #define DETAIL_NOISE_SIZE 420.0f
 #define CLOUD_FAR 160000.0f
 
-// 环礁：一张 16 km 见方的图，中心在起跳点右前方约 4 km（地面坐标，见 generateAtoll）
-#define ATOLL_CENTER float2(1800.0f, -3800.0f)
+// 环礁：一张 16 km 见方的图，中心在你自由落体位置的右前方约 3.8 km（地面坐标，见 generateAtoll）。
+// 伞降往正前方飞八百多米，中途越过礁缘和一座小沙洲，最后在潟湖上空（tools/render-check 的 maps 模式能画出路线）。
+#define ATOLL_CENTER float2(1800.0f, -3350.0f)
 #define ATOLL_SIZE 16000.0f
 #define ATOLL_MAX_DEPTH 60.0f
 
@@ -167,7 +169,7 @@ static CloudHit marchClouds(float3 ro, float3 rd, float jitter, constant FrameUn
         if (t >= t1 || T < 0.02f) break;
         float fineStep = clamp(t * 0.004f, 24.0f, 400.0f) * quality;
         float coarseStep = fineStep * 3.0f;
-        float3 p = float3(ro.x + rd.x * t, heightAt(ch, mu, t), ro.z + rd.z * t);
+        float3 p = float3(ro.x + rd.x * t + F.ground.x, heightAt(ch, mu, t), ro.z + rd.z * t + F.ground.z);
         Weather w = sampleWeather(p.xz, maps.weather);
 
         if (!fine) {

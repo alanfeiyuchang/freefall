@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct FreefallApp: App {
     @State private var immersionStyle: ImmersionStyle = .full
+    private let model = AppModel.shared
 
     var body: some Scene {
         WindowGroup(id: StartView.windowID) {
@@ -13,11 +14,13 @@ struct FreefallApp: App {
 
         ImmersiveSpace(id: StartView.spaceID) {
             CompositorLayer(configuration: FallLayerConfiguration()) { layerRenderer in
-                ImmersiveRenderer.start(layerRenderer)
+                ImmersiveRenderer.start(layerRenderer, handsEnabled: AppModel.shared.handsAllowed)
             }
         }
-        // full：整个视野都是天空，看不到房间（手还是看得到的）
+        // full：整个视野都是天空，看不到房间
         .immersionStyle(selection: $immersionStyle, in: .full)
+        // 允许手部追踪时，系统不显示你的真手，换成画出来的跳伞手套；不允许就照常显示真手
+        .upperLimbVisibility(model.handsAllowed ? .hidden : .visible)
     }
 }
 

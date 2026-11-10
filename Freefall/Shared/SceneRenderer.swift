@@ -60,6 +60,18 @@ final class SceneRenderer: @unchecked Sendable {
     private let cloudResolvePipeline: MTLRenderPipelineState
     private let scenePipeline: MTLRenderPipelineState
     private let hudPipeline: MTLRenderPipelineState
+    private let meshPipeline: MTLRenderPipelineState
+    private let conePipeline: MTLRenderPipelineState
+    private let linePipeline: MTLRenderPipelineState
+    private let planeMesh: MTLBuffer
+    private let planeVertexCount: Int
+    private let canopyMesh: MTLBuffer
+    private let canopyVertexCount: Int
+    private let canopyAttachments: [SIMD3<Float>]
+    /// 手套和背带的胶囊，每帧重写；GPU 可能还在读前几帧的，轮流用
+    private var coneBuffers: [MTLBuffer] = []
+    private var coneBufferIndex = 0
+    private static let maxCones = 160
     private let alwaysWriteDepth: MTLDepthStencilState
     private let nearerDepth: MTLDepthStencilState
 
@@ -136,6 +148,34 @@ final class SceneRenderer: @unchecked Sendable {
                                            depth: depthFormat, blend: false)
         hudPipeline = try renderPipeline("hudVertex", "hudFragment", colors: [colorFormat],
                                          depth: depthFormat, blend: true)
+        meshPipeline = try renderPipeline("meshVertex", "objectFragment", colors: [colorFormat],
+                                          depth: depthFormat, blend: false)
+        conePipeline = try renderPipeline("roundConeVertex", "objectFragment", colors: [colorFormat],
+                                          depth: depthFormat, blend: false)
+        let lineDescriptor = MTLRenderPipelineDescriptor()
+        lineDescriptor.label = "lines"
+        lineDescriptor.vertexFunction = try function("lineVertex")
+        lineDescriptor.fragmentFunction = try function("lineFragment")
+        lineDescriptor.colorAttachments[0].pixelFormat = colorFormat
+        lineDescriptor.depthAttachmentPixelFormat = depthFormat
+        lineDescriptor.maxVertexAmplificationCount = maxViewCount
+        lineDescriptor.inputPrimitiveTopology = .line
+        linePipeline = try device.makeRenderPipelineState(descriptor: lineDescriptor)
+
+        let plane = ProceduralMeshes.plane()
+        planeVertexCount = plane.count
+        planeMesh = device.makeBuffer(bytes: plane, length: MemoryLayout<MeshVertex>.stride * plane.count,
+                                      options: .storageModeShared)!
+        let canopy = ProceduralMeshes.canopy()
+        canopyVertexCount = canopy.vertices.count
+        canopyMesh = device.makeBuffer(bytes: canopy.vertices,
+                                       length: MemoryLayout<MeshVertex>.stride * canopy.vertices.count,
+                                       options: .storageModeShared)!
+        canopyAttachments = canopy.attachments
+        for _ in 0..<4 {
+            coneBuffers.append(device.makeBuffer(length: MemoryLayout<RoundCone>.stride * Self.maxCones,
+                                                 options: .storageModeShared)!)
+        }
 
         let always = MTLDepthStencilDescriptor()
         always.depthCompareFunction = .always
@@ -252,6 +292,7 @@ final class SceneRenderer: @unchecked Sendable {
         var frameIndex: UInt32 = 0
         var previousViews: [ViewUniforms]?
         var previousStageToAltitude: Float = 0
+        var previousGround = SIMD2<Float>(0, 0)
         var previousRateMap: MTLBuffer?
 
         init(device: MTLDevice, width: Int, height: Int, layers: Int) {
@@ -300,6 +341,7 @@ final class SceneRenderer: @unchecked Sendable {
                 depthTexture: MTLTexture,
                 renderTargetArrayLength: Int,
                 rateMap: MTLRasterizationRateMap?,
+                objects: SceneObjects = SceneObjects(),
                 group: Int = 0) {
         let viewCount = views.count
         var views = views
@@ -321,8 +363,10 @@ final class SceneRenderer: @unchecked Sendable {
         let p = Self.pattern[Int(history.frameIndex % 4)]
         let hasHistory = history.previousViews?.count == viewCount
         temporal.pattern = SIMD4(p.x, p.y, Float(history.frameIndex % 1024), hasHistory ? 1 : 0)
-        temporal.motion = SIMD4(frame.camera.x - history.previousStageToAltitude,
-                                history.previousRateMap != nil ? 1 : 0, 0, 0)
+        temporal.motion = SIMD4(frame.ground.x - history.previousGround.x,
+                                frame.camera.x - history.previousStageToAltitude,
+                                frame.ground.z - history.previousGround.y,
+                                history.previousRateMap != nil ? 1 : 0)
         var previousViews = history.previousViews ?? views
         let previousRateBuffer = history.previousRateMap ?? emptyRateMapBuffer
         let readIndex = history.current, writeIndex = 1 - history.current
@@ -392,6 +436,7 @@ final class SceneRenderer: @unchecked Sendable {
         history.frameIndex &+= 1
         history.previousViews = views
         history.previousStageToAltitude = frame.camera.x
+        history.previousGround = SIMD2(frame.ground.x, frame.ground.z)
         history.previousRateMap = rateMap == nil ? nil : rateBuffer
 
         // 3. 天空、海面，合成云层；4. 高度表
@@ -425,6 +470,8 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setFragmentTexture(baseNoise, index: 6)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
+        encodeObjects(enc, objects: objects, views: &views, frame: &frame)
+
         if frame.hudUp.w > 0 {
             enc.setRenderPipelineState(hudPipeline)
             enc.setDepthStencilState(nearerDepth)
@@ -436,6 +483,75 @@ final class SceneRenderer: @unchecked Sendable {
         }
         enc.endEncoding()
     }
+
+    /// 飞机、伞衣和伞绳、手套和背带。都在天空和云之后画，正常做深度测试。
+    private func encodeObjects(_ enc: MTLRenderCommandEncoder, objects: SceneObjects,
+                               views: inout [ViewUniforms], frame: inout FrameUniforms) {
+        let viewCount = views.count
+        let viewsLength = MemoryLayout<ViewUniforms>.stride * viewCount
+        enc.setDepthStencilState(nearerDepth)
+        enc.setFragmentBytes(&views, length: viewsLength, index: 0)
+        enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
+        enc.setFragmentBuffer(atmosphereConstants, offset: 0, index: 2)
+
+        func uniforms(_ model: simd_float4x4) -> ObjectUniforms {
+            ObjectUniforms(model: model, params: SIMD4(objects.jumpLightGreen ? 1 : 0, objects.inCabin, 0, 0))
+        }
+
+        if let plane = objects.planeTransform {
+            var u = uniforms(plane)
+            enc.setRenderPipelineState(meshPipeline)
+            enc.setVertexBuffer(planeMesh, offset: 0, index: 0)
+            enc.setVertexBytes(&views, length: viewsLength, index: 1)
+            enc.setVertexBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 2)
+            enc.setFragmentBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 3)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: planeVertexCount)
+        }
+
+        if let canopy = objects.canopyTransform {
+            var u = uniforms(canopy)
+            enc.setRenderPipelineState(meshPipeline)
+            enc.setVertexBuffer(canopyMesh, offset: 0, index: 0)
+            enc.setVertexBytes(&views, length: viewsLength, index: 1)
+            enc.setVertexBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 2)
+            enc.setFragmentBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 3)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: canopyVertexCount)
+
+            // 伞绳：每个挂点连到同侧背带的上端
+            var points: [SIMD4<Float>] = []
+            points.reserveCapacity(canopyAttachments.count * 2)
+            for a in canopyAttachments {
+                let p = canopy * SIMD4(a, 1)
+                let link = a.x < 0 ? objects.canopyLinks.0 : objects.canopyLinks.1
+                points.append(p)
+                points.append(SIMD4(link, 1))
+            }
+            enc.setRenderPipelineState(linePipeline)
+            enc.setVertexBytes(&points, length: MemoryLayout<SIMD4<Float>>.stride * points.count, index: 0)
+            enc.setVertexBytes(&views, length: viewsLength, index: 1)
+            enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
+            enc.drawPrimitives(type: .line, vertexStart: 0, vertexCount: points.count)
+        }
+
+        let cones = objects.roundCones.prefix(Self.maxCones)
+        if !cones.isEmpty {
+            let buffer = coneBuffers[coneBufferIndex]
+            coneBufferIndex = (coneBufferIndex + 1) % coneBuffers.count
+            let pointer = buffer.contents().bindMemory(to: RoundCone.self, capacity: Self.maxCones)
+            for (i, c) in cones.enumerated() { pointer[i] = c }
+            var u = uniforms(matrix_identity_float4x4)
+            enc.setRenderPipelineState(conePipeline)
+            enc.setVertexBuffer(buffer, offset: 0, index: 0)
+            enc.setVertexBytes(&views, length: viewsLength, index: 1)
+            enc.setVertexBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 2)
+            enc.setFragmentBytes(&u, length: MemoryLayout<ObjectUniforms>.stride, index: 3)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: Self.coneVertexCount,
+                               instanceCount: cones.count)
+        }
+    }
+
+    /// 和 Objects.h 的 CONE_VERTICES 一致：(10 圈 - 1) × 12 × 6
+    private static let coneVertexCount = 9 * 12 * 6
 
     private static let rateMapBufferCount = 6
 
