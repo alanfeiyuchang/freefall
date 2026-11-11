@@ -18,6 +18,7 @@ struct FreefallApp: App {
             CompositorLayer(configuration: FallLayerConfiguration()) { layerRenderer in
                 ImmersiveRenderer.start(layerRenderer, handsEnabled: AppModel.shared.handsAllowed,
                                         watchOnLeft: AppModel.shared.watchOnLeft, gloves: AppModel.shared.gloves,
+                                        toggleSteering: AppModel.shared.toggleSteering,
                                         scene: AppModel.shared.scene)
             }
         }

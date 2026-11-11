@@ -54,7 +54,11 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var grabsHeard = 0
     private var dingSent = false
     private var bodyYaw = BodyYaw()
+    /// 每只手最后一次追踪到的姿势和时刻。一只手伸到另一只小臂上（拉拉环）时两只手在摄像头里叠在一起，
+    /// ARKit 会把被挡住的那只丢掉一阵：手套、拉环跟着一起消失，第一下就拉不到。丢了以后先按最后的姿势留着
+    private var lastHands: [Bool: (pose: HandPose, time: CFTimeInterval)] = [:]
     private var tapsHeard = 0
+    private var ringsHeard = 0
     private var revealSent = false
     private var deploySent = false
     private var landingSent = false
@@ -66,7 +70,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var lastQualityChange: CFTimeInterval = 0
     private var lastStatsLog: CFTimeInterval = 0
 
-    init(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool,
+    init(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool, toggleSteering: Bool,
          jumpScene: JumpScene) throws {
         self.layerRenderer = layerRenderer
         self.handsEnabled = handsEnabled && HandTrackingProvider.isSupported
@@ -91,15 +95,17 @@ final class ImmersiveRenderer: @unchecked Sendable {
                               autopilot: DebugOptions.autopilot ? Autopilot(deployFeet: DebugOptions.autoDeployFeet) : nil)
         session.gloved = gloves
         session.watchOnLeft = watchOnLeft
+        // 拉环转向按开始窗口里的选项（默认关）；自动驾驶靠拉环转向，一直开
+        session.toggleSteering = toggleSteering || DebugOptions.autopilot
     }
 
     @MainActor
-    static func start(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool,
+    static func start(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool, toggleSteering: Bool,
                       scene: JumpScene) {
         let renderer: ImmersiveRenderer
         do {
             renderer = try ImmersiveRenderer(layerRenderer, handsEnabled: handsEnabled, watchOnLeft: watchOnLeft,
-                                             gloves: gloves, jumpScene: scene)
+                                             gloves: gloves, toggleSteering: toggleSteering, jumpScene: scene)
         } catch {
             log.error("无法创建渲染器：\(error.localizedDescription)")
             return
@@ -229,14 +235,24 @@ final class ImmersiveRenderer: @unchecked Sendable {
         var hands: [HandPose] = []
         if handsEnabled, handTracking.state == .running {
             let (left, right) = handTracking.handAnchors(at: presentation.timeInterval)
-            if let l = Self.handPose(left, stageFromOrigin: stage) { hands.append(l) }
-            if let r = Self.handPose(right, stageFromOrigin: stage) { hands.append(r) }
+            for (isLeft, anchor) in [(true, left), (false, right)] {
+                if let pose = Self.handPose(anchor, stageFromOrigin: stage) {
+                    lastHands[isLeft] = (pose, now)
+                    hands.append(pose)
+                } else if let last = lastHands[isLeft] {
+                    // 挂着拉环的那只小臂在自由落体时多留一会儿（另一只手正盖在上面拉）；别的情况留一秒
+                    let ringArm = isLeft != watchOnLeft && timeline.phase == .freefall
+                    if now - last.time < (ringArm ? 4.0 : 1.0) { hands.append(last.pose) }
+                }
+            }
         }
 
-        // 身体（肩带、拉环、操纵环）：朝向按头和两只手猜（伞下锁正前方）；位置跟着脖子走，
+        // 身体（操纵环、连接环）：朝向按头和两只手猜；位置跟着脖子走，
         // 只转头的时候眼睛绕着脖子转，身体不跟着平移
+        // 伞下也跟着人转：人在椅子上转过去，伞、操纵环跟着转到正前方，飞的方向也跟着变
         let underCanopy = timeline.phase == .opening || timeline.phase == .canopy
-        let yaw = bodyYaw.update(head: head, headForward: headForward, hands: hands, dt: Float(dt), locked: underCanopy)
+        let yaw = bodyYaw.update(head: head, headForward: headForward, hands: hands, dt: Float(dt), locked: false,
+                                 canopy: underCanopy)
         var flatForward = SIMD3<Float>(headForward.x, 0, headForward.z)
         flatForward = length(flatForward) > 1e-3 ? normalize(flatForward) : SIMD3(0, 0, -1)
         let neck = SIMD3<Float>(head.x, eyeHeight, head.z) - flatForward * 0.09
@@ -382,6 +398,8 @@ final class ImmersiveRenderer: @unchecked Sendable {
         grabsHeard = session.grabs
         audioParams.taps += session.watchTaps - tapsHeard        // 点表开关 HUD
         tapsHeard = session.watchTaps
+        audioParams.chimes += t.ringsPassed - ringsHeard        // 穿过一个光环
+        ringsHeard = t.ringsPassed
         if t.barGrabbedTime != nil && !revealSent {        // 握住扶杆：飞机开始长出来
             revealSent = true
             audioParams.reveals += 1

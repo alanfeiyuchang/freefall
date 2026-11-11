@@ -44,7 +44,9 @@ struct RingMount {
 /// 身体朝哪：身体没有追踪，只能按头和手猜。
 /// - 只转头的时候身体不动；头转出去超过 40°，身体被带着转到 40° 以内；头一直偏着，身体几秒内慢慢跟过去。
 /// - 两只手都在面前时，身体大致朝着两只手中间（手一般在身体前面），跟得快一些，也不按头的角度硬拽。
-/// - 伞下身体挂在伞绳上，伸缩带、操纵环锁回正前方（和伞同一个朝向）。
+/// - 伞下（canopy）：伞要跟着人转，所以跟得紧得多——头偏出去 15° 就开始跟（一秒左右跟上）；
+///   两只手抓着操纵环举在头两侧时也算「手在面前」，按两手中点的方向。第一版伞下沿用 40° 的死区，
+///   而抓着操纵环的手比「面前」的判定高，等于只看头：人在椅子上转个三四十度，伞一动不动。
 struct BodyYaw {
     private(set) var yaw: Float = 0
     private var started = false
@@ -52,7 +54,7 @@ struct BodyYaw {
     private static func wrap(_ a: Float) -> Float { remainder(a, 2 * .pi) }
 
     mutating func update(head: SIMD3<Float>, headForward: SIMD3<Float>, hands: [HandPose], dt: Float,
-                         locked: Bool) -> Float {
+                         locked: Bool, canopy: Bool = false) -> Float {
         if locked {
             yaw += Self.wrap(-yaw) * min(dt / 0.6, 1)
             return yaw
@@ -62,15 +64,15 @@ struct BodyYaw {
         guard simd_length(flat) > 0.35 else { return yaw }
         let headYaw = atan2(-flat.x, -flat.y)
         if !started { yaw = headYaw; started = true }
-        var target = headYaw, rate: Float = 0.3, deadZone: Float = 40 * .pi / 180
+        var target = headYaw, rate: Float = canopy ? 1.1 : 0.3, deadZone: Float = (canopy ? 15 : 40) * .pi / 180
         if let l = hands.first(where: { $0.isLeft }), let r = hands.first(where: { !$0.isLeft }) {
             let neck = head - SIMD3(flat.x, 0, flat.y) / simd_length(flat) * 0.09
             let mid = (l[.wrist] + r[.wrist]) * 0.5
             let v = SIMD2(mid.x - neck.x, mid.z - neck.z)
-            if simd_length(v) > 0.18, mid.y < head.y - 0.1 {
+            if simd_length(v) > (canopy ? 0.12 : 0.18), canopy || mid.y < head.y - 0.1 {
                 let handsYaw = atan2(-v.x, -v.y)
                 target = handsYaw + Self.wrap(headYaw - handsYaw) * 0.35
-                rate = 2.0
+                rate = canopy ? 3.0 : 2.0
                 deadZone = 75 * .pi / 180
             }
         }
@@ -112,6 +114,16 @@ struct Interaction {
     /// 真手藏起来画手套时，拉环挂在袖子外面（远一点）
     var gloved = true
     var handlePulled = false
+    /// 拉环在哪只小臂上（0 左、1 右）：只有一个，在没戴表的那只手臂上，用戴表的那只手去拉
+    var ringArm = 1
+    /// 另一只手现在够不够得着这个拉环（握把亮起来提示）
+    private(set) var ringInReach = [false, false]
+    /// 张着手伸过来再握：手（手心、捏合点、食指 / 中指 / 拇指尖里最近的一个）离环心这么近就算抓到
+    static let ringGrabRadius: Float = 0.15
+    /// 已经握着拳伸过来（先握再够是很自然的动作，第一版不认）：贴近到这个距离也算抓到
+    static let ringLatchRadius: Float = 0.075
+    /// 抓住以后拉开多远算拉开了伞（第一版 20 厘米：两只手交叉着，拉不了那么远）
+    static let ringPullDistance: Float = 0.13
     /// 拉开伞的是哪个环
     var pulledRing: Int?
     private var warnedTooEarly = false
@@ -143,7 +155,10 @@ struct Interaction {
         var events: [Event] = []
         for i in 0..<2 {
             let held = left.holding == .handle(i) || right.holding == .handle(i)
-            if let arm = hands.first(where: { $0.isLeft == (i == 0) }) {
+            if i != ringArm {
+                mounts[i] = nil
+                rings[i] = nil
+            } else if let arm = hands.first(where: { $0.isLeft == (i == 0) }) {
                 mounts[i] = SceneObjects.ringMount(arm, gloved: gloved)
             } else if !held {
                 mounts[i] = nil
@@ -153,6 +168,7 @@ struct Interaction {
         for i in 0..<2 where rings[i] == nil && pulledRing != i { rings[i] = rests[i] }
         let restToggles = layout.toggleRest
         if toggles == nil { toggles = restToggles }
+        ringInReach = [false, false]
 
         for isLeft in [true, false] {
             var hand = isLeft ? left : right
@@ -170,17 +186,27 @@ struct Interaction {
             let started = grasping && !hand.grasping
             hand.grasping = grasping
             hand.point = point
+            // 这只手离另一只小臂上的拉环多远：手心、捏合点、几个指尖里最近的
+            let other = isLeft ? 1 : 0
+            var reach = Float.infinity
+            if timeline.phase == .freefall, other == ringArm, hand.holding == nil || hand.holding == .handle(other),
+               let ring = rings[other] {
+                let probes = [point, pose[.wrist] + (pose[.middleKnuckle] - pose[.wrist]) * 0.55,
+                              pose[.indexTip], pose[.middleTip], pose[.thumbTip]]
+                reach = probes.map { distance($0, ring) }.min() ?? .infinity
+                if hand.holding == nil, reach < Self.ringGrabRadius { ringInReach[other] = true }
+            }
 
-            if started, hand.holding == nil {
+            if hand.holding == nil, grasping, reach < (started ? Self.ringGrabRadius : Self.ringLatchRadius) {
+                // 只能用另一只手（戴表的那只）去拉
+                hand.holding = .handle(other)
+                events.append(.grabbedHandle)
+            } else if started, hand.holding == nil {
                 if let bar, timeline.phase == .cabin,
                    simd_length(SIMD2(point.x - bar.x, point.z - bar.z)) < 0.1,
                    point.y > bar.bottom, point.y < bar.top {
                     hand.holding = .bar
                     events.append(.grabbedBar)
-                } else if timeline.phase == .freefall, let ring = rings[isLeft ? 1 : 0], distance(point, ring) < 0.1 {
-                    // 只能用另一只手去拉（左手拉右小臂上的，右手拉左小臂上的）
-                    hand.holding = .handle(isLeft ? 1 : 0)
-                    events.append(.grabbedHandle)
                 } else if let toggles, timeline.phase == .opening || timeline.phase == .canopy {
                     let dl = distance(point, toggles.0), dr = distance(point, toggles.1)
                     if min(dl, dr) < 0.12 {
@@ -197,7 +223,7 @@ struct Interaction {
             case .handle(let i):
                 guard let rest = rests[i] else { break }
                 let pull = distance(point, rest)
-                if pull > 0.2 {
+                if pull > Self.ringPullDistance {
                     if timeline.canDeploy {
                         rings[i] = point
                         if !handlePulled { handlePulled = true; pulledRing = i; events.append(.pulledHandle) }

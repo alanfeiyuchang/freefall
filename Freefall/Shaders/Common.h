@@ -18,7 +18,7 @@ struct FrameUniforms {
     float4 camera;           // x 舞台 y 加上它 = 海拔（米），y 时间（秒），z 画面亮度（淡入淡出），w 有注视点 rate map
     float4 ground;           // xz 你在云坐标里的水平位置（米；云坐标原点 = 天气图中心），yw 地面坐标 - 云坐标
     float4 clouds;           // x 云层 pass 的分辨率比例，y 步长倍数（越大越省），z 消光系数（每米），w 覆盖率偏移
-    float4 exposure;         // x 曝光，yzw 未用
+    float4 exposure;         // x 曝光，y 有地形 / 实体模型的深度预渲染（云层按它截断，0/1），zw 未用
     float4 hudCenter;        // 高度表中心（舞台空间），w 宽（米）
     float4 hudRight;         // 右方向，w 高（米）
     float4 hudUp;            // 上方向，w 不透明度
@@ -30,6 +30,8 @@ struct FrameUniforms {
     float4 canopySpan;       // xyz 展向单位向量，w 投影的半展长（米）
     float4 canopyChord;      // xyz 弦向单位向量（前缘 → 后缘），w 半弦长（米）
     float4 bodyShadow;       // 身体的影子：xyz 头顶（舞台空间），w 有没有。身体是从头顶竖直垂到脚的胶囊
+    float4 bodyRight;        // xyz 身体的右方向（肩膀在头顶下面、往两边），w 未用
+    float4 armShadow[2];     // 左、右手腕（舞台空间），w 有没有（追踪到才有）：从肩膀到手腕各一条胳膊的影子
     float4 reveal;           // 开场的实体化：xyz 起点（舞台空间），w 波前半径（米；< 0 只有扶杆，≥ 1000 全部完成）
 };
 
@@ -70,6 +72,7 @@ constexpr sampler linearClamp(filter::linear, address::clamp_to_edge);
 constexpr sampler linearRepeat(filter::linear, address::repeat);
 /// 按指定的 mip 级取（linearRepeat 没有 mip 过滤，永远取第 0 级）
 constexpr sampler trilinearRepeat(filter::linear, mip_filter::linear, address::repeat);
+constexpr sampler trilinearClamp(filter::linear, mip_filter::linear, address::clamp_to_edge);
 constexpr sampler pixelLinearClamp(filter::linear, coord::pixel, address::clamp_to_edge);
 
 static inline float remap(float v, float lo, float hi, float newLo, float newHi) {
@@ -239,12 +242,40 @@ static inline float bodyShadow(float3 p, float3 L, constant FrameUniforms &F) {
     t = max(dot(a + d2 * u - p, L), 0.0f);
     if (t <= 0.05f) return 1.0f;
     float dist = length(p + L * t - a - d2 * u);
-    // 粗细按人形变：头、脖子、肩膀和上身（带胳膊）、腿
-    float radius = u < 0.09f ? 0.095f : (u < 0.15f ? mix(0.06f, 0.21f, smoothstep(0.11f, 0.15f, u))
-                                                   : mix(0.21f, 0.12f, smoothstep(0.36f, 0.5f, u)));
-    float R = max(t * 0.00465f, 0.004f);
+    // 粗细按人的轮廓变：头、脖子、肩、胸、腰、胯、大腿、膝、脚踝。第一版只有三段（头 / 一块方的上身 / 一根腿），
+    // 边又是硬的，落地时脚下像贴了一个厕所门上的小人
+    const float us[10] = { 0.0f, 0.055f, 0.105f, 0.15f, 0.24f, 0.37f, 0.47f, 0.62f, 0.75f, 1.0f };
+    const float rs[10] = { 0.07f, 0.10f, 0.058f, 0.185f, 0.165f, 0.135f, 0.165f, 0.135f, 0.105f, 0.085f };
+    float radius = rs[9];
+    for (int i = 0; i < 9; i++) {
+        if (u < us[i + 1]) {
+            float k = (u - us[i]) / (us[i + 1] - us[i]);
+            radius = mix(rs[i], rs[i + 1], k * k * (3.0f - 2.0f * k));
+            break;
+        }
+    }
+    // 半影：太阳圆盘的张角，再加一点起码的虚边（身体本来就不是硬边的圆柱）
+    float R = max(t * 0.00465f, 0.0f) + 0.022f;
     float cover = saturate((min(dist + radius, R) - max(dist - radius, -R)) / (2.0f * R));
-    return 1.0f - cover * 0.97f;
+    // 两条胳膊：肩膀 → 手腕的胶囊（手举着操纵环，影子里的胳膊也举着，跟着你的手动）
+    float3 shoulderMid = a + float3(0.0f, -0.36f, 0.0f);
+    for (int i = 0; i < 2; i++) {
+        if (F.armShadow[i].w <= 0.0f) continue;
+        float3 s0 = shoulderMid + F.bodyRight.xyz * (i == 0 ? -0.19f : 0.19f);
+        float3 seg = F.armShadow[i].xyz - s0;
+        float3 rr = p - s0;
+        float e2 = dot(seg, seg), f2 = dot(seg, rr), b2 = dot(L, seg), c2 = dot(L, rr);
+        float den2 = e2 - b2 * b2;
+        float t2 = max(den2 > 1e-6f ? (b2 * f2 - c2 * e2) / den2 : 0.0f, 0.0f);
+        float u2 = saturate((b2 * t2 + f2) / max(e2, 1e-6f));
+        t2 = max(dot(s0 + seg * u2 - p, L), 0.0f);
+        if (t2 <= 0.05f) continue;
+        float d = length(p + L * t2 - s0 - seg * u2);
+        float ra = mix(0.055f, 0.04f, u2);
+        float Ra = t2 * 0.00465f + 0.018f;
+        cover = max(cover, saturate((min(d + ra, Ra) - max(d - ra, -Ra)) / (2.0f * Ra)));
+    }
+    return 1.0f - cover * 0.94f;
 }
 
 /// 太阳在舞台空间的方向（伞下转向是世界绕你转，舞台里的东西要按航向反过来转）

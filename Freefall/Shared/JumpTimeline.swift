@@ -22,11 +22,11 @@ struct JumpTimeline {
         case crevasse       // 掉进冰裂缝
         case plume          // 冲进火山口的毒烟
         case fell           // 天空之城：掉出浮岛，落进云海
-        case ruins          // 天空之城：撞上塔 / 城堡
+        case ruins          // 撞上实体模型里的障碍（天空之城的塔 / 城堡，别的关的房子、大石头……）
     }
 
-    // 飞机：在 30,000 ft 平飞，放人时的空速约 70 m/s（136 节）
-    static let planeAltitude: Double = 9144
+    // 飞机：平飞，放人时的空速约 70 m/s（136 节）。高度每关不一样（JumpScene.exitAltitude）
+    var planeAltitude: Double { scene.exitAltitude }
     static let planeSpeed: Double = 70
     /// 你站在跳板上，离跳板末端 2.2 米；松开扶杆后加速跑出去
     static let rampEnd: Double = 2.2
@@ -69,7 +69,7 @@ struct JumpTimeline {
 
     private(set) var phase: Phase = .cabin
     private(set) var time: Double = 0
-    private(set) var altitude: Double = planeAltitude
+    private(set) var altitude: Double = 0
     /// 向下为正（m/s）
     private(set) var verticalSpeed: Double = 0
     /// 你在云坐标里的水平位置 (x, z)
@@ -81,6 +81,24 @@ struct JumpTimeline {
     private(set) var velocity = SIMD2<Double>(0, planeSpeed)
     /// 航向（弧度）：0 = 起跳时面朝的方向，正 = 往左转
     private(set) var heading: Double = 0
+    /// 伞下身体相对舞台正前方转了多少（弧度，正 = 往左）：人在椅子上转过去，伞跟着转，飞的方向是 heading + bodyYaw。
+    /// heading 是世界绕着你转了多少（拉操纵环）；身体转是你自己真的转了，世界不用跟着转
+    private(set) var bodyYaw: Double = 0
+    /// 伞下拉左 / 右操纵环能不能转向。能：拉哪边往哪边转（世界绕着你转，容易晕）。
+    /// 不能（app 里默认）：只靠转头、转身，伞跟着你转（bodyYaw）；操纵环只管减速，一边拉算一半。
+    /// 自动驾驶和离屏测试靠拉环转向，所以这里默认开，app 按开始窗口里的选项设
+    var toggleSteering = true
+    /// 自由落体时用手控制的横移：输入（-1 左 … 1 右）、现在横移的速度（m/s）、离正路线偏了多少（米，右为正）
+    private var trackInput: Double = 0
+    private(set) var trackVelocity: Double = 0
+    private(set) var trackX: Double = 0
+    /// 自由落体路上迎面过来的一串光环
+    private(set) var rings: [SkyRing] = []
+    private(set) var ringsPassed = 0
+    /// 下一个还没到的光环
+    private(set) var nextRing = 0
+    /// 开始自由落体的时刻：光环的到达时间从这里算
+    private(set) var ringEpoch: Double?
     private(set) var turnRate: Double = 0
     /// 转向的中间级（两级滞后，见 fly）
     private var turnRateMid: Double = 0
@@ -116,6 +134,7 @@ struct JumpTimeline {
 
     init(scene: JumpScene = .atoll) {
         self.scene = scene
+        altitude = scene.exitAltitude
         groundHeight = scene.groundHeight(at: groundPosition)
     }
 
@@ -132,7 +151,7 @@ struct JumpTimeline {
         barGrabbedTime = 5
         exitTime = 10
         leftRampTime = 12
-        planeOffset = SIMD3(0, Self.planeAltitude - startAltitude + 5000, 5000)
+        planeOffset = SIMD3(0, scene.exitAltitude - startAltitude + 5000, 5000)
         groundHeight = scene.groundHeight(at: groundPosition)
     }
 
@@ -184,6 +203,55 @@ struct JumpTimeline {
         diveRight = min(max(right, 0), 1)
     }
 
+    /// 伞下身体的朝向（JumpSession 每帧按头和手估的给进来）
+    mutating func setBodyYaw(_ yaw: Double) {
+        bodyYaw = phase == .opening || phase == .canopy ? yaw : 0
+    }
+
+    /// 自由落体的横移：两只手往左、往右伸，人就往那边飘（-1 左 … 1 右）
+    mutating func setTrack(_ input: Double) {
+        trackInput = min(max(input, -1), 1)
+    }
+
+    static let trackSpeed: Double = 14
+    /// 光环的半径（米）、迎面过来的速度（m/s）、第一个什么时候到（离开跳板后几秒）、之后每隔几秒一个
+    static let ringRadius: Double = 5.5
+    static let ringClosing: Double = 18
+    static let ringFirst: Double = 11
+    static let ringPeriod: Double = 3.6
+
+    /// 摆光环。自由落体一分多钟，往下看只有很远的云和海，没什么事可做：路上放一串立着的光环，
+    /// 和你一起往下掉、迎面一个个过来（就在眼前的高度，不用低头找），左右飘着对准了穿过去。
+    /// 只有左右是真的在挪（离正路线不超过三十米，开伞点不会被带偏）；光环迎面过来只是它自己在动。
+    /// 个数按这一跳自由落体有多长定：把时间线往后模拟一遍（抓杆、亮绿灯就松手、不开伞），到手表报警前一秒半为止。
+    /// steerable：能用手控制横移时光环左右错开；不能的话都在正前方，直直地穿过去
+    mutating func layRings(steerable: Bool) {
+        var t = self
+        var guardSteps = 0
+        if t.phase == .cabin {
+            t.grabBar()
+            while !t.greenLight, guardSteps < 20_000 { t.step(1.0 / 30); guardSteps += 1 }
+            t.releaseBar()
+        }
+        while t.phase == .exit, guardSteps < 40_000 { t.step(1.0 / 60); guardSteps += 1 }
+        let start = t.time
+        while t.phase == .freefall, !t.canDeploy, guardSteps < 60_000 { t.step(1.0 / 30); guardSteps += 1 }
+        let duration = t.time - start
+        var result: [SkyRing] = []
+        var arrival = Self.ringFirst
+        while arrival < duration - 1.5 {
+            let k = result.count
+            // 左右错开：一开始小（先学会），后面到二十多米；方向来回换，不规则一点
+            let reach = min(6 + Double(k) * 2.2, 24)
+            let x = steerable && k > 0 ? reach * sin(Double(k) * 1.9 + 0.6) : 0
+            result.append(SkyRing(x: x, arrival: arrival))
+            arrival += Self.ringPeriod
+        }
+        rings = result
+        ringsPassed = 0
+        nextRing = 0
+    }
+
     /// 落地以后捏一下手指：提前结束
     mutating func requestEnd() {
         if phase == .landed, fadeTime == nil { fadeTime = time }
@@ -215,6 +283,22 @@ struct JumpTimeline {
             fall(dt)
             velocity *= exp(-dt / Self.throwTimeConstant)
             position += velocity * dt
+            // 用手控制的横移（只有左右）：半秒跟上，离正路线最多 30 米
+            if ringEpoch == nil { ringEpoch = time }
+            trackVelocity += (trackInput * Self.trackSpeed - trackVelocity) * min(dt / 0.5, 1)
+            let moved = min(max(trackX + trackVelocity * dt, -30), 30) - trackX
+            trackX += moved
+            position += SIMD2(cos(heading), -sin(heading)) * moved
+            // 光环到跟前了：对准了就算穿过去
+            while nextRing < rings.count, let epoch = ringEpoch, time >= epoch + rings[nextRing].arrival {
+                if abs(trackX - rings[nextRing].x) < Self.ringRadius {
+                    rings[nextRing].passedTime = time
+                    ringsPassed += 1
+                } else {
+                    rings[nextRing].missed = true
+                }
+                nextRing += 1
+            }
         case .opening:
             // 伞包、伞绳先拉出来（还是全速往下掉），然后伞衣张开、减速。地面来得比伞快就摔了
             let since = time - deployTime!
@@ -243,8 +327,8 @@ struct JumpTimeline {
             if scene.hasTerrain { groundHeight = scene.groundHeight(at: groundPosition) }
             if terrainClearance <= 0 {
                 touchDown()
-            } else if scene == .sky, SkyCity.hits(groundPosition, altitude: altitude - eyeHeight) {
-                // 撞上塔 / 城堡：人停在撞上的地方，画面很快暗下去
+            } else if SceneProps.hits(scene, groundPosition, altitude: altitude - eyeHeight) {
+                // 撞上塔 / 城堡 / 别的障碍（SceneProps 的 obstacles）：人停在撞上的地方，画面很快暗下去
                 outcome = .ruins
                 landingDistance = length(groundPosition - scene.target)
                 verticalSpeed = 0
@@ -269,7 +353,7 @@ struct JumpTimeline {
         if leftRampTime != nil {
             planeOffset.z += (Self.planeSpeed - velocity.y) * dt
             planeOffset.x -= velocity.x * dt
-            planeOffset.y = Self.planeAltitude - altitude
+            planeOffset.y = planeAltitude - altitude
         }
     }
 
@@ -282,10 +366,12 @@ struct JumpTimeline {
     /// 伞下：两边拉环的差决定转向，一起拉减速；两手往前推（真的跳伞是拉下两根前组伸缩带）伞头往下栽，
     /// 下沉和前进都变快，用来在高度太多时掉得快一点，不用一直滑翔；只推一边是往那边俯冲着转（快落地时自动拉平飘一下）
     private mutating func fly(_ dt: Double) {
-        let both = min(brakeLeft, brakeRight)
-        let dive = min(diveLeft, diveRight)
-        let targetTurn = Self.maxTurnRate * (brakeLeft - brakeRight)       // 拉左边往左转（heading 增大）
-            + Self.maxTurnRate * 0.7 * (diveLeft - diveRight)
+        let both = toggleSteering ? min(brakeLeft, brakeRight) : (brakeLeft + brakeRight) / 2
+        let dive = toggleSteering ? min(diveLeft, diveRight) : (diveLeft + diveRight) / 2
+        let targetTurn = toggleSteering
+            ? Self.maxTurnRate * (brakeLeft - brakeRight)       // 拉左边往左转（heading 增大）
+                + Self.maxTurnRate * 0.7 * (diveLeft - diveRight)
+            : 0
         // 伞转起来、停下来都有个过程：两级一阶滞后（S 形），角加速度是慢慢起来的，不会一拉就猛地开始转。
         // VR 里转向晕主要来自角加速度的突变，转得匀不怎么晕
         let k = min(dt / 0.32, 1)
@@ -294,7 +380,7 @@ struct JumpTimeline {
         heading += turnRate * dt
         var speed = Self.canopySpeed * (1 - 0.45 * both) * (1 + 0.3 * dive)
         var sink = Self.canopySink * (1 - 0.25 * both) * (1 + 0.8 * dive) + abs(turnRate) / Self.maxTurnRate * 2.5
-            + abs(diveLeft - diveRight) * 2
+            + (toggleSteering ? abs(diveLeft - diveRight) * 2 : 0)
         // 离地 6 米以内自动拉平：下沉和前进都慢下来，落地是轻轻一顿
         let flare = 1 - min(max(terrainClearance / 6, 0), 1)
         sink += (1.5 - sink) * flare
@@ -391,8 +477,10 @@ struct JumpTimeline {
         return heightAboveGround <= Self.alertAGL ? 1 : 0
     }
 
-    /// 航向对应的前方（云坐标）
-    var forward: SIMD2<Double> { SIMD2(-sin(heading), -cos(heading)) }
+    /// 伞朝着的方向 = 飞的方向：世界转过的航向 + 身体自己转过的角度
+    var flightHeading: Double { heading + bodyYaw }
+    /// 前进的方向（云坐标）
+    var forward: SIMD2<Double> { SIMD2(-sin(flightHeading), -cos(flightHeading)) }
 
     private var fadeDuration: Double { isFatal ? 0.6 : Self.fadeOutDuration }
 
@@ -429,8 +517,8 @@ struct JumpTimeline {
     var targetBearing: (clock: Int, distance: Double) {
         let d = scene.target - groundPosition
         let distance = length(d)
-        // 世界方向 → 舞台方向：反转航向
-        let c = cos(heading), s = sin(heading)
+        // 世界方向 → 相对你（和伞）正对的方向：反转航向
+        let c = cos(flightHeading), s = sin(flightHeading)
         let local = SIMD2(d.x * c - d.y * s, d.x * s + d.y * c)
         var angle = atan2(local.x, -local.y)            // 0 = 正前方，顺时针为正
         if angle < 0 { angle += 2 * .pi }
@@ -515,4 +603,15 @@ struct LandingZone: Sendable {
         let local = SIMD2(d.x * c + d.y * s, -d.x * s + d.y * c) / sandAxes
         return length(local) <= 1
     }
+}
+
+/// 自由落体路上的一个光环：立着的一圈，迎面过来，从中间穿过去
+struct SkyRing: Sendable {
+    /// 离正路线多远（米，右为正）
+    var x: Double
+    /// 开始自由落体后第几秒到你跟前
+    var arrival: Double
+    /// 穿过去的时刻（没穿过是 nil）
+    var passedTime: Double?
+    var missed = false
 }

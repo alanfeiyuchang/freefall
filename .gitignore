@@ -4,3 +4,7 @@ build/
 DerivedData/
 xcuserdata/
 .swiftpm/
+.claude/
+# 图标的备选方案只留在本机，仓库里只放最终版
+Design/AppIcon/*
+!Design/AppIcon/Final/

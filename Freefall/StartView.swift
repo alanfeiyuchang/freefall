@@ -14,6 +14,8 @@ struct StartView: View {
 
     @Bindable private var model = AppModel.shared
     @State private var selection: Int?
+    /// 正在问「拉环转向可能会晕，确定打开吗」
+    @State private var confirmingSteering = false
 
     private let cardSize = CGSize(width: 264, height: 352)
 
@@ -29,6 +31,12 @@ struct StartView: View {
         .ornament(attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
             settingsBar
                 .padding(.top, 18)
+        }
+        .alert("拉环转向可能引起晕动症", isPresented: $confirmingSteering) {
+            Button("打开") { model.toggleSteering = true }
+            Button("不打开", role: .cancel) {}
+        } message: {
+            Text("打开以后，伞下拉左、右操纵环会让整个世界绕着你转，有些人会头晕、恶心。不舒服就停下来，回到这里关掉。\n关着的时候靠转头、转身来转向，伞跟着你转，不容易晕。")
         }
         .onAppear {
             selection = model.scene.id
@@ -155,6 +163,16 @@ struct StartView: View {
                     }
                     .frame(width: 170)
                 }
+                // 伞下怎么转向：默认只靠转头、转身（伞跟着你转）；要加上拉操纵环转向得先确认（世界绕着你转，可能会晕）
+                setting("伞下转向") {
+                    Picker("伞下转向", selection: Binding(get: { model.toggleSteering }, set: { on in
+                        if on { confirmingSteering = true } else { model.toggleSteering = false }
+                    })) {
+                        Text("转头转身").tag(false)
+                        Text("加拉环").tag(true)
+                    }
+                    .frame(width: 190)
+                }
             }
             .pickerStyle(.segmented)
             Text("建议坐着、戴耳机 · 点手腕上的表开关 HUD · 按数码表冠随时退出")
@@ -192,7 +210,7 @@ struct StartView: View {
     }
 }
 
-/// 一关的卡片：截图、关名、一行字（落在哪、要躲开什么）
+/// 一关的卡片：截图和关名（别的字都不放：介绍只留给旁白）
 struct SceneCard: View {
     let scene: JumpScene
     let size: CGSize
@@ -212,17 +230,10 @@ struct SceneCard: View {
         }
         .frame(width: size.width, height: size.height)
         .overlay(alignment: .bottom) {
-            VStack(spacing: 8) {
-                Text(scene.name)
-                    .font(.title.weight(.bold))
-                Text(scene.tagline)
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 12)
-            }
-            .padding(.top, 50)
-            .padding(.bottom, 20)
+            Text(scene.name)
+                .font(.title.weight(.bold))
+                .padding(.top, 50)
+                .padding(.bottom, 22)
             .frame(maxWidth: .infinity)
             .background(LinearGradient(colors: [.clear, .black.opacity(0.62)], startPoint: .top, endPoint: .bottom))
         }
@@ -231,7 +242,6 @@ struct SceneCard: View {
         .shadow(color: .black.opacity(0.35), radius: selected ? 16 : 6, y: 6)
         .contentShape(.hoverEffect, shape)
         .hoverEffect()
-        .help(scene.blurb)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(scene.name)：\(scene.blurb)")
         .accessibilityAddTraits(selected ? .isSelected : [])

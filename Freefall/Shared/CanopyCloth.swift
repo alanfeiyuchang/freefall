@@ -119,9 +119,41 @@ final class CanopyCloth: @unchecked Sendable {
         var turnRate: Float
         var landed: Bool
         var verticalSpeed: Float
+        /// 身体朝向（弧度，正 = 往左转）和转轴（身体的位置）：伞跟着人转
+        var yaw: Float = 0
+        var pivot = SIMD3<Float>(0, 0, 0)
     }
 
-    func step(_ dt: Float, _ input: Input) {
+    /// 伞跟着身体转：布料在「身体朝正前方」的坐标里模拟，给渲染的点、伞绳挂点、影子再绕身体的竖轴转 yaw。
+    /// （人在椅子上转过去，伞得跟着转到正前方，飞的方向也跟着变，见 JumpTimeline.bodyYaw）
+    private var yaw: Float = 0
+    private var pivot = SIMD3<Float>(0, 0, 0)
+
+    private func turn(_ v: SIMD3<Float>, by angle: Float) -> SIMD3<Float> {
+        let c = cos(angle), s = sin(angle)
+        return SIMD3(v.x * c + v.z * s, v.y, -v.x * s + v.z * c)
+    }
+    private func toStage(_ p: SIMD3<Float>) -> SIMD3<Float> { pivot + turn(p - pivot, by: yaw) }
+    private func toSim(_ p: SIMD3<Float>) -> SIMD3<Float> { pivot + turn(p - pivot, by: -yaw) }
+
+    /// 落地了：伞衣塌在地上。充气程度（inflation）掉到 0，但布不会变成一张平整的薄片——
+    /// 气室里还兜着一些气，一格鼓一格瘪，布面上全是褶子（见 heldAir、buildMesh）
+    private var isLanded = false
+
+    /// 落地以后这一列气室里还兜着多少气（0…1）：按气室随机，有的鼓着有的瘪了
+    private func heldAir(_ i: Int) -> Float {
+        guard isLanded else { return inflation[i] }
+        let cell = min(i / Self.columnsPerCell, Self.cells - 1)
+        let kept = 0.3 + 0.3 * (sin(Float(cell) * 12.9898 + 4.1) * 0.5 + 0.5)
+        return max(inflation[i], kept)
+    }
+
+    func step(_ dt: Float, _ stageInput: Input) {
+        isLanded = stageInput.landed
+        yaw = stageInput.yaw
+        pivot = SIMD3(stageInput.pivot.x, 0, stageInput.pivot.z)
+        var input = stageInput
+        input.links = (toSim(stageInput.links.0), toSim(stageInput.links.1))
         let n = positions.count
         let frame = Self.canopyFrame(eyeHeight: input.eyeHeight, bank: -input.turnRate * 0.55)
         let tau = Float(input.sinceDeploy)
@@ -263,23 +295,24 @@ final class CanopyCloth: @unchecked Sendable {
 
     // MARK: - 给渲染用
 
-    /// 下表面的点：上表面沿法线往下推翼型厚度 × 充气程度
-    func bottomPoint(_ k: Int) -> SIMD3<Float> {
+    /// 下表面的点：上表面沿法线往下推翼型厚度 × 充气程度（模拟用的坐标，没转）
+    private func bottomPoint(_ k: Int) -> SIMD3<Float> {
         let i = k % Self.columns, j = k / Self.columns
-        let t = Self.thickness(Self.chordParameter(j)) * 1.6 * (0.08 + 0.92 * inflation[i])
+        let t = Self.thickness(Self.chordParameter(j)) * 1.6 * (0.08 + 0.92 * (isLanded ? heldAir(i) * 0.6 : inflation[i]))
         return positions[k] - normals[k] * t
     }
 
     /// 伞绳的两端：（挂点，是不是左边一组）
     var lineAttachments: [(SIMD3<Float>, Bool)] {
-        lineAttachmentIndices.enumerated().map { (bottomPoint($0.element), lineIsLeft[$0.offset]) }
+        lineAttachmentIndices.enumerated().map { (toStage(bottomPoint($0.element)), lineIsLeft[$0.offset]) }
     }
 
     /// 后缘外侧几道肋上的点：刹车绳（左、右各 3 根）挂在这里
     var brakeAttachments: (left: [SIMD3<Float>], right: [SIMD3<Float>]) {
         let row = (Self.rows - 1) * Self.columns
         let k = Self.columnsPerCell, last = Self.columns - 1
-        return ([0, k, 2 * k].map { bottomPoint(row + $0) }, [last - 2 * k, last - k, last].map { bottomPoint(row + $0) })
+        return ([0, k, 2 * k].map { toStage(bottomPoint(row + $0)) },
+                [last - 2 * k, last - k, last].map { toStage(bottomPoint(row + $0)) })
     }
 
     /// 伞衣投在地上、身上的影子的形状：一块平板（中心、展向、弦向），强度 = 平均充气程度
@@ -308,12 +341,12 @@ final class CanopyCloth: @unchecked Sendable {
         let chordLength = length(chordVector)
         let ez = chordLength > 1e-3 ? chordVector / chordLength : SIMD3<Float>(0, 0, 1)
         let strength = inflation.reduce(0, +) / Float(inflation.count)
-        return ShadowShape(center: SIMD4(center, strength), span: SIMD4(ex, spanLength / 2),
-                           chord: SIMD4(ez, chordLength / 2))
+        return ShadowShape(center: SIMD4(toStage(center), strength), span: SIMD4(turn(ex, by: yaw), spanLength / 2),
+                           chord: SIMD4(turn(ez, by: yaw), chordLength / 2))
     }
 
     /// 伞顶中间（引导伞的连接点）
-    var topCenter: SIMD3<Float> { positions[2 * Self.columns + Self.columns / 2] }
+    var topCenter: SIMD3<Float> { toStage(positions[2 * Self.columns + Self.columns / 2]) }
 
     /// 网格：上表面、下表面、两侧翼尖封口。前缘不封（冲压翼伞的进气口），能看到气室里面。
     /// 伞布颜色按气室条纹；position.w = 展向坐标（米）、normal.w = 弦向坐标（米），给 shader 画缝线。
@@ -332,18 +365,44 @@ final class CanopyCloth: @unchecked Sendable {
         }
         func vertex(_ p: SIMD3<Float>, _ n: SIMD3<Float>, _ k: Int, _ color: SIMD3<Float>) {
             let (u, v) = uv(k)
-            out.append(MeshVertex(position: SIMD4(p, u), normal: SIMD4(n, v),
+            out.append(MeshVertex(position: SIMD4(toStage(p), u), normal: SIMD4(turn(n, by: yaw), v),
                                   color: SIMD4(color, MeshMaterial.fabric.rawValue)))
+        }
+        // 气室鼓起来：冲压翼伞是一格格充了气的气室，肋把上下两层布拉住，两道肋之间的布被气压顶得鼓出去
+        // （上面鼓得多，下面少一点）。布料模拟的粒子只管伞衣整体的形状，这里按「在这一格里的位置」把每个点
+        // 沿法线再推出去一截，法线也跟着歪：每格是一个鼓包，肋那里是一道凹进去的折线。没有这个，伞衣就是一块弯了点的平板
+        let cellWidth = Self.span / Float(Self.cells)
+        func puff(_ k: Int, cell: Int, top: Bool) -> (SIMD3<Float>, SIMD3<Float>) {
+            let i = k % c, j = k / c
+            let u = Float(i - cell * Self.columnsPerCell) / Float(Self.columnsPerCell)      // 0…1：这一格里从左肋到右肋
+            let s = Self.chordParameter(j)
+            // 沿弦向：前缘开口那里不鼓，往后很快鼓起来，到后缘收平
+            let along = min(s / 0.12, 1) * min((1 - s) / 0.35, 1)
+            let amplitude = (top ? 0.24 : 0.16) * heldAir(i) * (0.35 + 0.65 * along)
+            var height = amplitude * 4 * u * (1 - u)
+            var slope = amplitude * 4 * (1 - 2 * u) / cellWidth
+            if isLanded {
+                // 塌在地上的布：缓缓的几道大褶子（一格气室里不到一道，沿弦向慢慢错开），不是一排尖角
+                let crumple = 0.045 * (1 - inflation[i])
+                let phase = Float(i) * 0.6 + Float(j) * 0.75
+                height += crumple * sin(phase)
+                slope += crumple * 0.6 * cos(phase) / (cellWidth / Float(Self.columnsPerCell))
+            }
+            let across = normalize(positions[min(i + 1, c - 1) + j * c] - positions[max(i - 1, 0) + j * c])
+            let outward = top ? normals[k] : -normals[k]
+            let point = (top ? positions[k] : bottom[k]) + outward * height
+            return (point, normalize(outward - across * slope))
         }
         for j in 0..<(r - 1) {
             for i in 0..<(c - 1) {
-                let color = palette[min(i / Self.columnsPerCell, Self.cells - 1)]
+                let cell = min(i / Self.columnsPerCell, Self.cells - 1)
+                let color = palette[cell]
                 let k00 = j * c + i, k10 = k00 + 1, k01 = k00 + c, k11 = k01 + 1
-                for (pts, sign) in [(positions, Float(1)), (bottom, Float(-1))] {
-                    let n00 = normals[k00] * sign, n10 = normals[k10] * sign
-                    let n01 = normals[k01] * sign, n11 = normals[k11] * sign
-                    vertex(pts[k00], n00, k00, color); vertex(pts[k10], n10, k10, color); vertex(pts[k11], n11, k11, color)
-                    vertex(pts[k00], n00, k00, color); vertex(pts[k11], n11, k11, color); vertex(pts[k01], n01, k01, color)
+                for top in [true, false] {
+                    let a = puff(k00, cell: cell, top: top), b = puff(k10, cell: cell, top: top)
+                    let d = puff(k11, cell: cell, top: top), e = puff(k01, cell: cell, top: top)
+                    vertex(a.0, a.1, k00, color); vertex(b.0, b.1, k10, color); vertex(d.0, d.1, k11, color)
+                    vertex(a.0, a.1, k00, color); vertex(d.0, d.1, k11, color); vertex(e.0, e.1, k01, color)
                 }
             }
         }

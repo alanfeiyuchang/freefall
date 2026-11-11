@@ -42,6 +42,10 @@ struct FrameUniforms {
     var canopyChord = SIMD4<Float>(0, 0, 1, 0)
     /// 身体的影子（舞台空间）：xyz 头顶，w 有没有（0/1）。身体当成一根从头顶竖直垂到脚的胶囊
     var bodyShadow = SIMD4<Float>(0, 0, 0, 0)
+    /// xyz 身体的右方向
+    var bodyRight = SIMD4<Float>(1, 0, 0, 0)
+    /// 左、右手腕（舞台空间），w 有没有：胳膊的影子从肩膀连到这里
+    var armShadow = (SIMD4<Float>(0, 0, 0, 0), SIMD4<Float>(0, 0, 0, 0))
     /// 开场的实体化：xyz 起点（舞台空间），w 波前半径（米；-1 = 还在房间里只有扶杆，≥ 1000 = 全部完成）
     var reveal = SIMD4<Float>(0, 0, 0, 1e6)
 }
@@ -67,6 +71,14 @@ struct PanelUniforms {
     var center: SIMD4<Float>
     var right: SIMD4<Float>
     var up: SIMD4<Float>
+}
+
+/// 和 Rain.h 的 RingInstance 一样：自由落体路上的一个光环
+struct RingInstance {
+    /// xyz 圆心（舞台空间），w 半径（米）
+    var center: SIMD4<Float>
+    /// rgb 颜色，a 亮度
+    var color: SIMD4<Float>
 }
 
 /// 和 Rain.h 的 RainUniforms 一样：身边的雨丝

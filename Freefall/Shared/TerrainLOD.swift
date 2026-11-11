@@ -13,8 +13,11 @@ struct TerrainNode {
 struct TerrainUniforms {
     /// xyz 头在舞台空间的位置，w 场景编号
     var camera: SIMD4<Float>
-    /// x 0 级块用到的距离，y 海面以下按海画（1/0），z 画浮岛的底面（1/0）
+    /// x 0 级块用到的距离，y 海面以下按海画（1/0），z 画浮岛的底面（1/0），
+    /// w 头的海拔到这一关海拔范围的竖直距离（在范围里是 0；顶点着色器的 LOD 距离和 CPU 选块用同一把尺）
     var lod: SIMD4<Float>
+    /// xy 舞台原点的地面坐标，zw 头的地面坐标（绝对坐标）
+    var origin = SIMD4<Float>(0, 0, 0, 0)
 }
 
 /// 和 Terrain.h 的 CityUniforms 一样

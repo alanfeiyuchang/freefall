@@ -14,7 +14,7 @@ import simd
 ///
 /// - 左边：阶段、高度（英尺，大字）、离地高度、下落速度、一条随高度滚动的高度带（3,500 ft 以下橙色、2,000 ft 以下红色）
 /// - 右边：航向罗盘（N/E/S/W 跟着你转），靶的方位（橙色菱形）和距离、地速；伞下还有左右操纵环拉了多少；舱里是跳伞灯
-/// - 报警时左边一块「PULL」一闪一闪，指向两只小臂上的拉环
+/// - 报警时左边一块「PULL」一闪一闪，写着拉环在哪只小臂上
 final class HelmetHUD: @unchecked Sendable {
     struct State {
         /// 两侧的读数：0…1 开机动画，< 0 不显示（HUD 关着，或者开场还没长完）
@@ -38,6 +38,11 @@ final class HelmetHUD: @unchecked Sendable {
         var inCabin = false
         var greenLight = false
         var hint = ""
+        /// 开伞拉环在右小臂上（表戴在左手时）；否则在左小臂上
+        var ringOnRight = true
+        /// 自由落体路上穿过了几个光环 / 一共几个（0 = 这一跳没有光环）
+        var ringsPassed = 0
+        var ringsTotal = 0
         var time: Float = 0
     }
 
@@ -324,7 +329,7 @@ final class HelmetHUD: @unchecked Sendable {
                     ctx.stroke(CGRect(x: 40, y: CGFloat(h) - 474, width: 290, height: 114))
                     text(ctx, "PULL", x: 185, y: 452, size: 70, color: a, anchor: 0.5, tracking: 10, height: h)
                 }
-                text(ctx, "小臂上的拉环", x: 185, y: 520, size: 32, color: a, anchor: 0.5, height: h)
+                text(ctx, s.ringOnRight ? "右小臂上的拉环" : "左小臂上的拉环", x: 185, y: 520, size: 32, color: a, anchor: 0.5, height: h)
             } else {
                 text(ctx, "DEPLOY 3,500 FT", x: 40, y: 404, size: 24, color: Self.cyan, tracking: 2, height: h)
                 line(ctx, 40, 420, 330, 420, h: h, color: Self.cyanDim, width: 1)
@@ -332,6 +337,11 @@ final class HelmetHUD: @unchecked Sendable {
                     let seconds = Float(s.altitudeFeet - 3500) / 3.281 / (Float(s.fallSpeedKmh) / 3.6)
                     text(ctx, String(format: "T-%02d S", Int(seconds)), x: 40, y: 470, size: 42, color: Self.white,
                          mono: true, height: h)
+                }
+                if s.ringsTotal > 0, s.phase == "FREEFALL" || s.phase == "EXIT" {
+                    text(ctx, "RINGS", x: 40, y: 530, size: 24, color: Self.cyanDim, tracking: 3, height: h)
+                    text(ctx, "\(s.ringsPassed) / \(s.ringsTotal)", x: 128, y: 533, size: 36, color: Self.white, mono: true,
+                         height: h)
                 }
             }
         }

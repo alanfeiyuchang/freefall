@@ -187,9 +187,20 @@ static inline float grasslandForest(float2 p) {
 static inline float alpineFloor(float s) { return 1150.0f + 0.035f * max(-s, 0.0f) - 0.02f * max(s, 0.0f); }
 
 /// 溪流（在谷底靶的左边一百多米，弯来弯去）到中线的距离
+/// 溪的中线（横向坐标）
+static inline float alpineStreamCenter(float s) {
+    return -175.0f + 60.0f * precise::sin(s / 240.0f) + 25.0f * precise::sin(s / 90.0f + 1.3f);
+}
+/// 深潭 / 浅滩的节奏（1 深潭，0 浅滩；一百来米一段，长短很不一样）
+static inline float alpineStreamPool(float s) {
+    return 0.5f + 0.5f * precise::sin(s / 21.0f + 3.2f * precise::sin(s / 97.0f) + 1.7f * precise::sin(s / 41.0f));
+}
+/// 到溪中线的距离，「5 米」是水边：浅滩宽（半宽 6.8 米）、深潭窄（半宽 3.8 米），不再是一根等宽的带子
 static inline float alpineStreamDistance(float2 sl) {
-    float center = -175.0f + 60.0f * precise::sin(sl.x / 240.0f) + 25.0f * precise::sin(sl.x / 90.0f + 1.3f);
-    return abs(sl.y - center);
+    // 离溪的走廊远（中线只在 -175 ± 85 米里摆）：不用算那几个正弦，给一个够大的下界（用到它的地方最远只看到 38 米）
+    float off = abs(sl.y + 175.0f);
+    if (off > 130.0f) return off - 85.0f;
+    return abs(sl.y - alpineStreamCenter(sl.x)) + 3.0f * alpineStreamPool(sl.x) - 1.8f;
 }
 
 static inline float alpineHeight(float2 p) {
@@ -289,7 +300,7 @@ static inline float lavaFlowDistance(float2 p) {
         float t = saturate(dot(pa, ba) / dot(ba, ba));
         d = min(d, length(pa - ba * t));
     }
-    return d + 12.0f * tNoise(p / 60.0f);
+    return d + 5.0f * tNoise(p / 60.0f) + 4.0f * tNoise(p / 210.0f);     // （半宽 5~23 米：之前 2~26，窄的地方掐成一串香肠）
 }
 
 static inline float volcanoHeight(float2 p) {

@@ -75,6 +75,11 @@ enum JumpScene: Int, CaseIterable, Sendable, Identifiable {
         }
     }
 
+    /// 飞机的高度（起跳的海拔）。着陆区上方 5,600 米（约 18,400 英尺）：到穿进那层雨云大约半分钟，
+    /// 整个自由落体一分钟出头。第一版所有关都从 9,144 米（30,000 英尺）跳，光是到云层就要一分多钟，中间没什么事可做。
+    /// 天空之城这一关云在岛下面、路上不穿云，再低一些
+    var exitAltitude: Double { dzElevation + (self == .sky ? 3400 : 5600) }
+
     var hasTerrain: Bool { self != .atoll }
 
     /// 云层整体抬高多少米：按着陆区的海拔抬，下雨的云层总在着陆区上空两三千米。

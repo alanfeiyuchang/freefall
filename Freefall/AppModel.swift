@@ -17,6 +17,11 @@ final class AppModel {
     var gloves: Bool = UserDefaults.standard.object(forKey: "gloves") as? Bool ?? true {
         didSet { UserDefaults.standard.set(gloves, forKey: "gloves") }
     }
+    /// 伞下拉左 / 右操纵环转向（记住上次的选择）。默认关：拉环转向时整个世界绕着你转，可能引起晕动症；
+    /// 关着时只靠转头、转身，伞跟着你转，操纵环只管减速
+    var toggleSteering: Bool = UserDefaults.standard.object(forKey: "toggleSteering") as? Bool ?? false {
+        didSet { UserDefaults.standard.set(toggleSteering, forKey: "toggleSteering") }
+    }
     /// 真手现在藏没藏起来（戴手套时：开场在房间里还看得到真手，握住扶杆、手套长出来以后才藏，见 FreefallApp）
     var realHandsHidden = false
     /// 跳哪一关（记住上次的选择）

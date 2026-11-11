@@ -36,110 +36,6 @@ enum SkyCity {
     private static let dark = SIMD3<Float>(0.03, 0.03, 0.035)
     private static let crystal = SIMD3<Float>(0.10, 0.30, 0.28)
 
-    // MARK: - 基本形状
-
-    private struct Builder {
-        var v: [MeshVertex] = []
-
-        mutating func vertex(_ p: SIMD3<Float>, _ n: SIMD3<Float>, _ uv: SIMD2<Float>, _ color: SIMD3<Float>, _ material: Float) {
-            v.append(MeshVertex(position: SIMD4(p, uv.x), normal: SIMD4(n, uv.y), color: SIMD4(color, material)))
-        }
-
-        mutating func quad(_ p: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>, SIMD3<Float>),
-                           _ n: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>, SIMD3<Float>),
-                           _ uv: (SIMD2<Float>, SIMD2<Float>, SIMD2<Float>, SIMD2<Float>),
-                           _ c: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>, SIMD3<Float>), _ material: Float) {
-            vertex(p.0, n.0, uv.0, c.0, material); vertex(p.1, n.1, uv.1, c.1, material); vertex(p.2, n.2, uv.2, c.2, material)
-            vertex(p.0, n.0, uv.0, c.0, material); vertex(p.2, n.2, uv.2, c.2, material); vertex(p.3, n.3, uv.3, c.3, material)
-        }
-
-        /// 四边形，一个法线、一个颜色
-        mutating func flat(_ a: SIMD3<Float>, _ b: SIMD3<Float>, _ c: SIMD3<Float>, _ d: SIMD3<Float>,
-                           _ color: SIMD3<Float>, _ material: Float) {
-            var n = simd_cross(b - a, d - a)
-            n = simd_length(n) > 1e-9 ? simd_normalize(n) : SIMD3(0, 1, 0)
-            let uv = SIMD2<Float>(0, 0)
-            quad((a, b, c, d), (n, n, n, n), (uv, uv, uv, uv), (color, color, color, color), material)
-        }
-
-        /// 旋转体：竖直的轴，剖面是一串（半径, 高度）。smooth = 沿剖面也平滑（穹顶）；否则每一段一个面（线脚、台阶）。
-        /// 离底 ao 米以内压暗一点（墙脚、柱脚：近地面的环境光少）。uv.x 是绕一圈的 0…1
-        mutating func lathe(base: SIMD3<Float>, profile: [SIMD2<Float>], color: SIMD3<Float>, material: Float,
-                            segments: Int, smooth: Bool = false, ao: Float = 4, twist: Float = 0) {
-            let m = profile.count
-            guard m >= 2 else { return }
-            func segmentNormal(_ j: Int) -> SIMD2<Float> {
-                let d = profile[j + 1] - profile[j]
-                let l = simd_length(d)
-                return l > 1e-6 ? SIMD2(d.y, -d.x) / l : SIMD2(1, 0)
-            }
-            func pointNormal(_ j: Int) -> SIMD2<Float> {
-                let a = segmentNormal(max(j - 1, 0)), b = segmentNormal(min(j, m - 2))
-                return simd_normalize(a + b)
-            }
-            func shade(_ y: Float) -> SIMD3<Float> { color * (0.62 + 0.38 * min(max(y / ao, 0), 1)) }
-            for i in 0..<segments {
-                let a0 = twist + 2 * Float.pi * Float(i) / Float(segments)
-                let a1 = twist + 2 * Float.pi * Float(i + 1) / Float(segments)
-                let r0 = SIMD3<Float>(cos(a0), 0, sin(a0)), r1 = SIMD3<Float>(cos(a1), 0, sin(a1))
-                let up = SIMD3<Float>(0, 1, 0)
-                let u0 = Float(i) / Float(segments), u1 = Float(i + 1) / Float(segments)
-                for j in 0..<(m - 1) {
-                    let p = profile[j], q = profile[j + 1]
-                    let np = smooth ? pointNormal(j) : segmentNormal(j), nq = smooth ? pointNormal(j + 1) : segmentNormal(j)
-                    // 少边的棱柱（方尖碑）：绕一圈也不平滑
-                    let faceted = segments <= 6
-                    let rm = simd_normalize(r0 + r1)
-                    let n00 = simd_normalize((faceted ? rm : r0) * np.x + up * np.y)
-                    let n10 = simd_normalize((faceted ? rm : r1) * np.x + up * np.y)
-                    let n11 = simd_normalize((faceted ? rm : r1) * nq.x + up * nq.y)
-                    let n01 = simd_normalize((faceted ? rm : r0) * nq.x + up * nq.y)
-                    quad((base + r0 * p.x + up * p.y, base + r1 * p.x + up * p.y, base + r1 * q.x + up * q.y, base + r0 * q.x + up * q.y),
-                         (n00, n10, n11, n01), (SIMD2(u0, p.y), SIMD2(u1, p.y), SIMD2(u1, q.y), SIMD2(u0, q.y)),
-                         (shade(p.y), shade(p.y), shade(q.y), shade(q.y)), material)
-                }
-            }
-        }
-
-        /// 长方体：中心、三个轴方向上的半尺寸，绕竖轴转 yaw
-        mutating func box(center: SIMD3<Float>, half: SIMD3<Float>, yaw: Float = 0, color: SIMD3<Float>, material: Float = 0) {
-            let x = SIMD3<Float>(cos(yaw), 0, sin(yaw)) * half.x, z = SIMD3<Float>(-sin(yaw), 0, cos(yaw)) * half.z
-            let y = SIMD3<Float>(0, half.y, 0)
-            let low = color * 0.7
-            func side(_ a: SIMD3<Float>, _ b: SIMD3<Float>) {
-                var n = simd_cross(b - a, SIMD3(0, 1, 0))
-                n = simd_normalize(n)
-                let uv = SIMD2<Float>(0, 0)
-                quad((center + a - y, center + b - y, center + b + y, center + a + y), (n, n, n, n), (uv, uv, uv, uv),
-                     (low, low, color, color), material)
-            }
-            side(x + z, x - z); side(x - z, -x - z); side(-x - z, -x + z); side(-x + z, x + z)
-            flat(center + y - x - z, center + y + x - z, center + y + x + z, center + y - x + z, color, material)
-            flat(center - y - x - z, center - y - x + z, center - y + x + z, center - y + x - z, low, material)
-        }
-
-        /// 圆环（截面是圆）：环面的轴 axis，半径 radius，管半径 tube
-        mutating func torus(center: SIMD3<Float>, axis: SIMD3<Float>, radius: Float, tube: Float, color: SIMD3<Float>,
-                            material: Float, segments: Int = 56, sides: Int = 10) {
-            let ax = simd_normalize(axis)
-            let e1 = simd_normalize(simd_cross(ax, SIMD3<Float>(0, 1, 0)))
-            let e2 = simd_cross(ax, e1)
-            func point(_ i: Int, _ j: Int) -> (SIMD3<Float>, SIMD3<Float>, SIMD2<Float>) {
-                let t = 2 * Float.pi * Float(i % segments) / Float(segments)
-                let s = 2 * Float.pi * Float(j % sides) / Float(sides)
-                let out = e1 * cos(t) + e2 * sin(t)
-                let n = out * cos(s) + ax * sin(s)
-                return (center + out * radius + n * tube, n, SIMD2(Float(i) / Float(segments), Float(j) / Float(sides)))
-            }
-            for i in 0..<segments {
-                for j in 0..<sides {
-                    let a = point(i, j), b = point(i + 1, j), c = point(i + 1, j + 1), d = point(i, j + 1)
-                    quad((a.0, b.0, c.0, d.0), (a.1, b.1, c.1, d.1), (a.2, b.2, c.2, d.2), (color, color, color, color), material)
-                }
-            }
-        }
-    }
-
     // MARK: - 摆放
 
     private static func ground(_ sl: SIMD2<Float>) -> SIMD2<Float> { TerrainField.skyGround(sl) }
@@ -162,7 +58,7 @@ enum SkyCity {
     }
 
     private static func build() -> Layout {
-        var b = Builder()
+        var b = PropBuilder()
         var layout = Layout()
         let twoPi = 2 * Float.pi
 
@@ -501,7 +397,7 @@ enum SkyCity {
         layout.buildings = b.v
 
         // 瀑布：一条半圆管形的带子，从岛边往外抛一点再直落下去，越落越宽
-        var w = Builder()
+        var w = PropBuilder()
         func waterfall(island: Int, from start: SIMD2<Float>, direction: SIMD2<Float>, drop: Float, width: Float) {
             let d = simd_normalize(direction)
             let edge = rim(island: island, from: start, direction: d)

@@ -1,7 +1,11 @@
 import AVFoundation
 import os
 
-/// 跳伞的声音，全部程序合成，不用素材。
+/// 跳伞的声音。三样是真实的录音（Resources/Audio/，出处见同目录的 CREDITS.txt）：
+/// - 风声（wind_rush）：循环播放，音量、音高、明暗跟着速度变
+/// - 开伞（chute_open）：伞衣兜住风的那一下，张满时再来一下低一点的
+/// - 伞布抖动（canopy_flap）：伞下循环播放，转弯、刚开伞时更响
+/// 其余的都是程序合成的。哪段录音读不到，那个声音就退回合成的。
 ///
 /// 持续的：
 /// - 发动机：螺旋桨叶片通过频率（四台略微失谐，嗡嗡地拍）+ 低频轰鸣，出舱后随距离变小
@@ -37,6 +41,8 @@ final class JumpAudio: @unchecked Sendable {
         var muffle: Float = 0
         /// 点表开关 HUD：「嘀」一声
         var taps = 0
+        /// 穿过一个光环：清脆的两个上行音
+        var chimes = 0
     }
 
     private let engine = AVAudioEngine()
@@ -52,7 +58,8 @@ final class JumpAudio: @unchecked Sendable {
         let outputRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
         let sampleRate = outputRate > 0 ? outputRate : 48000
         guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else { return nil }
-        let dsp = JumpDSP(sampleRate: Float(sampleRate))
+        let dsp = JumpDSP(sampleRate: Float(sampleRate), wind: Self.loadLoop("wind_rush"),
+                          flap: Self.loadLoop("canopy_flap"), open: Self.loadLoop("chute_open", loop: false))
         let params = self.params
         let node = AVAudioSourceNode(format: format) { _, _, frameCount, audioBufferList in
             let p = params.withLock { $0 }
@@ -66,6 +73,33 @@ final class JumpAudio: @unchecked Sendable {
         } catch {
             return nil
         }
+    }
+
+    /// 读一段录音：取单声道。loop：当循环素材用——音量归一（均方根 0.3），把结尾 1.5 秒交叉淡化进开头，首尾接得上；
+    /// 否则是一次性的声音，只把峰值归一到 0.9
+    private static func loadLoop(_ name: String, loop: Bool = true) -> (samples: [Float], rate: Float)? {
+        guard let url = Bundle.main.url(forResource: name, withExtension: "m4a"),
+              let file = try? AVAudioFile(forReading: url),
+              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)),
+              (try? file.read(into: buffer)) != nil, let data = buffer.floatChannelData else { return nil }
+        let rate = Float(file.processingFormat.sampleRate)
+        var samples = [Float](UnsafeBufferPointer(start: data[0], count: Int(buffer.frameLength)))
+        guard loop else {
+            let peak = samples.reduce(0) { max($0, abs($1)) }
+            if peak > 1e-5 { for i in samples.indices { samples[i] *= 0.9 / peak } }
+            return (samples, rate)
+        }
+        let fade = Int(rate * 1.5)
+        guard samples.count > fade * 4 else { return nil }
+        let n = samples.count - fade
+        for i in 0..<fade {
+            let t = Float(i) / Float(fade)
+            samples[i] = samples[i] * t.squareRoot() + samples[n + i] * (1 - t).squareRoot()
+        }
+        samples.removeLast(fade)
+        let rms = (samples.reduce(0) { $0 + $1 * $1 } / Float(samples.count)).squareRoot()
+        if rms > 1e-5 { for i in samples.indices { samples[i] *= 0.3 / rms } }
+        return (samples, rate)
     }
 
     func update(_ newParams: Params) {
@@ -99,7 +133,19 @@ final class JumpDSP: @unchecked Sendable {
     private var dropFreq: [Float] = [3000, 3000, 3000, 3000, 3000, 3000], dropPan: [Float] = [0, 0, 0, 0, 0, 0]
     private var nextDrop = 0
 
-    // 风
+    // 风：有录音就放录音（左右两个读头错开四成，两只耳朵听到的不一样），没有就合成
+    private let wind: [Float]
+    private let windRate: Float
+    private var windPos: [Double] = [0, 0]
+    private var windLow: [Float] = [0, 0]
+    // 伞布抖动的录音（循环）和开伞的录音（一次性）
+    private let flapLoop: [Float]
+    private let flapRate: Float
+    private var flapPos: [Double] = [0, 0]
+    private let openShot: [Float]
+    private let openRate: Float
+    /// 这一次开伞的录音放多快、晚多久响（每次随机一点，不会每一跳都一模一样）
+    private var openPitch: Float = 1, openDelay: Float = 0.5
     private var brown: [Float] = [0, 0], low: [Float] = [0, 0], band: [Float] = [0, 0]
     private var gust: Float = 0.5, gustTarget: Float = 0.5, gustCountdown = 0
     private var buffet: Float = 0, buffetTarget: Float = 0, buffetCountdown = 0
@@ -117,8 +163,8 @@ final class JumpDSP: @unchecked Sendable {
     // 报警
     private var alarmTime: Float = 0, alarmPhase: Float = 0
     // 一次性事件
-    private var counters = [Int](repeating: 0, count: 11)
-    private var eventTime = [Float](repeating: -1, count: 11)
+    private var counters = [Int](repeating: 0, count: 12)
+    private var eventTime = [Float](repeating: -1, count: 12)
     // 开场实体化：低沉的气流声（低通截止频率跟着波前往上走）+ 稀疏的细碎「叮」粒子 + 最后舱门那一声闷响
     private var revealLow: [Float] = [0, 0], revealLow2: [Float] = [0, 0]
     private var grainTime: [Float] = [-1, -1, -1, -1, -1, -1, -1, -1]
@@ -129,11 +175,32 @@ final class JumpDSP: @unchecked Sendable {
     private var deployLow: Float = 0, deployBand: Float = 0
     private var splashLow: Float = 0
 
-    private enum Event: Int { case ding, grab, rip, deploy, thud, crash, splash, win, fail, reveal, tap }
+    private enum Event: Int { case ding, grab, rip, deploy, thud, crash, splash, win, fail, reveal, tap, chime }
 
-    init(sampleRate: Float) {
+    init(sampleRate: Float, wind: (samples: [Float], rate: Float)? = nil, flap: (samples: [Float], rate: Float)? = nil,
+         open: (samples: [Float], rate: Float)? = nil) {
         self.sampleRate = sampleRate
         dt = 1 / sampleRate
+        self.wind = wind?.samples ?? []
+        windRate = wind?.rate ?? sampleRate
+        // 每次从录音里不同的地方开始放（按时间取个种子）
+        let seed = (Date().timeIntervalSince1970 * 7.31).truncatingRemainder(dividingBy: 1)
+        windPos = [Double(self.wind.count) * seed, Double(self.wind.count) * (seed + 0.4).truncatingRemainder(dividingBy: 1)]
+        rng = UInt32(truncatingIfNeeded: Int(seed * 4_000_000_000)) | 1
+        flapLoop = flap?.samples ?? []
+        flapRate = flap?.rate ?? sampleRate
+        flapPos = [0, Double(flapLoop.count) * 0.37]
+        openShot = open?.samples ?? []
+        openRate = open?.rate ?? sampleRate
+    }
+
+    /// 开伞的录音：从 time 秒处取一个样本（rate 倍速；不在范围里是 0）
+    @inline(__always) private func openSample(_ time: Float, rate: Float) -> Float {
+        guard time >= 0 else { return 0 }
+        let x = time * openRate * rate
+        let i = Int(x)
+        guard i + 1 < openShot.count else { return 0 }
+        return openShot[i] + (openShot[i + 1] - openShot[i]) * (x - Float(i))
     }
 
     private func white() -> Float {
@@ -148,10 +215,18 @@ final class JumpDSP: @unchecked Sendable {
     func render(frameCount: Int, into list: UnsafeMutablePointer<AudioBufferList>, params: JumpAudio.Params) {
         let buffers = UnsafeMutableAudioBufferListPointer(list)
         let counts = [params.dings, params.grabs, params.rips, params.deploys, params.thuds, params.crashes,
-                      params.splashes, params.wins, params.fails, params.reveals, params.taps]
+                      params.splashes, params.wins, params.fails, params.reveals, params.taps, params.chimes]
         for i in 0..<counts.count where counts[i] != counters[i] {
             counters[i] = counts[i]
             eventTime[i] = 0
+            if i == Event.deploy.rawValue {
+                openPitch = 0.86 + 0.28 * unit()
+                openDelay = 0.38 + 0.24 * unit()
+                // 伞布的录音从随机的地方接着放
+                if !flapLoop.isEmpty {
+                    flapPos = [Double(unit()) * Double(flapLoop.count - 1), Double(unit()) * Double(flapLoop.count - 1)]
+                }
+            }
         }
         let smoothing = 1 - exp(-1 / (0.05 * sampleRate))      // 参数 50 ms 平滑，避免拉链声
         let slow = 1 - exp(-1 / (0.8 * sampleRate))
@@ -197,6 +272,24 @@ final class JumpDSP: @unchecked Sendable {
             flapPhase += (17 + 9 * gust) * dt
             if flapPhase > 1 { flapPhase -= 1 }
             let flap = freefall * min(speed / 80, 1) * max(0, sin(2 * .pi * flapPhase)) * 0.35
+            if !wind.isEmpty {
+                // 录音：掉得越快放得越快一点（音高跟着上去）；慢的时候过一道低通，闷一些。
+                // 录音自己就有一阵阵的起伏，合成的阵风只留一点
+                let n = Double(wind.count)
+                let step = Double(windRate / sampleRate * (0.84 + 0.3 * min(intensity, 1.2)))
+                let cutoff = 450 + speed * 120
+                let a = 1 - exp(-2 * Float.pi * min(cutoff, 16000) / sampleRate)
+                let level = pow(intensity, 1.5) * (0.82 + 0.18 * gust) * (1 - 0.55 * canopy) * (1 + turn * 0.6) * 0.62
+                for c in 0..<2 {
+                    windPos[c] += step
+                    if windPos[c] >= n { windPos[c] -= n }
+                    let i0 = Int(windPos[c]), i1 = i0 + 1 >= wind.count ? 0 : i0 + 1
+                    let x = wind[i0] + (wind[i1] - wind[i0]) * Float(windPos[c] - Double(i0))
+                    windLow[c] += (x - windLow[c]) * a
+                    let s = windLow[c] * level
+                    if c == 0 { outL += s } else { outR += s }
+                }
+            } else {
             let center = 180 + speed * 5 + gust * 160
             let f = 2 * sin(Float.pi * min(center, 4000) / sampleRate)
             for c in 0..<2 {
@@ -208,13 +301,31 @@ final class JumpDSP: @unchecked Sendable {
                 let s = (brown[c] * 0.9 + band[c] * 0.6) * windAmp + band[c] * flap * windAmp * 2
                 if c == 0 { outL += s } else { outR += s }
             }
+            }
 
             // ---- 伞布：轻轻抖（5~9 Hz 一阵阵）----
+            if canopy > 0.01, !flapLoop.isEmpty {
+                // 录音：伞布在风里抖。转弯时、阵风来时更响；刚开伞那几秒伞衣还没张稳，抖得最厉害
+                let opening = eventTime[Event.deploy.rawValue]
+                let settle: Float = opening >= 0 ? 1.6 * exp(-max(opening - 0.6, 0) / 1.6) : 0
+                let level = canopy * (0.5 + 0.9 * turn + 0.25 * gust + settle) * 0.55
+                let n = Double(flapLoop.count)
+                let step = Double(flapRate / sampleRate * (0.92 + 0.16 * gust))
+                for c in 0..<2 {
+                    flapPos[c] += step
+                    if flapPos[c] >= n { flapPos[c] -= n }
+                    let i0 = Int(flapPos[c]), i1 = i0 + 1 >= flapLoop.count ? 0 : i0 + 1
+                    let s = (flapLoop[i0] + (flapLoop[i1] - flapLoop[i0]) * Float(flapPos[c] - Double(i0))) * level
+                    if c == 0 { outL += s } else { outR += s }
+                }
+            }
             if canopy > 0.01 {
+                // 合成的那一层：一阵阵的抖（节奏每次随机），垫在录音下面——光放录音每一跳听着都一样
                 fabricPhase += (5.5 + 3.5 * gust) * dt
                 if fabricPhase > 1 { fabricPhase -= 1 }
                 fabricLow = fabricLow * 0.97 + white() * 0.03
-                let rustle = fabricLow * (0.4 + 0.6 * max(0, sin(2 * .pi * fabricPhase))) * canopy * (0.5 + turn) * 0.9
+                let layer: Float = flapLoop.isEmpty ? 0.9 : 0.4
+                let rustle = fabricLow * (0.4 + 0.6 * max(0, sin(2 * .pi * fabricPhase))) * canopy * (0.5 + turn) * layer
                 outL += rustle; outR += rustle * 0.85
             }
 
@@ -478,6 +589,11 @@ final class JumpDSP: @unchecked Sendable {
         if let t = advance(.ding, 1.2) {
             out += (sin(2 * .pi * 880 * t) + 0.5 * sin(2 * .pi * 1320 * t)) * exp(-t * 5) * 0.12
         }
+        if let t = advance(.chime, 0.7) {          // 穿过光环：两个上行的音（五度），像碰了一下玻璃
+            out += (sin(2 * .pi * 1318.5 * t) + 0.4 * sin(2 * .pi * 2637 * t)) * exp(-t * 9) * 0.09
+            let u = t - 0.09
+            if u > 0 { out += (sin(2 * .pi * 1975.5 * u) + 0.35 * sin(2 * .pi * 3951 * u)) * exp(-u * 7) * 0.09 }
+        }
         if let t = advance(.tap, 0.14) {           // 点表：电子表那种短促的两声「嘀嘀」
             let local = t < 0.07 ? t : t - 0.07
             if local < 0.035 { out += sin(2 * .pi * 3200 * t) * sin(.pi * local / 0.035) * 0.05 }
@@ -489,18 +605,24 @@ final class JumpDSP: @unchecked Sendable {
             let crackle = unit() > 0.7 ? white() : 0
             out += crackle * exp(-t * 6) * 0.35
         }
-        if let t = advance(.deploy, 3.2) {         // 呼——（扫频）+ 布抖（越来越慢）+ 张满时「嘭」
+        if let t = advance(.deploy, openShot.isEmpty ? 3.2 : 7.0) {
+            // 录音：拉开半秒左右伞衣兜住风的那一下；两秒半以后张满，再来一下慢放的（更低、更闷，轻一些）。
+            // 快慢和早晚每次随机一点。下面合成的那一层（呼——、布抖、张满的「嘭」）垫在录音下面，有录音时轻一半
+            let layer: Float = openShot.isEmpty ? 1 : 0.5
+            if !openShot.isEmpty {
+                out += openSample(t - openDelay, rate: openPitch) * 0.85 + openSample(t - 2.5, rate: 0.7 * openPitch) * 0.45
+            }
             let w = white()
             let sweep = 2200 * exp(-t * 4) + 250
             let f = 2 * sin(Float.pi * min(sweep, 4000) / sampleRate)
             let high = w - deployLow - 0.9 * deployBand
             deployBand += f * high
             deployLow += f * deployBand
-            out += deployBand * exp(-t * 2.2) * 0.8
+            out += deployBand * exp(-t * 2.2) * 0.8 * layer
             let flapRate = 12 * exp(-t * 0.7) + 3
-            out += max(0, sin(2 * .pi * flapRate * t)) * exp(-t * 1.2) * w * 0.45
+            out += max(0, sin(2 * .pi * flapRate * t)) * exp(-t * 1.2) * w * 0.45 * layer
             let pop = t - 2.5
-            if pop > 0 { out += (sin(2 * .pi * 70 * pop) * 0.6 + w * 0.25) * exp(-pop * 14) * 0.9 }
+            if pop > 0 { out += (sin(2 * .pi * 70 * pop) * 0.6 + w * 0.25) * exp(-pop * 14) * 0.9 * layer }
         }
         if let t = advance(.thud, 0.5) {           // 落地：沙地上的一声闷响
             out += (sin(2 * .pi * 58 * t) * 0.7 + white() * 0.25) * exp(-t * 11) * 0.7

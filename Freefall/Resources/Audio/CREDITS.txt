@@ -1,0 +1,19 @@
+wind_rush.m4a
+  "wind 2.wav" by Huggy13ear
+  https://freesound.org/people/Huggy13ear/sounds/138970/
+  License: Creative Commons Attribution 4.0 (https://creativecommons.org/licenses/by/4.0/)
+  Changes: converted to AAC, loudness normalized and the ends cross-faded into a seamless loop at load time;
+  played back with speed-dependent gain, pitch and low-pass filtering.
+
+chute_open.m4a
+  "parachute 2.wav" by Huggy13ear
+  https://freesound.org/people/Huggy13ear/sounds/138976/
+  License: Creative Commons Attribution 4.0 (https://creativecommons.org/licenses/by/4.0/)
+  Changes: converted to AAC, peak normalized; played once at deployment and once more slowed down.
+
+canopy_flap.m4a
+  "nylon flapping 1.wav" by Huggy13ear
+  https://freesound.org/people/Huggy13ear/sounds/138979/
+  License: Creative Commons Attribution 4.0 (https://creativecommons.org/licenses/by/4.0/)
+  Changes: converted to AAC, loudness normalized and the ends cross-faded into a seamless loop at load time;
+  played back with gain following turns, gusts and the seconds after deployment.

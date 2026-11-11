@@ -147,8 +147,11 @@ enum TerrainField {
     static func alpineFloor(_ s: Float) -> Float { 1150 + 0.035 * max(-s, 0) - 0.02 * max(s, 0) }
 
     static func alpineStreamDistance(_ sl: SIMD2<Float>) -> Float {
+        let off = abs(sl.y + 175)
+        if off > 130 { return off - 85 }
         let center = -175 + 60 * sin(sl.x / 240) + 25 * sin(sl.x / 90 + 1.3)
-        return abs(sl.y - center)
+        let pool = 0.5 + 0.5 * sin(sl.x / 21 + 3.2 * sin(sl.x / 97) + 1.7 * sin(sl.x / 41))
+        return abs(sl.y - center) + 3.0 * pool - 1.8
     }
 
     static func alpineHeight(_ p: SIMD2<Float>) -> Float {
@@ -247,7 +250,7 @@ enum TerrainField {
             let t = saturate(simd_dot(pa, ba) / simd_dot(ba, ba))
             d = min(d, simd_length(pa - ba * t))
         }
-        return d + 12 * noise(p / 60)
+        return d + 5 * noise(p / 60) + 4 * noise(p / 210)
     }
 
     static func volcanoHeight(_ p: SIMD2<Float>) -> Float {

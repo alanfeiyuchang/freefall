@@ -202,3 +202,49 @@ fragment float4 mistFragment(MistOut in [[stage_in]],
     float3 c = tonemap(L * in.shade * (0.92f + 0.12f * in.uv.y) * F.exposure.x) * F.camera.z;
     return float4(c * a, a);
 }
+
+// MARK: - 自由落体路上的光环（JumpTimeline.rings）
+
+/// 一个光环：立着的一圈发光的环，迎面过来，从中间穿过去。一张单位圆环的网格按实例放大、摆位置
+struct RingInstance {
+    float4 center;      // xyz 圆心（舞台空间），w 半径（米）
+    float4 color;       // rgb 颜色，a 亮度
+};
+
+/// 单位圆环网格的管半径（半径为 1 时；和 SceneRenderer 里生成网格用的一致）
+#define RING_TUBE 0.035f
+
+struct RingOut {
+    float4 position [[position]];
+    float4 color;
+    float rim;
+};
+
+vertex RingOut ringVertex(uint vid [[vertex_id]],
+                          uint iid [[instance_id]],
+                          ushort amp [[amplification_id]],
+                          device const MeshVertex *vertices [[buffer(0)]],
+                          constant ViewUniforms *views [[buffer(1)]],
+                          device const RingInstance *rings [[buffer(2)]]) {
+    MeshVertex v = vertices[vid];
+    RingInstance r = rings[iid];
+    float3 n = v.normal.xyz;
+    float3 eye = views[amp].cameraPosition.xyz;
+    // 环的中线上的点，再沿管的法线推出去；远了管子不到一个像素会闪，按距离加粗到一个多像素
+    float3 line = r.center.xyz + (v.position.xyz - n * RING_TUBE) * r.center.w;
+    float thick = max(RING_TUBE * r.center.w, length(line - eye) * 0.0014f);
+    float3 p = line + n * thick;
+    RingOut o;
+    o.position = views[amp].viewProjection * float4(p, 1.0f);
+    o.color = r.color;
+    o.rim = 1.0f - abs(dot(n, normalize(eye - p)));
+    return o;
+}
+
+/// 叠加上去的光（不影响 alpha）：中间亮、边上更亮一点，像一根发光的管子
+fragment float4 ringFragment(RingOut in [[stage_in]],
+                             constant FrameUniforms &F [[buffer(1)]]) {
+    float3 c = in.color.rgb * (in.color.a * (0.4f + 0.6f * in.rim * in.rim));
+    return float4(c * F.camera.z, 0.0f);
+}
+

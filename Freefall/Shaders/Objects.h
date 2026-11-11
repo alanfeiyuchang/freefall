@@ -679,6 +679,9 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
         float3 transmitted = albedo * sqrt(albedo) * 1.6f * through * layers;
         radiance = albedo / PI * (sunE * lit * (0.85f + 0.15f * layers) + skyE) + sunE * transmitted / PI
                  + sunE * gloss * lit;
+        // 每个气室是一个鼓包：肋那里是凹进去的折缝，光照不进去（网格上只鼓了十几厘米，光靠法线看不太出来）
+        float across = fract(u / cellWidth);
+        radiance *= mix(0.55f, 1.0f, smoothstep(0.0f, 0.6f, 4.0f * across * (1.0f - across)));
     } else {
         // 太阳只照得到舱门附近（室内程度低的地方）；天光往里衰减得慢一些；越往里红灯越明显
         float3 E = sunE * saturate(dot(N, L)) * daylight * daylight

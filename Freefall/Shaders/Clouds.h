@@ -140,11 +140,23 @@ struct CloudMaps {
 static inline float plumeCloud(float3 p, CloudMaps maps) {
     if (maps.scene != SCENE_VOLCANO) return 0.0f;
     float2 g = p.xz + maps.landShift;
-    float shape = plumeDensity(g, p.y);
+    // 第一版是一根直的圆锥乘一层噪声（只调浓淡、不啃轮廓）：边缘光滑、半透明，像探照灯的光柱。
+    // 现在：轴线和粗细按高度一节节晃（一团团往上翻的烟团，跟着时间往上走），再用噪声把轮廓啃出菜花状的鼓包，
+    // 啃剩下的密度很快到顶——里面是实的、不透明的火山灰。（只改画出来的样子；冲进烟柱的判定还是用那根直锥）
+    float rise = p.y - maps.time * 14.0f;
+    float above = p.y - (CONE_TOP - 40.0f);
+    if (above < 0.0f || above > 3200.0f) return 0.0f;
+    float radius = (90.0f + 0.22f * above) * (1.0f + 0.15f * sin(rise / 140.0f));
+    float2 axis = CONE_CENTER + PLUME_DRIFT * above + 0.12f * radius * float2(sin(rise / 170.0f), cos(rise / 230.0f));
+    float dd = length(g - axis) / radius;
+    float shape = saturate(1.0f - dd * dd) * tSmooth(3200.0f, 1800.0f, above);
     if (shape <= 0.0f) return 0.0f;
-    float n = maps.base.sample(linearRepeat, float3(g.x / 320.0f, (p.y - maps.time * 7.0f) / 260.0f, g.y / 320.0f),
-                               level(0)).r;
-    return saturate(shape * 1.6f * (n * 1.6f - 0.35f));
+    float n = maps.base.sample(linearRepeat, float3(g.x / 420.0f, rise / 300.0f, g.y / 420.0f), level(0)).r;
+    // 喷口附近烟柱只有一两百米粗，420 米一圈的噪声啃不动它：再叠一层小的
+    n = 0.62f * n + 0.38f * maps.base.sample(linearRepeat, float3(g.x / 130.0f, (rise - maps.time * 6.0f) / 110.0f, g.y / 130.0f), level(0)).r;
+    float d = shape - (1.0f - n) * 0.6f;
+    if (d <= 0.0f) return 0.0f;
+    return saturate(d * 4.0f) * mix(2.4f, 1.0f, saturate(above / 2400.0f));
 }
 
 /// 这一点离烟柱近不近（步进的时候别一步跨过去）
@@ -231,8 +243,12 @@ static CloudHit marchClouds(float3 ro, float3 rd, float jitter, constant FrameUn
             // 还在附近所有云顶之上、并且在往下走：直接跳到那个高度（水平最多走 1.4 km，不越过上限图的保护范围）
             float topNear = mix(1500.0f, CLOUD_MAX_H, maps.topMax.sample(linearRepeat, p.xz / WEATHER_TILE + 0.5f,
                                                                          level(0)).r) + 60.0f + off;
-            if (p.y > topNear && mu < -0.02f && !nearPlume(p, maps)) {
-                float skip = min((p.y - topNear) / -mu, 1400.0f / max(length(rd.xz), 0.05f));
+            // 平视和往上看的光线也跳（水平走 700 米）：它们在云顶之上只会越走越高。第一版只有往下的光线跳，
+            // 平视的一步步挪，几十公里就把 200 步用完了——高云在视平线以上的那截整个丢掉，
+            // 齐着视平线削成一块灰色的平板，远处的云层尽头是一堵墙；这条线还跟着人的高度往下滑
+            if (p.y > topNear && !nearPlume(p, maps)) {
+                float down = mu < -1e-3f ? (p.y - topNear) / -mu : 1e9f;
+                float skip = min(down, (mu < -0.02f ? 1400.0f : 700.0f) / max(length(rd.xz), 0.05f));
                 t += max(skip, coarseStep);
                 continue;
             }
@@ -252,7 +268,10 @@ static CloudHit marchClouds(float3 ro, float3 rd, float jitter, constant FrameUn
         float d = max(cloudD, plume);
         if (d > 0.003f) {
             // 烟柱是水汽夹着火山灰：比云暗、偏一点褐
-            float3 albedo = plume > cloudD ? float3(0.62f, 0.58f, 0.54f) : float3(1.0f);
+            // （喷口附近是深灰的火山灰，往上水汽凝出来才慢慢变浅；之前整根是和积云一样的雪白）
+            bool ash = plume > cloudD;
+            float3 albedo = ash ? mix(float3(0.20f, 0.18f, 0.17f), float3(0.55f, 0.53f, 0.52f), saturate((p.y - CONE_TOP) / 2200.0f))
+                                : float3(1.0f);
             empty = 0;
             float sigmaE = d * sigma;
             // 朝太阳的那几步用便宜的版本（4 步、不带细节噪声）：15 km 以外，或者这条视线已经被前面的云挡掉八成五
@@ -263,13 +282,16 @@ static CloudHit marchClouds(float3 ro, float3 rd, float jitter, constant FrameUn
             // 多次散射是云顺光时看起来雪白的原因——只有单次散射的话，前向相函数往回散的光太少，云会发灰发蓝。
             float sunVis = sunPhase * exp(-od)
                          + isotropic * (1.2f * exp(-od * 0.3f) + 0.6f * exp(-od * 0.1f) + 0.25f * exp(-od * 0.03f));
+            // 火山灰吸光：多次散射少一半多，背光的一面才真的暗下去
+            if (ash) sunVis = sunPhase * exp(-od) + isotropic * (0.5f * exp(-od * 0.3f) + 0.15f * exp(-od * 0.1f));
             float hf = saturate((p.y - w.base) / max(w.top - w.base, 1.0f));
             float3 sun = mix(A.sunAtCloudBase.rgb, A.sunAtCloudTop.rgb, saturate((p.y - 1000.0f) / 8000.0f));
             float occlusion = mix(0.35f, 1.0f, exp(-lightOD.y * 0.5f));
             float3 ambient = (mix(A.groundBounce.rgb, A.skyRadianceAvg.rgb, sqrt(hf)) + sun * 0.004f) * occlusion;
             float3 S = sigmaE * albedo * (sun * sunVis + ambient);
             // 烟柱底下被火山口里的熔岩照得发橙
-            if (plume > cloudD) S += sigmaE * float3(1.6f, 0.42f, 0.08f) * 0.05f * exp(-(p.y - CONE_TOP) / 220.0f);
+            // （只照喷口上面百来米，浓的地方才亮：一块块炽热的口袋，不是六百米高的一片桃色）
+            if (ash) S += sigmaE * float3(1.6f, 0.35f, 0.05f) * 0.03f * exp(-max(p.y - CONE_TOP, 0.0f) / 45.0f) * pow(saturate(plume / 2.4f), 3.0f);
             float stepT = exp(-sigmaE * fineStep);
             float3 Sint = (S - S * stepT) / sigmaE;   // 一步之内解析积分（Hillaire 2016），步长大也不会亮度失真
             L += T * Sint;

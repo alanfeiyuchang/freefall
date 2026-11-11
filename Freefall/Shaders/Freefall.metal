@@ -345,7 +345,7 @@ fragment CloudOut cloudFreshFragment(VOut in [[stage_in]],
     maps.scene = int(F.world.x + 0.5f);
     maps.time = F.camera.y;
     maps.terrainDistance = 1e9f;
-    if (F.world.z > 0.5f) {
+    if (F.exposure.y > 0.5f) {
         // 地形深度（全分辨率、和主 pass 一样按 rate map 光栅化）→ 舞台里的点 → 到眼睛的距离
         uint2 size = uint2(terrainDepth.get_width(), terrainDepth.get_height());
         float d = terrainDepth.read(min(uint2(physical), size - 1u), in.viewIndex);
@@ -625,27 +625,44 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
         if (land + surf > 0.0f) {
             // 沙洲和白浪：漫反射（沙滩、椰林、浪花）
             // 沙滩近看有细纹（风吹出来的沙纹），水边一圈湿沙颜色深
-            float ripple = waveNoise.sample(linearRepeat, float3(g.x / 2.5f, 0.53f, g.y / 2.5f), level(0)).r;
+            // 沙面深浅：顺风拉长的一道道条带（31 米 × 5.3 米一圈）。之前拿胞状噪声 2.5 米一格平铺，
+            // 近看是一格格重复的鼓包，像毛线织的地毯
+            const float2 wind = float2(0.94f, 0.34f);
+            float2 wq = float2(dot(g, wind) / 31.0f, dot(g, float2(-wind.y, wind.x)) / 5.3f);
+            float bandLod = max(log2(footprint / (5.3f / 128.0f)), 0.0f);
+            float ripple = waveNoise.sample(trilinearRepeat, float3(wq.x, 0.53f, wq.y), level(bandLod)).b;
             float wet = sandbar * smoothstep(-6.0f, 0.0f, sandEdge);
             // 落地前一两百米：沙面的起伏（差分出法线，斜阳下一道道沙纹有明暗）、沙粒、零星的贝壳和碎珊瑚、
             // 涨潮留下的一道海草线。之前沙洲按一个平面打光，近看是一整片没有细节的米白色
             float3 Ns = sphereN;
             float grain = 0.0f, debris = 0.0f;
-            float near = saturate(2.5f / (footprint * 9.0f) - 1.0f) * sandbar;
+            // （靶是铺平的一块布：沙纹的起伏在它下面只留两成，不然红白圈上一块块发黑）
+            float near = saturate(2.5f / (footprint * 9.0f) - 1.0f) * sandbar
+                       * mix(0.2f, 1.0f, smoothstep(TARGET_RADIUS - 1.0f, TARGET_RADIUS + 1.0f, length(g - TARGET_CENTER)));
             if (near > 0.0f) {
-                float rx = waveNoise.sample(linearRepeat, float3(g.x / 2.5f + 0.08f, 0.53f, g.y / 2.5f), level(0)).r;
-                float rz = waveNoise.sample(linearRepeat, float3(g.x / 2.5f, 0.53f, g.y / 2.5f + 0.08f), level(0)).r;
-                const float2 wind = float2(0.94f, 0.34f);
-                float lines = sin(dot(g, wind) * 7.0f + ripple * 9.0f);
-                Ns = normalize(sphereN + (float3(ripple - rx, 0.0f, ripple - rz) * 1.1f
-                                          + float3(wind.x, 0.0f, wind.y) * (lines * 0.07f)) * near);
-                float2 q = float2(g.x * 0.8f + g.y * 0.6f, -g.x * 0.6f + g.y * 0.8f) / 0.45f;
-                float4 fine = waveNoise.sample(linearRepeat, float3(q.x, 0.83f, q.y), level(0));
+                // 起伏：同一张条带差分（缓的沙垄）；真正的风沙纹（十几厘米一道）只在脚边几米出现，
+                // 一个波长不到 6 个像素就淡掉，一片有一片没有
+                float rx = waveNoise.sample(trilinearRepeat, float3(wq.x + 0.02f, 0.53f, wq.y), level(bandLod)).b;
+                float rz = waveNoise.sample(trilinearRepeat, float3(wq.x, 0.53f, wq.y + 0.06f), level(bandLod)).b;
+                float lines = sin(dot(g, wind) * 38.0f + detail * 25.0f) * smoothstep(0.45f, 0.65f, ripple)
+                            * saturate(0.165f / (footprint * 6.0f) - 1.0f);
+                float2 across = float2(-wind.y, wind.x);
+                Ns = normalize(sphereN + (float3(wind.x, 0.0f, wind.y) * ((ripple - rx) * 0.6f + lines * 0.10f)
+                                          + float3(across.x, 0.0f, across.y) * ((ripple - rz) * 0.6f)) * near);
+                // 沙粒：两层转了不同角度、大小不成整数比的采样相乘，看不出哪一层在重复；贝壳、碎珊瑚零零星星
+                float2 q1 = float2(g.x * 0.8f + g.y * 0.6f, -g.x * 0.6f + g.y * 0.8f) / 3.7f;
+                float2 q2 = float2(g.x * 0.28f - g.y * 0.96f, g.x * 0.96f + g.y * 0.28f) / 1.3f;
+                float f1 = waveNoise.sample(trilinearRepeat, float3(q1.x, 0.83f, q1.y), level(max(log2(footprint * 128.0f / 3.7f), 0.0f))).a;
+                float f2 = waveNoise.sample(trilinearRepeat, float3(q2.x, 0.21f, q2.y), level(max(log2(footprint * 128.0f / 1.3f), 0.0f))).a;
                 float close = saturate(0.45f / (footprint * 9.0f) - 1.0f);
-                grain = (fine.r - 0.55f) * close;
-                debris = smoothstep(0.94f, 0.97f, fine.a) * close * step(0.6f, ripple);
+                grain = (f1 * f2 * 2.0f - 0.5f) * 0.6f * near;
+                debris = smoothstep(0.80f, 0.86f, f1) * smoothstep(0.6f, 0.75f, f2) * near * mix(0.5f, 1.0f, close);
             }
-            float wrack = sandbar * exp(-pow((sandEdge + 9.0f + 3.0f * (ripple - 0.5f)) / 0.7f, 2.0f)) * step(0.5f, detail);
+            // 涨潮留下的海草线：沿着沙洲的岸线走，断断续续两道。之前按细节噪声的等值线画，
+            // 沙上是一个个只画了半圈的褐色圆环
+            float shoreD = (length(sl / SANDBAR_AXES) - 1.0f) * SANDBAR_AXES.y + 4.0f * (ripple - 0.5f);
+            float wrack = sandbar * (exp(-pow((shoreD + 6.0f) / 0.35f, 2.0f)) + 0.7f * exp(-pow((shoreD + 10.5f) / 0.3f, 2.0f)))
+                        * smoothstep(0.45f, 0.6f, detail) * saturate(1.5f - footprint * 2.0f);
             float3 E = A.sunAtSea.rgb * sunVis * saturate(dot(Ns, sunDir)) + cloudySkyFill(A.skyIrradianceSea.rgb);
             float3 sand = float3(0.55f, 0.50f, 0.40f) * (0.9f + 0.2f * ripple + 0.35f * grain) * (1.0f - 0.35f * wet);
             sand = mix(sand, float3(0.62f, 0.58f, 0.52f), debris * 0.8f);

@@ -23,6 +23,8 @@ final class JumpSession {
     var autopilot: Autopilot?
     /// 用真手抓（允许了手部追踪）；否则用系统的捏合手势
     let realHands: Bool
+    /// 落地那一刻身体的位置和朝向：落地以后伞衣塌在那里、伞绳拖在脚边，不再跟着人转
+    private var landedLayout: BodyLayout?
     /// 提前拉拉手（还没报警）时，提示一直显示到这个时间
     private var tooEarlyUntil: Double?
     /// 真手抓住拉手、操纵环的次数（给声音用）
@@ -39,7 +41,7 @@ final class JumpSession {
     private(set) var wetness: Double = 0
     /// 戴手套（拉环挂在袖子外面）、高度表戴在哪只手腕上：渲染器开场设一次
     var gloved = true { didSet { interaction.gloved = gloved } }
-    var watchOnLeft = true
+    var watchOnLeft = true { didSet { interaction.ringArm = watchOnLeft ? 1 : 0 } }
     /// 头盔 HUD 开没开（两侧的读数和提示）。默认关，点一下手腕上的表开 / 关；舱里开场的提示（握住扶杆、绿灯松手）不管开没开都显示。
     /// 没有手部追踪时点不了表，一直开着
     var hudOn = false {
@@ -56,6 +58,12 @@ final class JumpSession {
         self.realHands = realHands
         self.autopilot = autopilot
         self.hudOn = !realHands
+    }
+
+    /// 伞下拉左 / 右操纵环能不能转向（见 JumpTimeline.toggleSteering）
+    var toggleSteering: Bool {
+        get { timeline.toggleSteering }
+        set { timeline.toggleSteering = newValue }
     }
 
     /// 舞台空间里起跳那一刻眼睛的高度（落地时脚踩在地上）
@@ -85,6 +93,7 @@ final class JumpSession {
         }
         // 落地以后捏一下手指：不等了，直接结束
         if pinchesBegan > 0, timeline.phase == .landed { timeline.requestEnd() }
+        timeline.setBodyYaw(Double(layout.yaw))
 
         timeline.step(dt)
 
@@ -101,8 +110,8 @@ final class JumpSession {
             // 没有真手去拉：拉手开伞后就没了；操纵环按刹车量往下移，看起来是被拉下去的
             if timeline.deployTime != nil, !interaction.handlePulled {
                 interaction.handlePulled = true
-                interaction.pulledRing = 1
-                interaction.rings[1] = nil
+                interaction.pulledRing = interaction.ringArm
+                interaction.rings[interaction.ringArm] = nil
             }
             let rest = layout.toggleRest
             interaction.toggles = (rest.0 - SIMD3(0, Float(timeline.brakeLeft) * 0.32, 0),
@@ -110,12 +119,15 @@ final class JumpSession {
         }
         if let since = timeline.sinceDeploy {
             let landed = timeline.phase == .landed || timeline.phase == .done
+            if landed, landedLayout == nil { landedLayout = layout }
+            let layout = landedLayout ?? layout
             cloth.step(Float(dt), CanopyCloth.Input(sinceDeploy: since, eyeHeight: layout.anchor.y,
                                                     links: layout.links,
                                                     brakeLeft: Float(timeline.brakeLeft),
                                                     brakeRight: Float(timeline.brakeRight),
                                                     turnRate: Float(timeline.turnRate), landed: landed,
-                                                    verticalSpeed: Float(timeline.verticalSpeed)))
+                                                    verticalSpeed: Float(timeline.verticalSpeed),
+                                                    yaw: layout.yaw, pivot: layout.anchor))
         }
     }
 
@@ -190,6 +202,7 @@ final class JumpSession {
 
     func objects(layout: BodyLayout, hands: [HandPose], watchOnLeft: Bool,
                  proxyHands: Bool = false, gloves: Bool = false, head: SIMD3<Float>? = nil) -> SceneObjects {
+        let layout = landedLayout ?? layout
         var o = SceneObjects.make(SceneObjects.Input(timeline: timeline, eyeHeight: layout.anchor.y, layout: layout,
                                                      interaction: interaction,
                                                      cloth: timeline.sinceDeploy == nil ? nil : cloth,
@@ -199,10 +212,9 @@ final class JumpSession {
         let c = timeline.revealCenter
         let radius = timeline.revealRadius.map { $0.isFinite ? Float($0) : 1e6 } ?? -1
         o.reveal = SIMD4(Float(c.x), Float(c.y), Float(c.z), radius)
-        if timeline.scene.hasTerrain {
-            o.terrain = TerrainFrame(scene: timeline.scene, groundOrigin: timeline.groundPosition,
-                                     stageToAltitude: timeline.altitude - timeline.eyeHeight, heading: displayHeading)
-        }
+        // （没有地形的环礁也给：实体模型要用它换到舞台空间）
+        o.terrain = TerrainFrame(scene: timeline.scene, groundOrigin: timeline.groundPosition,
+                                 stageToAltitude: timeline.altitude - timeline.eyeHeight, heading: displayHeading)
         let rain = Float(timeline.rainIntensity)
         if rain > 0.005 {
             let v = timeline.rainVelocity
@@ -220,10 +232,39 @@ final class JumpSession {
                                   box: SIMD4(Self.mistBox, 0, 0, 0))
         }
         o.wetness = Float(wetness)
+        o.rings = ringInstances()
         return o
     }
 
-    /// 头盔 HUD 的读数（HelmetHUD）。两侧的读数要 HUD 开着、开场实体化也完成了才开机（1.2 秒的开机动画），关掉时 0.3 秒收回去；
+    /// 这一帧要画的光环（舞台空间）：迎面过来的前几个，最近的那个最亮；就在眼睛下面一点的高度
+    private func ringInstances() -> [RingInstance] {
+        let t = timeline
+        guard t.phase == .freefall, let epoch = t.ringEpoch else { return [] }
+        var out: [RingInstance] = []
+        for i in t.nextRing..<min(t.nextRing + 4, t.rings.count) {
+            let ring = t.rings[i]
+            let ahead = Float((epoch + ring.arrival - t.time) * JumpTimeline.ringClosing)
+            guard ahead < 150 else { continue }
+            let isNext = i == t.nextRing
+            let pulse = isNext ? 1 + 0.2 * sin(Float(t.time) * 7) : 1
+            let fade = min(max((150 - ahead) / 30, 0), 1)             // 远处淡入
+            out.append(RingInstance(center: SIMD4(Float(ring.x - t.trackX), Float(t.eyeHeight) - 1.1, -ahead,
+                                                  Float(JumpTimeline.ringRadius)),
+                                    color: SIMD4(0.25, 0.9, 1.0, (isNext ? 1.6 : 0.8) * pulse * fade)))
+        }
+        // 刚穿过去的那个：在身后来不及看，换成眼前一圈金色的光往外散开（半秒）
+        if t.nextRing > 0, let passed = t.rings[t.nextRing - 1].passedTime {
+            let k = Float((t.time - passed) / 0.5)
+            if k < 1 {
+                out.append(RingInstance(center: SIMD4(0, Float(t.eyeHeight) - 1.1, -6 - 10 * k,
+                                                      Float(JumpTimeline.ringRadius) * (1 + 1.5 * k)),
+                                        color: SIMD4(1.0, 0.75, 0.25, 1.8 * (1 - k))))
+            }
+        }
+        return out
+    }
+
+    /// 头盔 HUD 的读数（HelmetHUD）。两侧的读数要 HUD 开着、开场实体化也完成了才开机（0.35 秒的开机动画），关掉时 0.15 秒收回去；
     /// 下沿那一行提示开场就在（舱里的提示一直显示，其他的跟着 HUD 开关）
     var hudState: HelmetHUD.State {
         let t = timeline
@@ -231,11 +272,12 @@ final class JumpSession {
         if hudOn {
             // 开场实体化完成以后才开机（直接从空中开始的没有开场）
             let ready = t.barGrabbedTime.map { $0 + JumpTimeline.revealDuration } ?? (t.phase == .cabin ? .infinity : 0)
-            h.boot = Float((t.time - max(hudToggleTime, ready)) / 1.2)
-        } else if t.time - hudToggleTime < 0.3 {
-            h.boot = Float(1 - (t.time - hudToggleTime) / 0.3)
+            // 开机动画 0.35 秒（第一版 1.2 秒：点了表要等一秒多读数才扫完，太慢）
+            h.boot = Float((t.time - max(hudToggleTime, ready)) / 0.35)
+        } else if t.time - hudToggleTime < 0.15 {
+            h.boot = Float(1 - (t.time - hudToggleTime) / 0.15)
         }
-        h.hintBoot = Float(min(t.time / 0.6, 1))
+        h.hintBoot = Float(min(t.time / 0.3, 1))
         switch t.phase {
         case .cabin: h.phase = t.greenLight ? "READY" : "STANDBY"
         case .exit: h.phase = "EXIT"
@@ -248,10 +290,12 @@ final class JumpSession {
         h.aglMeters = Int(max(t.terrainClearance, 0))
         h.fallSpeedKmh = Int(max(t.verticalSpeed, 0) * 3.6)
         h.alarm = t.alarmLevel
-        h.headingDeg = Float(-displayHeading * 180 / .pi)
+        h.headingDeg = Float(-t.flightHeading * 180 / .pi)
+        h.ringsPassed = t.ringsPassed
+        h.ringsTotal = t.rings.count
         if t.phase != .cabin {
             let d = t.scene.target - t.groundPosition
-            let c = cos(displayHeading), sn = sin(displayHeading)
+            let c = cos(t.flightHeading), sn = sin(t.flightHeading)
             let local = SIMD2(d.x * c - d.y * sn, d.x * sn + d.y * c)
             h.targetBearingDeg = Float(atan2(local.x, -local.y) * 180 / .pi)
             h.targetDistance = Int(length(d))
@@ -263,6 +307,7 @@ final class JumpSession {
         h.inCabin = t.phase == .cabin
         h.greenLight = t.greenLight
         h.hint = hudHint
+        h.ringOnRight = watchOnLeft
         h.time = Float(t.time)
         return h
     }
@@ -298,7 +343,8 @@ final class JumpSession {
         case .freefall:
             if let until = tooEarlyUntil, t.time < until { return "还没到开伞高度\n等手表报警再拉" }
             if t.alarmLevel > 0 {
-                return usesRealHands ? "开伞！\n用另一只手抓住小臂上的红色拉环，往外拉" : "开伞！捏一下手指"
+                let (hand, arm) = watchOnLeft ? ("左手", "右小臂") : ("右手", "左小臂")
+                return usesRealHands ? "开伞！\n用\(hand)抓住\(arm)上的红色拉环，往外拉" : "开伞！捏一下手指"
             }
             if let left = t.leftRampTime, t.time - left < 6 { return "手表在 3,500 英尺报警，那时再开伞" }
             return ""
@@ -306,8 +352,14 @@ final class JumpSession {
             let (clock, distance) = t.targetBearing
             let bearing = distance < 25 ? "靶就在你下面" : "靶在 \(clock) 点钟方向 · \(Int(distance / 10) * 10) 米"
             if let since = t.sinceDeploy, since < 14 {
-                let how = usesRealHands ? "拉下左 / 右操纵环转向，两边一起拉减速，两手往前推俯冲"
-                    : "捏住往下拉：左手左转，右手右转"
+                let how: String
+                if t.toggleSteering {
+                    how = usesRealHands ? "拉下左 / 右操纵环转向，两边一起拉减速，两手往前推俯冲"
+                        : "捏住往下拉：左手左转，右手右转"
+                } else {
+                    how = usesRealHands ? "转头、转身来转向，伞跟着你转；操纵环一起拉减速，两手往前推俯冲"
+                        : "转头、转身来转向，伞跟着你转；捏住往下拉减速"
+                }
                 return how + "\n" + bearing
             }
             // 山区：脚下的地面比高度表的读数近得多，快撞上了
@@ -329,7 +381,8 @@ final class JumpSession {
             if reach < distance - 30 { return bearing + "\n高度不够了，对准靶直飞" }
             return bearing
         case .landed, .done:
-            return resultSummary.map { $0 + "\n捏一下手指结束" } ?? ""
+            let ringLine = t.rings.isEmpty ? "" : "穿过光环 \(t.ringsPassed) / \(t.rings.count) · "
+            return resultSummary.map { $0 + "\n" + ringLine + "捏一下手指结束" } ?? ""
         }
     }
 
@@ -356,7 +409,7 @@ final class JumpSession {
         case .crevasse: return "掉进冰裂缝了"
         case .plume: return "冲进了火山口的毒烟"
         case .fell: return "掉出了浮岛，落进云海——离靶心 \(Int(d)) 米"
-        case .ruins: return "撞上了石头城的塔"
+        case .ruins: return t.scene == .sky ? "撞上了石头城的塔" : "撞上了障碍物"
         case nil: return nil
         }
     }
