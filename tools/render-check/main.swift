@@ -396,6 +396,8 @@ let revealShots: [Shot] = [
 /// 开始窗口里选关卡片的截图（每关一张，NOHUD=1 跑，裁成竖的）：伞下朝着靶飞，看得到地平线
 let cardShots: [Shot] = [
     Shot(name: "card", session: { deployed(16) }, yaw: 0, pitch: -16, fovY: 72, faceTarget: true),
+    // 火山单独一张：朝靶看拍不到火山锥和烟柱，往旁边转过去
+    Shot(name: "cardv", session: { deployed(16) }, yaw: 88, pitch: 3, fovY: 72),
 ]
 
 /// 机舱里（实体化完了以后）：扶杆近景、往机头看、地板、舱壁、座椅、跳板、舱顶

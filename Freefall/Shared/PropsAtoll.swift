@@ -14,15 +14,32 @@ enum AtollProps {
             SIMD3(center.x + sl.x * cosA - sl.y * sinA, 0, center.y + sl.x * sinA + sl.y * cosA)
         }
         func rnd(_ i: Int, _ k: Int32) -> Float { TerrainField.hash(Int32(i) &* 17, k) * 0.5 + 0.5 }
-        // 椰子树：两丛，离靶八九十米开外
-        for (ci, c) in [SIMD2<Float>(-112, 14), SIMD2<Float>(118, -18), SIMD2<Float>(-70, -52)].enumerated() {
-            for i in 0..<(ci == 2 ? 3 : 6) {
-                let off = SIMD2<Float>(rnd(i + ci * 10, 1) - 0.5, rnd(i + ci * 10, 2) - 0.5) * SIMD2(34, 22)
-                let p = ground(c + off)
-                let height = 6 + 4.5 * rnd(i + ci * 10, 3)
-                b.palm(base: p, height: height, seed: Int32(i + ci * 10) &* 7)
-                obstacles.append(.init(center: SIMD2(Double(p.x), Double(p.z)), radius: 1.6, top: Double(height)))
-            }
+        // 椰子树：三丛，离靶八九十米开外。位置、高矮、往哪边歪都写死在表里（沙洲坐标）：
+        // Freefall.metal 的 atollPalmShadow 里有同一张表，按它在沙上画影子，两边要一起改
+        let palms: [(Float, Float, Float, Float, Float)] = [
+            (-126, 8, 8.5, 0.4, 0.25),
+            (-118, 22, 7.0, 2.1, 0.18),
+            (-108, 3, 9.8, 4.0, 0.3),
+            (-103, 19, 6.4, 5.3, 0.14),
+            (-96, 10, 8.0, 1.2, 0.22),
+            (-121, -4, 7.4, 3.1, 0.28),
+            (106, -22, 9.2, 2.6, 0.24),
+            (114, -9, 6.8, 0.9, 0.16),
+            (121, -27, 8.3, 4.6, 0.3),
+            (127, -14, 7.2, 5.8, 0.2),
+            (111, -33, 10.1, 3.5, 0.26),
+            (133, -25, 6.5, 1.7, 0.15),
+            (-78, -49, 8.8, 0.2, 0.27),
+            (-66, -57, 7.1, 2.9, 0.19),
+            (-71, -44, 9.5, 4.9, 0.23),
+        ]
+        for (i, t) in palms.enumerated() {
+            let p = ground(SIMD2(t.0, t.1))
+            // 歪的方向是沙洲坐标里的，转到地面坐标
+            let l = SIMD2<Float>(cos(t.3), sin(t.3)) * (t.2 * t.4)
+            let lean = SIMD3<Float>(l.x * cosA - l.y * sinA, 0, l.x * sinA + l.y * cosA)
+            b.palm(base: p, height: t.2, seed: Int32(i) &* 7, lean: lean)
+            obstacles.append(.init(center: SIMD2(Double(p.x), Double(p.z)), radius: 1.6, top: Double(t.2)))
         }
         // 漂木：晒白了的树干，横七竖八躺在沙上
         for i in 0..<9 {

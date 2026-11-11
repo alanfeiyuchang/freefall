@@ -186,6 +186,8 @@ enum TerrainField {
 
     // MARK: - 雪山
 
+    static func snowOutcrop(_ p: SIMD2<Float>) -> Float { fbm(p / 160 + SIMD2(6, 2), 3) }
+
     static func snowHeight(_ p: SIMD2<Float>) -> Float {
         let sl = valleyCoords(p)
         let s = sl.x, l = sl.y
@@ -197,6 +199,7 @@ enum TerrainField {
         let ridges = ridged(p / 3000 + SIMD2(8.1, 0.4), 8)
         var h = floorH + wall + (ridges - 0.35) * mix(30, 1300, steep) + 4 * fbm(p / 260, 3) * (1 - steep)
         let r = simd_length(p - target)
+        h += 4.5 * smooth(0.33, 0.42, snowOutcrop(p)) * (1 - steep) * smooth(120, 200, r)
         h = mix(2750 + 0.6 * fbm(p / 60, 3), h, smooth(90, 300, r))
         return h
     }

@@ -223,7 +223,7 @@ kernel void generateSurfaceMap(texture2d<float, access::write> out [[texture(0)]
     } else if (scene == SCENE_SNOW) {
         // 雪坡上露出来的岩石：存一个宽的斜坡（0.5 是边），阈值留到像素里取。之前存的是卡过阈值的 0 / 1：
         // 过渡带不到一格（15.6 米），放大出来边是沿着格子走的台阶
-        v.b = saturate(0.5f + (tFbm(p / 160.0f + float2(6.0f, 2.0f), 3) - 0.36f
+        v.b = saturate(0.5f + (snowOutcrop(p) - 0.36f
                                - 0.8f * (1.0f - tSmooth(120.0f, 200.0f, length(p - LZ_TARGET)))) * 2.5f);
     } else if (scene == SCENE_ISLAND) {
         v.g = islandForest(p);
@@ -493,7 +493,7 @@ static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, flo
         float sulfur = tSmooth(40.0f, 6.0f, decodeEdge(sm.a)) * tSmooth(0.45f, 0.7f, n2);
         floorC = mix(floorC, float3(0.30f, 0.25f, 0.07f), sulfur * 0.6f);
         // 火山锥上面是红褐色的火山渣
-        floorC = mix(floorC, float3(0.16f, 0.07f, 0.04f) * (1.0f + vary), tSmooth(CONE_BASE_RADIUS, 220.0f, rc));
+        floorC = mix(floorC, float3(0.05f, 0.026f, 0.019f) * (1.0f + vary), tSmooth(CONE_BASE_RADIUS, 220.0f, rc));
         // 外坡下面长着绿的（热带岛），海边是黑沙滩
         float green = tSmooth(2600.0f, 3200.0f, rk) * tSmooth(700.0f, 400.0f, h) * tSmooth(0.75f, 0.85f, flatness);
         float3 outside = mix(rock * 0.7f, float3(0.05f, 0.11f, 0.03f) * (1.0f + vary), green);
@@ -520,8 +520,11 @@ static inline Surface terrainSurface(int scene, float2 p, float h, float3 N, flo
             float core = saturate(-dl / 12.0f);
             float plates = 0.55f * n1 + 0.45f * n2;
             float crust = tSmooth(0.38f, 0.62f, plates) * (1.0f - 0.6f * core);
-            s.emission = mix(float3(1.1f, 0.10f, 0.01f), float3(2.2f, 0.52f, 0.05f), core * core) * 0.045f * (1.0f - 0.9f * crust);
-            s.albedo = mix(float3(0.08f, 0.03f, 0.02f), float3(0.03f), crust);
+            // （熔岩比太阳照着的地面亮得多：亮度不够的话，隔着一两公里的霾看过去，它那点橙色被霾的白盖掉，成了奶白色）
+            s.emission = mix(float3(1.1f, 0.10f, 0.01f) * 0.07f, float3(2.2f, 0.40f, 0.03f) * 0.14f, core * core) * (1.0f - 0.9f * crust);
+            // 熔岩几乎不反光（之前反照率 0.08：太阳一照，反射的光比它自己发的光还多、还是中性色，
+            // 整片熔岩湖被冲成奶白色）
+            s.albedo = mix(float3(0.02f, 0.008f, 0.006f), float3(0.012f), crust);
             s.material = MAT_LAVA;
         }
         if (h < 0.5f) s.material = MAT_WATER;

@@ -539,6 +539,49 @@ static inline float3 oceanShade(float3 N, float3 rd, float3 sunDir, float shadow
     return fresnel * sky + sunE * glint + (1.0f - fresnel) * body;
 }
 
+/// 环礁沙洲上椰子树的影子（树是实体模型，沙面是这个 pass 画的，没有阴影图）：按和 PropsAtoll.swift 一样的一张表，
+/// 把每棵树的树冠（一个带叶片缺口的圆）和树干（一条线）顺着太阳投到沙上。太阳低，影子有树的一倍半长。
+/// sl：沙洲坐标；sunSl：太阳方向的水平分量（转到沙洲坐标）；sunY：太阳的高度分量。返回太阳被挡掉多少（0..1）
+static inline float atollPalmShadow(float2 sl, float2 sunSl, float sunY) {
+    // 每棵两项：(根的 x, y, 树高, -)、(树顶相对根的水平偏移 x, y, -, -)
+    const float4 palms[30] = {
+    float4(-126.0f, 8.0f, 8.5f, 0.0f), float4(1.957f, 0.828f, 0.0f, 0.0f),
+    float4(-118.0f, 22.0f, 7.0f, 0.0f), float4(-0.636f, 1.088f, 0.0f, 0.0f),
+    float4(-108.0f, 3.0f, 9.8f, 0.0f), float4(-1.922f, -2.225f, 0.0f, 0.0f),
+    float4(-103.0f, 19.0f, 6.4f, 0.0f), float4(0.497f, -0.746f, 0.0f, 0.0f),
+    float4(-96.0f, 10.0f, 8.0f, 0.0f), float4(0.638f, 1.640f, 0.0f, 0.0f),
+    float4(-121.0f, -4.0f, 7.4f, 0.0f), float4(-2.070f, 0.086f, 0.0f, 0.0f),
+    float4(106.0f, -22.0f, 9.2f, 0.0f), float4(-1.892f, 1.138f, 0.0f, 0.0f),
+    float4(114.0f, -9.0f, 6.8f, 0.0f), float4(0.676f, 0.852f, 0.0f, 0.0f),
+    float4(121.0f, -27.0f, 8.3f, 0.0f), float4(-0.279f, -2.474f, 0.0f, 0.0f),
+    float4(127.0f, -14.0f, 7.2f, 0.0f), float4(1.275f, -0.669f, 0.0f, 0.0f),
+    float4(111.0f, -33.0f, 10.1f, 0.0f), float4(-2.459f, -0.921f, 0.0f, 0.0f),
+    float4(133.0f, -25.0f, 6.5f, 0.0f), float4(-0.126f, 0.967f, 0.0f, 0.0f),
+    float4(-78.0f, -49.0f, 8.8f, 0.0f), float4(2.329f, 0.472f, 0.0f, 0.0f),
+    float4(-66.0f, -57.0f, 7.1f, 0.0f), float4(-1.310f, 0.323f, 0.0f, 0.0f),
+    float4(-71.0f, -44.0f, 9.5f, 0.0f), float4(0.408f, -2.147f, 0.0f, 0.0f),
+    };
+    float k = 1.0f / max(sunY, 0.15f);
+    float shade = 0.0f;
+    for (int i = 0; i < 15; i++) {
+        float h = palms[2 * i].z;
+        float2 base = palms[2 * i].xy;
+        float2 c = base + palms[2 * i + 1].xy - sunSl * (h * k);
+        float2 d = sl - c;
+        float r = 0.42f * h;
+        if (dot(sl - base, sl - base) > (r + h * k * 1.3f + 4.0f) * (r + h * k * 1.3f + 4.0f)) continue;
+        // 树冠：八片叶子之间透光
+        float fronds = 0.62f + 0.38f * cos(8.0f * atan2(d.y, d.x) + float(i));
+        float crown = smoothstep(r, r * 0.35f, length(d) / max(fronds, 0.3f) * 0.8f);
+        // 树干：根到树冠影子中心的一条线
+        float2 ba = c - base;
+        float t = saturate(dot(sl - base, ba) / max(dot(ba, ba), 1e-3f));
+        float trunk = smoothstep(0.34f, 0.12f, length(sl - base - ba * t));
+        shade = max(shade, max(crown, trunk));
+    }
+    return shade;
+}
+
 fragment float4 sceneFragment(VOut in [[stage_in]],
                                 constant ViewUniforms *views [[buffer(0)]],
                                 constant FrameUniforms &F [[buffer(1)]],
@@ -663,7 +706,13 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
             float shoreD = (length(sl / SANDBAR_AXES) - 1.0f) * SANDBAR_AXES.y + 4.0f * (ripple - 0.5f);
             float wrack = sandbar * (exp(-pow((shoreD + 6.0f) / 0.35f, 2.0f)) + 0.7f * exp(-pow((shoreD + 10.5f) / 0.3f, 2.0f)))
                         * smoothstep(0.45f, 0.6f, detail) * saturate(1.5f - footprint * 2.0f);
-            float3 E = A.sunAtSea.rgb * sunVis * saturate(dot(Ns, sunDir)) + cloudySkyFill(A.skyIrradianceSea.rgb);
+            float palmShade = 0.0f;
+            if (sandbar > 0.0f && footprint < 1.5f) {
+                float2 sunSl = float2(sunDir.x * SANDBAR_COS + sunDir.z * SANDBAR_SIN, -sunDir.x * SANDBAR_SIN + sunDir.z * SANDBAR_COS);
+                palmShade = atollPalmShadow(sl, sunSl, sunDir.y) * saturate(3.0f - footprint * 2.0f);
+            }
+            float3 E = A.sunAtSea.rgb * sunVis * (1.0f - 0.8f * palmShade) * saturate(dot(Ns, sunDir))
+                     + cloudySkyFill(A.skyIrradianceSea.rgb);
             float3 sand = float3(0.55f, 0.50f, 0.40f) * (0.9f + 0.2f * ripple + 0.35f * grain) * (1.0f - 0.35f * wet);
             sand = mix(sand, float3(0.62f, 0.58f, 0.52f), debris * 0.8f);
             sand = mix(sand, float3(0.09f, 0.075f, 0.04f), wrack * 0.55f);

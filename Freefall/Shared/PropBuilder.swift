@@ -191,12 +191,15 @@ extension PropBuilder {
     }
 
     /// 针叶树（云杉）：几层越往上越小的棱锥。near：近处的多一层、带树干
-    mutating func conifer(base: SIMD3<Float>, height: Float, near: Bool, seed: Int32) {
+    /// distant：一公里开外的，只剩一个四棱锥（12 个顶点）
+    mutating func conifer(base: SIMD3<Float>, height: Float, near: Bool, seed: Int32, distant: Bool = false) {
         let tint = 0.8 + 0.5 * Self.h01(seed, 3)
         let green = SIMD3<Float>(0.020, 0.046, 0.022) * tint
         let r = height * (0.17 + 0.05 * Self.h01(seed, 5))
         let phase = 6.28 * Self.h01(seed, 9)
-        if near {
+        if distant {
+            cone(base: base + SIMD3(0, height * 0.06, 0), radius: r * 1.05, height: height * 0.94, sides: 4, color: green * 1.05, material: PropMaterial.foliage, phase: phase)
+        } else if near {
             cone(base: base, radius: height * 0.022, height: height * 0.5, sides: 4, color: SIMD3(0.07, 0.05, 0.035), material: PropMaterial.bark)
             cone(base: base + SIMD3(0, height * 0.14, 0), radius: r, height: height * 0.45, sides: 6, color: green, material: PropMaterial.foliage, phase: phase)
             cone(base: base + SIMD3(0, height * 0.38, 0), radius: r * 0.72, height: height * 0.38, sides: 6, color: green * 1.08, material: PropMaterial.foliage, phase: phase + 0.5)
@@ -208,12 +211,15 @@ extension PropBuilder {
     }
 
     /// 阔叶树：树干上一两团树冠。green：这一关树叶的颜色
-    mutating func broadleaf(base: SIMD3<Float>, height: Float, near: Bool, seed: Int32, green: SIMD3<Float>) {
+    mutating func broadleaf(base: SIMD3<Float>, height: Float, near: Bool, seed: Int32, green: SIMD3<Float>, distant: Bool = false) {
         let tint = 0.8 + 0.45 * Self.h01(seed, 3)
         let c = green * tint
         let rx = height * (0.30 + 0.10 * Self.h01(seed, 5)), ry = height * (0.30 + 0.06 * Self.h01(seed, 6))
         let phase = 6.28 * Self.h01(seed, 9)
-        if near {
+        if distant {
+            // 一公里开外：一个矮胖的五棱锥当树冠（15 个顶点）
+            cone(base: base + SIMD3(0, height * 0.3, 0), radius: rx * 1.1, height: height * 0.7, sides: 5, color: c * 1.05, material: PropMaterial.foliage, phase: phase)
+        } else if near {
             cone(base: base, radius: height * 0.035, height: height * 0.62, sides: 4, color: SIMD3(0.075, 0.058, 0.04), material: PropMaterial.bark)
             blob(center: base + SIMD3(0, height * 0.66, 0), radius: SIMD3(rx, ry, rx), sides: 7, color: c, material: PropMaterial.foliage, phase: phase, seed: seed)
             let off = SIMD3<Float>(cos(phase), 0, sin(phase)) * rx * 0.6
@@ -225,9 +231,10 @@ extension PropBuilder {
     }
 
     /// 椰子树：歪着往上长的细树干，顶上一圈往下垂的大叶子
-    mutating func palm(base: SIMD3<Float>, height: Float, seed: Int32) {
-        let dir = 6.28 * Self.h01(seed, 3)
-        let leanTo = SIMD3<Float>(cos(dir), 0, sin(dir)) * height * (0.12 + 0.22 * Self.h01(seed, 4))
+    /// lean：树顶相对树根水平偏多少（不给就按 seed 随机）
+    mutating func palm(base: SIMD3<Float>, height: Float, seed: Int32, lean: SIMD3<Float>? = nil) {
+        let dir = lean.map { atan2($0.z, $0.x) } ?? 6.28 * Self.h01(seed, 3)
+        let leanTo = lean ?? SIMD3<Float>(cos(dir), 0, sin(dir)) * height * (0.12 + 0.22 * Self.h01(seed, 4))
         let bark = SIMD3<Float>(0.11, 0.09, 0.065)
         var p = base - SIMD3(0, 0.3, 0)
         var top = p

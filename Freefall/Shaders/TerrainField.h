@@ -238,6 +238,9 @@ static inline float alpineForest(float2 p, float h) {
 
 // MARK: - 雪山：高处的冰斗，一大片平的雪坡，四周是尖利的雪峰和岩壁
 
+/// 雪坡上露出来的岩石（地面类型图里存的也是它）：> 0.36 是岩石
+static inline float snowOutcrop(float2 p) { return tFbm(p / 160.0f + float2(6.0f, 2.0f), 3); }
+
 static inline float snowHeight(float2 p) {
     float2 sl = valleyCoords(p);
     float s = sl.x, l = sl.y;
@@ -250,6 +253,8 @@ static inline float snowHeight(float2 p) {
     float h = floorH + wall + (ridges - 0.35f) * mix(30.0f, 1300.0f, steep)
             + 4.0f * tFbm(p / 260.0f, 3) * (1.0f - steep);
     float r = length(p - LZ_TARGET);
+    // 露岩鼓出雪面四五米：有自己的明暗和轮廓（之前和雪面齐平，像贴在雪上的一张纸）
+    h += 4.5f * tSmooth(0.33f, 0.42f, snowOutcrop(p)) * (1.0f - steep) * tSmooth(120.0f, 200.0f, r);
     h = mix(2750.0f + 0.6f * tFbm(p / 60.0f, 3), h, tSmooth(90.0f, 300.0f, r));
     return h;
 }
