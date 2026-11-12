@@ -185,7 +185,7 @@ struct GearSurface {
 /// 天空 / 地面 / 自己身体的反射、舱里的红灯、GGX 高光（几何高光抗锯齿）、尼龙的绒光
 static inline float3 shadeGear(GearSurface s, float3 V, float3 dnx, float3 dny,
                                constant FrameUniforms &F, constant AtmosphereConstants &A,
-                               texture2d<float> skyLUT) {
+                               texture2d<float> skyLUT, texture2d<float> canopyShadowMap) {
     if (s.wet > 0.0f) {
         // 湿了：织物吸了水颜色变深，表面一层水膜，绒光没了
         s.albedo *= 1.0f - 0.38f * s.wet;
@@ -202,7 +202,7 @@ static inline float3 shadeGear(GearSurface s, float3 V, float3 dnx, float3 dny,
     float3 skyE = A.skyIrradianceSea.rgb * (0.55f + 0.45f * N.y) + groundL * PI * saturate(-N.y) * 0.5f;
     const float3 cabinRed = float3(0.05f, 0.0045f, 0.0035f);
     float dl = 1.0f - s.interior;
-    float3 sunVis = canopyShadow(s.position, L, F) * s.sun;
+    float3 sunVis = canopyShadow(s.position, L, F, canopyShadowMap) * s.sun;
     // 贴着胸口的东西，朝里的一面（+Z 朝着身体）看到的是自己的身体而不是天空
     float2 torso = F.bodyShadow.xz + float2(0.0f, 0.06f);
     float nearTorso = F.bodyShadow.w * smoothstep(0.32f, 0.16f, length(s.position.xz - torso));
@@ -362,7 +362,7 @@ static inline float hazardStripe(float t, float fw) {
 static inline float3 shadeCabin(int material, float3 albedo, float3 Po, float3 P, float3 N, float3 V,
                                 float interior, float footprint, float3 dnx, float3 dny,
                                 constant FrameUniforms &F, constant AtmosphereConstants &A,
-                                texture2d<float> skyLUT, constant ObjectUniforms &O) {
+                                texture2d<float> skyLUT, texture2d<float> canopyShadowMap, constant ObjectUniforms &O) {
     if (material == MATERIAL_WINDOW) {
         // 视线穿过玻璃：天（低于地平线是太阳照着的云海），玻璃有一点发绿；掠射角上反射舱里暗红的光
         float3 Vw = rotateHeading(-V, F.heading.x, F.heading.y);
@@ -512,7 +512,7 @@ static inline float3 shadeCabin(int material, float3 albedo, float3 Po, float3 P
     s.wet = 0.0f;
     s.bead = 0.0f;
     s.beadR = 1.0f;
-    float3 radiance = shadeGear(s, V, dnx, dny, F, A, skyLUT);
+    float3 radiance = shadeGear(s, V, dnx, dny, F, A, skyLUT, canopyShadowMap);
     return radiance + cabinLamps(P, Nb, V, s.albedo, s.F0, roughness, specScale, O) * occlusion;
 }
 
@@ -520,7 +520,7 @@ static inline float3 shadeCabin(int material, float3 albedo, float3 Po, float3 P
 /// 飞机在它周围长出来以后换成机舱里的光
 static inline float3 shadeBar(int material, float3 albedo, float3 P, float3 N, float3 V, float interior,
                               float3 dnx, float3 dny, constant FrameUniforms &F, constant AtmosphereConstants &A,
-                              texture2d<float> skyLUT, constant ObjectUniforms &O) {
+                              texture2d<float> skyLUT, texture2d<float> canopyShadowMap, constant ObjectUniforms &O) {
     float metallic = material == MATERIAL_BAR_METAL ? 1.0f : 0.0f;
     GearSurface s;
     s.position = P;
@@ -538,7 +538,7 @@ static inline float3 shadeBar(int material, float3 albedo, float3 P, float3 N, f
     s.wet = 0.0f;
     s.bead = 0.0f;
     s.beadR = 1.0f;
-    float3 cabin = shadeGear(s, V, dnx, dny, F, A, skyLUT)
+    float3 cabin = shadeGear(s, V, dnx, dny, F, A, skyLUT, canopyShadowMap)
                  + cabinLamps(P, N, V, s.albedo, s.F0, s.roughness, s.specScale, O);
 
     // 房间：顶上偏后一盏柔和的灯（高光宽一点），四周墙的反光当成均匀的灰
@@ -566,7 +566,8 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
                                constant FrameUniforms &F [[buffer(1)]],
                                constant AtmosphereConstants &A [[buffer(2)]],
                                constant ObjectUniforms &O [[buffer(3)]],
-                               texture2d<float> skyLUT [[texture(0)]]) {
+                               texture2d<float> skyLUT [[texture(0)]],
+                               texture2d<float> canopyShadowMap [[texture(14)]]) {
     float3 eye = views[in.viewIndex].cameraPosition.xyz;
     float3 V = normalize(eye - in.stagePos);
     float3 N = normalize(in.normal);
@@ -598,10 +599,10 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
 
     float3 radiance;
     if (isBar) {
-        radiance = shadeBar(material, albedo, in.stagePos, N, V, in.interior, dnx, dny, F, A, skyLUT, O);
+        radiance = shadeBar(material, albedo, in.stagePos, N, V, in.interior, dnx, dny, F, A, skyLUT, canopyShadowMap, O);
     } else if (material >= MATERIAL_QUILT) {
         radiance = shadeCabin(material, albedo, in.objectPos, in.stagePos, N, V, in.interior, footprint, dnx, dny,
-                              F, A, skyLUT, O);
+                              F, A, skyLUT, canopyShadowMap, O);
     } else if (material == MATERIAL_EMISSIVE) {
         radiance = albedo;
     } else if (material == MATERIAL_LAMP_RED) {
@@ -648,7 +649,7 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
         g.normal = N;
         g.F0 = mix(float3(0.04f), albedo, metallic);
         g.albedo = diffuseAlbedo * (1.0f - metallic);
-        radiance = shadeGear(g, V, dnx, dny, F, A, skyLUT);
+        radiance = shadeGear(g, V, dnx, dny, F, A, skyLUT, canopyShadowMap);
     } else if (material == MATERIAL_FABRIC) {
         // 正面挨太阳照；背面看过去是透过来的光（尼龙伞布很薄，逆光下整片发亮）
         float lit = saturate(dot(N, L)), through = saturate(-dot(N, L));
@@ -761,7 +762,8 @@ fragment float4 gloveFragment(GloveOut in [[stage_in]],
                               texture2d<float> skyLUT [[texture(0)]],
                               texture2d<float> albedoTex [[texture(1)]],
                               texture2d<float> normalTex [[texture(2)]],
-                              texture2d<float> materialTex [[texture(3)]]) {
+                              texture2d<float> materialTex [[texture(3)]],
+                              texture2d<float> canopyShadowMap [[texture(14)]]) {
     constexpr sampler tex(filter::linear, mip_filter::linear, address::repeat, max_anisotropy(8));
     float3 eye = views[in.viewIndex].cameraPosition.xyz;
     float3 V = normalize(eye - in.stagePos);
@@ -803,7 +805,7 @@ fragment float4 gloveFragment(GloveOut in [[stage_in]],
     float beadFade = saturate(0.0016f / (max(length(dfdx(in.stagePos)), length(dfdy(in.stagePos))) * 2.0f) - 0.5f);
     g.bead = bead.x * beadFade;
     g.beadR = bead.y;
-    float3 radiance = shadeGear(g, V, dnx, dny, F, A, skyLUT);
+    float3 radiance = shadeGear(g, V, dnx, dny, F, A, skyLUT, canopyShadowMap);
     float3 c = tonemap(radiance * F.exposure.x) * F.camera.z;
     c += REVEAL_GLOW_COLOR * reveal.y * F.camera.z;
     return float4(c, 1.0f);
@@ -882,7 +884,8 @@ vertex LineOut lineVertex(uint vid [[vertex_id]],
 fragment float4 lineFragment(LineOut in [[stage_in]],
                              constant ViewUniforms *views [[buffer(0)]],
                              constant FrameUniforms &F [[buffer(1)]],
-                             constant AtmosphereConstants &A [[buffer(2)]]) {
+                             constant AtmosphereConstants &A [[buffer(2)]],
+                             texture2d<float> canopyShadowMap [[texture(14)]]) {
     float r = max(in.radiusPx, 0.5f);
     float alpha = saturate(r + 0.5f - abs(in.across)) * saturate(in.radiusPx / 0.5f);
     if (alpha < 0.003f) discard_fragment();
@@ -893,7 +896,7 @@ fragment float4 lineFragment(LineOut in [[stage_in]],
     float3 L = stageSunDirection(F);
     float altitude = F.camera.x + in.stagePos.y;
     float3 sunE = mix(A.sunAtCloudBase.rgb, A.sunAtCloudTop.rgb, saturate((altitude - 1000.0f) / 8000.0f))
-                * canopyShadow(in.stagePos, L, F);
+                * canopyShadow(in.stagePos, L, F, canopyShadowMap);
     float3 skyE = A.skyIrradianceSea.rgb * (0.55f + 0.45f * N.y);
     // 编织的绳子：漫反射为主，顺着绳子有一点点光泽
     float3 H = normalize(L + V);
@@ -901,4 +904,53 @@ fragment float4 lineFragment(LineOut in [[stage_in]],
     float3 radiance = in.color / PI * (sunE * saturate(dot(N, L) * 0.8f + 0.2f) + skyE) + sunE * gloss;
     float3 c = tonemap(radiance * F.exposure.x) * F.camera.z;
     return float4(c * alpha, alpha);
+}
+
+// MARK: - 伞和人的剪影贴图（PlayerShadow.swift）：从太阳的方向正交投影
+
+struct ShadowPassUniforms {
+    float4 u;        // xyz 贴图的横轴（舞台空间），w 1 / 半宽
+    float4 v;        // xyz 贴图的纵轴
+    float4 center;   // xy 贴图中心在（横轴, 纵轴）上的坐标
+};
+
+struct ShadowPassOut {
+    float4 position [[position]];
+    float3 color;
+};
+
+static inline float4 shadowPassPosition(float3 p, constant ShadowPassUniforms &S) {
+    float2 xy = (float2(dot(p, S.u.xyz), dot(p, S.v.xyz)) - S.center.xy) * S.u.w;
+    return float4(xy, 0.5f, 1.0f);
+}
+
+/// 伞衣：就是主 pass 画的那张网格（舞台空间），顶点颜色是伞布的反照率
+vertex ShadowPassOut canopyShadowVertex(uint vid [[vertex_id]],
+                                        device const MeshVertex *vertices [[buffer(0)]],
+                                        constant ShadowPassUniforms &S [[buffer(1)]]) {
+    MeshVertex v = vertices[vid];
+    ShadowPassOut o;
+    o.position = shadowPassPosition(v.position.xyz, S);
+    o.color = v.color.rgb;
+    return o;
+}
+
+/// 一层伞布透过来的光：尼龙透得最多的是它自己颜色的光（约 0.4 × 反照率^1.5）。
+/// 管线是相乘混合：上下两层布、叠在一起的褶子，画一层乘一次
+fragment float4 canopyShadowFragment(ShadowPassOut in [[stage_in]]) {
+    return float4(0.4f * pow(max(in.color, 0.0f), float3(1.5f)), 1.0f);
+}
+
+/// 人：一堆三角形（舞台空间），不透光
+vertex ShadowPassOut bodyShadowVertex(uint vid [[vertex_id]],
+                                      device const float4 *vertices [[buffer(0)]],
+                                      constant ShadowPassUniforms &S [[buffer(1)]]) {
+    ShadowPassOut o;
+    o.position = shadowPassPosition(vertices[vid].xyz, S);
+    o.color = 0.0f;
+    return o;
+}
+
+fragment float4 bodyShadowFragment(ShadowPassOut in [[stage_in]]) {
+    return float4(0.0f, 0.0f, 0.0f, 1.0f);
 }

@@ -8,3 +8,5 @@ xcuserdata/
 # 图标的备选方案只留在本机，仓库里只放最终版
 Design/AppIcon/*
 !Design/AppIcon/Final/
+# 性能测试把结果发回哪台 Mac（局域网地址，各人不一样）
+Freefall/Resources/perf-host.txt

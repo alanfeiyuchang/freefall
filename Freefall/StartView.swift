@@ -2,7 +2,7 @@ import ARKit
 import SwiftUI
 import UIKit
 
-/// 开始窗口：左右滑的关卡卡片（每关一张截图），顶上是这一关和所有关落地离靶心最近的一次，设置在窗口下面的浮条里（文字）。
+/// 开始窗口：左右滑的关卡卡片（每关一张截图），顶上是这一关和所有关落地离降落点最近的一次，设置在窗口下面的浮条里（文字）。
 struct StartView: View {
     static let windowID = "start"
     static let spaceID = "fall"
@@ -61,7 +61,7 @@ struct StartView: View {
                 .tracking(12)
             HStack(spacing: 28) {
                 record("本关最近", model.bestDistance[selection ?? model.scene.rawValue].map(Self.meters) ?? "—")
-                record("全部最近", model.overallBest.map { "\(Self.meters($0.distance))（\($0.scene.name)）" } ?? "—")
+                record("全部最近", model.overallBest.map { "\(Self.meters($0.distance)) · \($0.scene.name)" } ?? "—")
             }
             if let result = model.lastResult {
                 Text("上一跳（\(result.scene.name)）：\(result.summary)")
@@ -71,7 +71,7 @@ struct StartView: View {
         }
     }
 
-    private func record(_ label: String, _ value: String) -> some View {
+    private func record(_ label: LocalizedStringKey, _ value: String) -> some View {
         HStack(spacing: 8) {
             Text(label)
                 .foregroundStyle(.secondary)
@@ -134,7 +134,7 @@ struct StartView: View {
         Button {
             Task { await jump() }
         } label: {
-            Text(model.lastResult == nil ? "跳" : "再跳一次")
+            Text(model.lastResult == nil ? LocalizedStringKey("跳") : LocalizedStringKey("再跳一次"))
                 .font(.title.weight(.bold))
                 .frame(minWidth: 160)
                 .padding(.vertical, 6)
@@ -154,14 +154,14 @@ struct StartView: View {
                         Text("左手腕").tag(true)
                         Text("右手腕").tag(false)
                     }
-                    .frame(width: 170)
+                    .fixedSize()
                 }
                 setting("手") {
                     Picker("手", selection: $model.gloves) {
                         Text("跳伞手套").tag(true)
                         Text("真手").tag(false)
                     }
-                    .frame(width: 170)
+                    .fixedSize()
                 }
                 // 伞下怎么转向：默认只靠转头、转身（伞跟着你转）；要加上拉操纵环转向得先确认（世界绕着你转，可能会晕）
                 setting("伞下转向") {
@@ -171,11 +171,30 @@ struct StartView: View {
                         Text("转头转身").tag(false)
                         Text("加拉环").tag(true)
                     }
-                    .frame(width: 190)
+                    .fixedSize()
+                }
+                // 性能测试：开伞后自动轮流关掉画面的各个部分量耗时（约半分钟，画面会一段一段变），结果存进文件
+                setting("性能测试") {
+                    Picker("性能测试", selection: $model.perfTest) {
+                        Text("关").tag(false)
+                        Text("这一跳测").tag(true)
+                    }
+                    .fixedSize()
                 }
             }
             .pickerStyle(.segmented)
-            Text("建议坐着、戴耳机 · 点手腕上的表开关 HUD · 按数码表冠随时退出")
+            if !model.perfReport.isEmpty {
+                // 上一次性能测试的结果（从 Mac 收不到输出时，可以在这里看 / 截图）
+                ScrollView {
+                    Text(model.perfReport)
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(height: 150)
+                .padding(.horizontal, 24)
+            }
+            Text("建议坐着、戴耳机 · 点一下手腕上的表开关 HUD，按住两秒退出这一跳")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -184,9 +203,11 @@ struct StartView: View {
         .glassBackgroundEffect()
     }
 
-    private func setting<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
+    private func setting<Content: View>(_ label: LocalizedStringKey, @ViewBuilder _ content: () -> Content) -> some View {
+        // 标题和选择器都按内容撑开（写死宽度时英文、加了性能测试以后的中文都会被截成「…」）
         HStack(spacing: 10) {
             Text(label)
+                .fixedSize()
             content()
         }
     }
@@ -243,7 +264,7 @@ struct SceneCard: View {
         .contentShape(.hoverEffect, shape)
         .hoverEffect()
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(scene.name)：\(scene.blurb)")
+        .accessibilityLabel(String(localized: "\(scene.name)：\(scene.blurb)"))
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

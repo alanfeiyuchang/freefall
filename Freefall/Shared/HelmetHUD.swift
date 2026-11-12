@@ -43,6 +43,10 @@ final class HelmetHUD: @unchecked Sendable {
         /// 自由落体路上穿过了几个光环 / 一共几个（0 = 这一跳没有光环）
         var ringsPassed = 0
         var ringsTotal = 0
+        /// 实时帧率（每秒实际提交了几帧）、GPU 一帧的耗时（毫秒）、自动画质的档位；fps < 0 不显示
+        var fps = -1
+        var gpuMs: Float = 0
+        var qualityLevel = 0
         var time: Float = 0
     }
 
@@ -62,7 +66,9 @@ final class HelmetHUD: @unchecked Sendable {
     /// 两侧的读数开着时，提示往下让 2.5°：提示条比两块读数之间的空当宽，不让的话它的两头被读数的下沿挡住
     private static let sideYaw: Float = 17, sidePitch: Float = -6, hintPitch: Float = -15, hintPitchWithSides: Float = -17.5
     /// 开场握扶杆的提示（右边画一串往右跳的箭头，指向扶杆）
-    static let barPrompt = "伸出右手，握住右边的黄色扶杆"
+    static func barPrompt(left: Bool) -> String {
+        left ? String(localized: "伸出左手，握住左边的黄色扶杆") : String(localized: "伸出右手，握住右边的黄色扶杆")
+    }
 
     private var leftTextures: [MTLTexture] = [], rightTextures: [MTLTexture] = [], hintTextures: [MTLTexture] = []
     /// 现在显示的是哪一组贴图
@@ -329,7 +335,7 @@ final class HelmetHUD: @unchecked Sendable {
                     ctx.stroke(CGRect(x: 40, y: CGFloat(h) - 474, width: 290, height: 114))
                     text(ctx, "PULL", x: 185, y: 452, size: 70, color: a, anchor: 0.5, tracking: 10, height: h)
                 }
-                text(ctx, s.ringOnRight ? "右小臂上的拉环" : "左小臂上的拉环", x: 185, y: 520, size: 32, color: a, anchor: 0.5, height: h)
+                text(ctx, s.ringOnRight ? String(localized: "右小臂上的拉环") : String(localized: "左小臂上的拉环"), x: 185, y: 520, size: 32, color: a, anchor: 0.5, height: h)
             } else {
                 text(ctx, "DEPLOY 3,500 FT", x: 40, y: 404, size: 24, color: Self.cyan, tracking: 2, height: h)
                 line(ctx, 40, 420, 330, 420, h: h, color: Self.cyanDim, width: 1)
@@ -359,6 +365,14 @@ final class HelmetHUD: @unchecked Sendable {
             let heading = (Int(s.headingDeg.rounded()) % 360 + 360) % 360
             text(ctx, String(format: "HDG %03d°", heading), x: 470, y: 114, size: 34, color: Self.white, mono: true,
                  anchor: 1, height: h)
+            // 左上角：实时帧率、GPU 一帧的耗时、画质档位。掉到 80 帧以下变橙，70 以下变红
+            if s.fps >= 0 {
+                let c = s.fps >= 80 ? Self.white : s.fps >= 70 ? CGColor(red: 1, green: 0.62, blue: 0.15, alpha: 1)
+                                                                : CGColor(red: 1, green: 0.25, blue: 0.2, alpha: 1)
+                text(ctx, "\(s.fps) FPS", x: 44, y: 58, size: 36, color: c, mono: true, height: h)
+                text(ctx, String(format: "%.1f MS  Q%d", s.gpuMs, s.qualityLevel), x: 44, y: 98, size: 26, color: Self.cyanDim,
+                     mono: true, height: h)
+            }
 
             // 罗盘：刻度、N E S W 跟着航向转，顶上一个固定的指示
             let cx: CGFloat = 290, cy: CGFloat = 310, r: CGFloat = 145
@@ -385,7 +399,7 @@ final class HelmetHUD: @unchecked Sendable {
             ctx.addLine(to: CGPoint(x: cx + 9, y: cgCy + r + 18))
             ctx.addLine(to: CGPoint(x: cx, y: cgCy + r + 4))
             ctx.fillPath()
-            // 靶：圈外一个橙色菱形 + 一条虚线指过去；圈里是距离
+            // 降落点（LZ）：圈外一个橙色菱形 + 一条虚线指过去；圈里是距离
             if let bearing = s.targetBearingDeg, let distance = s.targetDistance {
                 let rel = CGFloat(bearing) * .pi / 180
                 let tx = cx + sin(rel) * (r + 16), ty = cy - cos(rel) * (r + 16)
@@ -399,7 +413,7 @@ final class HelmetHUD: @unchecked Sendable {
                 line(ctx, cx + sin(rel) * 40, cy - cos(rel) * 40, cx + sin(rel) * (r - 22), cy - cos(rel) * (r - 22),
                      h: h, color: Self.amber.copy(alpha: 0.7) ?? Self.amber, width: 2)
                 ctx.setLineDash(phase: 0, lengths: [])
-                text(ctx, "TGT", x: cx, y: cy - 12, size: 24, color: Self.amber, anchor: 0.5, tracking: 3, height: h)
+                text(ctx, "LZ", x: cx, y: cy - 12, size: 24, color: Self.amber, anchor: 0.5, tracking: 3, height: h)
                 text(ctx, distance >= 1000 ? String(format: "%.1f KM", Float(distance) / 1000) : "\(distance) M",
                      x: cx, y: cy + 32, size: 40, color: Self.white, mono: true, anchor: 0.5, height: h)
             }
@@ -440,10 +454,11 @@ final class HelmetHUD: @unchecked Sendable {
             let lines = s.hint.split(separator: "\n").map(String.init)
             guard !lines.isEmpty else { return }
             // 两端一对括号，中间一行字（两行时上下排），背后垫一层暗底
-            let prompt = s.hint == Self.barPrompt
+            let promptLeft = s.hint == Self.barPrompt(left: true)        // 扶杆在左边（表戴在右手）：箭头朝左
+            let prompt = s.hint == Self.barPrompt(left: false) || promptLeft
             let extra: CGFloat = prompt ? 120 : 0
             func build(_ size: CGFloat) -> [(CTLine, CGFloat)] {
-                let font = CTFontCreateUIFontForLanguage(.emphasizedSystem, size, "zh-Hans" as CFString)!
+                let font = CTFontCreateUIFontForLanguage(.emphasizedSystem, size, nil)!
                 return lines.prefix(2).enumerated().map { i, l in
                     let attributes: [NSAttributedString.Key: Any] = [
                         NSAttributedString.Key(kCTFontAttributeName as String): font,
@@ -460,22 +475,24 @@ final class HelmetHUD: @unchecked Sendable {
             if let widest = built.map(\.1).max(), widest > room { built = build(size * room / widest) }
             let half = (built.map(\.1).max() ?? 0) / 2 + 40
             let c = CGFloat(w) / 2
-            plate(ctx, CGRect(x: c - half - 30, y: 10, width: 2 * half + 60 + extra, height: CGFloat(h) - 20), h: h)
+            plate(ctx, CGRect(x: c - half - 30 - (promptLeft ? extra : 0), y: 10, width: 2 * half + 60 + extra,
+                              height: CGFloat(h) - 20), h: h)
             for (i, (line, width)) in built.enumerated() {
                 let y = lines.count > 1 ? (i == 0 ? 68 : 124) : 94
                 ctx.textPosition = CGPoint(x: (CGFloat(w) - width) / 2, y: CGFloat(h) - CGFloat(y))
                 CTLineDraw(line, ctx)
             }
             if prompt {
-                // 开场：右边一串往右跳的箭头，指向扶杆
+                // 开场：扶杆那一边一串朝它跳的箭头
+                let dir: CGFloat = promptLeft ? -1 : 1
                 for k in 0..<3 {
                     let alpha = 0.25 + 0.75 * max(0, sin(CGFloat(s.time) * 6 - CGFloat(k) * 0.9))
-                    let x = c + half + 14 + CGFloat(k) * 34
+                    let x = c + dir * (half + 14 + CGFloat(k) * 34)
                     ctx.setStrokeColor(Self.amber.copy(alpha: alpha) ?? Self.amber)
                     ctx.setLineWidth(6)
                     ctx.setLineJoin(.round)
                     ctx.move(to: CGPoint(x: x, y: CGFloat(h) / 2 + 20))
-                    ctx.addLine(to: CGPoint(x: x + 18, y: CGFloat(h) / 2))
+                    ctx.addLine(to: CGPoint(x: x + dir * 18, y: CGFloat(h) / 2))
                     ctx.addLine(to: CGPoint(x: x, y: CGFloat(h) / 2 - 20))
                     ctx.strokePath()
                 }

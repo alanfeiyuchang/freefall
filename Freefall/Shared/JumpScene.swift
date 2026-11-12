@@ -10,13 +10,13 @@ enum JumpScene: Int, CaseIterable, Sendable, Identifiable {
 
     var name: String {
         switch self {
-        case .atoll: "环礁"
-        case .grassland: "草原"
-        case .alpine: "高山"
-        case .snow: "雪山"
-        case .island: "海岛"
-        case .volcano: "火山"
-        case .sky: "天空之城"
+        case .atoll: String(localized: "环礁")
+        case .grassland: String(localized: "草原")
+        case .alpine: String(localized: "高山")
+        case .snow: String(localized: "雪山")
+        case .island: String(localized: "海岛")
+        case .volcano: String(localized: "火山")
+        case .sky: String(localized: "天空之城")
         }
     }
 
@@ -36,26 +36,26 @@ enum JumpScene: Int, CaseIterable, Sendable, Identifiable {
     /// 卡片上关名下面的一行：落在哪、要躲开什么
     var tagline: String {
         switch self {
-        case .atoll: "潟湖里的白沙洲 · 别落水"
-        case .grassland: "农田 · 别掉进河和树林"
-        case .alpine: "U 形谷 · 别撞岩壁"
-        case .snow: "高原雪坡 · 太陡的落不了"
-        case .island: "热带小岛 · 别落海、别进雨林"
-        case .volcano: "破火山口 · 躲开熔岩和毒烟"
-        case .sky: "云海上的浮岛 · 别掉出岛外"
+        case .atoll: String(localized: "潟湖里的白沙洲 · 别落水")
+        case .grassland: String(localized: "农田 · 别掉进河和树林")
+        case .alpine: String(localized: "U 形谷 · 别撞岩壁")
+        case .snow: String(localized: "高原雪坡 · 太陡的落不了")
+        case .island: String(localized: "热带小岛 · 别落海、别进雨林")
+        case .volcano: String(localized: "破火山口 · 躲开熔岩和毒烟")
+        case .sky: String(localized: "云海上的浮岛 · 别掉出岛外")
         }
     }
 
     /// 开始窗口里的一句话介绍（看着卡片时弹出来）
     var blurb: String {
         switch self {
-        case .atoll: "潟湖里一片白沙洲。别落进水里"
-        case .grassland: "缓丘、农田、一条河和几片树林。别掉进河里、别挂在树上"
-        case .alpine: "开伞时两边的山比你还高。顺着山谷飞到草甸上，别撞上岩壁、别落进林子"
-        case .snow: "海拔 2,750 米的雪坡，四周是五千米的雪峰。坡太陡的地方落不了"
-        case .island: "四面环海的热带小岛：从海上飞过去，靶在沙滩后面的草地上。落短了掉海里，往里是雨林"
-        case .volcano: "破火山口里一座正在喷的火山锥：别靠近火山口和烟柱，别踩到熔岩"
-        case .sky: "云海上面浮着一群岛，岛上是废弃的石头城：落在主岛的草坪上。飞过头掉出岛外就进云海了，别撞上塔和城堡"
+        case .atoll: String(localized: "潟湖里一片白沙洲。别落进水里")
+        case .grassland: String(localized: "缓丘、农田、一条河和几片树林。别掉进河里、别挂在树上")
+        case .alpine: String(localized: "开伞时两边的山比你还高。顺着山谷飞到草甸上，别撞上岩壁、别落进林子")
+        case .snow: String(localized: "海拔 2,750 米的雪坡，四周是五千米的雪峰。坡太陡的地方落不了")
+        case .island: String(localized: "四面环海的热带小岛：从海上飞过去，降落点在沙滩后面的草地上。落短了掉海里，往里是雨林")
+        case .volcano: String(localized: "破火山口里一座正在喷的火山锥：别靠近火山口和烟柱，别踩到熔岩")
+        case .sky: String(localized: "云海上面浮着一群岛，岛上是废弃的石头城：落在主岛的草坪上。飞过头掉出岛外就进云海了，别撞上塔和城堡")
         }
     }
 

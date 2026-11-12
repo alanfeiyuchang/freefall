@@ -109,6 +109,13 @@ struct JumpTimeline {
     /// 实体化从哪里开始蔓延（舞台坐标：抓住扶杆的那只手）
     private(set) var revealCenter = SIMD3<Double>(Double(ProceduralMeshes.barStage.x), 1.25,
                                                    Double(ProceduralMeshes.barStage.y))
+    /// 扶杆在左边（表戴在右手时）。开场前设好
+    var barOnLeft = false {
+        didSet {
+            guard barGrabbedTime == nil else { return }
+            revealCenter.x = Double(ProceduralMeshes.barStage(onLeft: barOnLeft).x)
+        }
+    }
     private(set) var exitTime: Double?
     private(set) var leftRampTime: Double?
     private(set) var deployTime: Double?
@@ -255,6 +262,14 @@ struct JumpTimeline {
     /// 落地以后捏一下手指：提前结束
     mutating func requestEnd() {
         if phase == .landed, fadeTime == nil { fadeTime = time }
+    }
+
+    /// 半路退出（按住手表两秒）：很快暗下去，回到开始窗口；还没落地就不算成绩
+    private(set) var quitting = false
+    mutating func quit() {
+        guard phase != .done, !quitting else { return }
+        quitting = true
+        fadeTime = time
     }
 
     // MARK: - 推进
@@ -482,7 +497,7 @@ struct JumpTimeline {
     /// 前进的方向（云坐标）
     var forward: SIMD2<Double> { SIMD2(-sin(flightHeading), -cos(flightHeading)) }
 
-    private var fadeDuration: Double { isFatal ? 0.6 : Self.fadeOutDuration }
+    private var fadeDuration: Double { quitting ? 0.5 : isFatal ? 0.6 : Self.fadeOutDuration }
 
     /// 画面亮度：开头淡入，最后淡出
     var brightness: Double {

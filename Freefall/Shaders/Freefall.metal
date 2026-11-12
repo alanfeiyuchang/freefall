@@ -32,6 +32,41 @@ vertex VOut skyVertex(uint vid [[vertex_id]], ushort amp [[amplification_id]]) {
     return o;
 }
 
+// MARK: - 动态分辨率：整帧按较低的分辨率画进中间缓冲，这里放大回系统给的画面
+
+struct ResolveOut {
+    float4 color [[color(0)]];
+    float depth [[depth(any)]];
+};
+
+/// info：xy = 1 / 中间缓冲的尺寸，z = 目标有没有 rate map（1/0）
+fragment ResolveOut resolveFragment(VOut in [[stage_in]],
+                                    constant rasterization_rate_map_data &targetMap [[buffer(2)]],
+                                    constant rasterization_rate_map_data &sourceMap [[buffer(4)]],
+                                    constant float4 &info [[buffer(5)]],
+                                    texture2d_array<float> color [[texture(0)]],
+                                    depth2d_array<float> depth [[texture(1)]]) {
+    // 目标的物理像素 → 屏幕坐标 → 中间缓冲的物理像素（两边各有自己的 rate map：中间缓冲的是把目标的整体缩小）
+    float2 screen = screenPosition(in.position.xy, in.viewIndex, info.z > 0.5f, targetMap);
+    rasterization_rate_map_decoder decoder(sourceMap);
+    float2 uv = decoder.map_screen_to_physical_coordinates(screen, in.viewIndex) * info.xy;
+    constexpr sampler nearestClamp(filter::nearest, address::clamp_to_edge);
+    ResolveOut o;
+    // 放大是一次双线性重采样，会糊掉大约一个像素：按上下左右四个邻居做一点反锐化补回来，
+    // 结果夹在这五个点的最小最大值之间（不出光晕）
+    float4 c = color.sample(linearClamp, uv, in.viewIndex);
+    float3 n = color.sample(linearClamp, uv + float2(0.0f, -info.y), in.viewIndex).rgb;
+    float3 s = color.sample(linearClamp, uv + float2(0.0f, info.y), in.viewIndex).rgb;
+    float3 w = color.sample(linearClamp, uv + float2(-info.x, 0.0f), in.viewIndex).rgb;
+    float3 e = color.sample(linearClamp, uv + float2(info.x, 0.0f), in.viewIndex).rgb;
+    float3 lo = min(c.rgb, min(min(n, s), min(w, e))), hi = max(c.rgb, max(max(n, s), max(w, e)));
+    float3 sharp = clamp(c.rgb + (c.rgb - (n + s + w + e) * 0.25f) * 0.3f, lo, hi);
+    o.color = float4(sharp, c.a);
+    // 深度取最近的那个像素（混合沉浸里系统按深度合成，不能插值出不存在的深度）
+    o.depth = depth.sample(nearestClamp, uv, in.viewIndex);
+    return o;
+}
+
 // MARK: - 启动时生成的纹理
 
 kernel void generateBaseNoise(texture3d<float, access::write> out [[texture(0)]],
@@ -360,7 +395,9 @@ fragment CloudOut cloudFreshFragment(VOut in [[stage_in]],
 #ifdef PROFILE_SKIP_MARCH
     CloudHit h; h.radiance = 0.0f; h.transmittance = 1.0f; h.depth = 0.0f;
 #else
-    CloudHit h = marchClouds(r.origin, r.direction, jitter, F, A, maps);
+    // F.exposure.z：头显上性能测试用的开关（位：1 云不步进，2 地形不着色，16 树不着色，64 天空不着色；见 ImmersiveRenderer）
+    CloudHit h; h.radiance = 0.0f; h.transmittance = 1.0f; h.depth = 0.0f;
+    if ((int(F.exposure.z) & 1) == 0) h = marchClouds(r.origin, r.direction, jitter, F, A, maps);
 #endif
 
     // 空气透视：从你到云（按不透明度加权的平均距离）这一段，沿视线积 6 步散射。
@@ -439,8 +476,13 @@ fragment CloudOut cloudResolveFragment(VOut in [[stage_in]],
 
     float4 result;
     if (valid) {
-        float4 h = clamp(history.sample(pixelLinearClamp, prevPixel, layer), lo, hi);
-        result = isFresh ? mix(h, own, 0.4f) : h;
+        // 历史夹到周围新样本的范围里（防拖影），范围两头各放宽半个跨度：新样本自己是带噪声的（每个的起步位置不一样），
+        // 九个样本的最小最大值本身就在抖，夹得太紧等于每一帧都把这个抖动重新灌进已经攒平的历史里
+        float4 span = (hi - lo) * 0.5f;
+        float4 h = clamp(history.sample(pixelLinearClamp, prevPixel, layer), lo - span, hi + span);
+        // 新算的样本只占两成多（之前四成）：每个样本的起步位置是抖过的，背阴面上明暗跟着起步位置变得厉害，
+        // 新样本占得多，每四个像素里刚换的那一个就和另外三个对不上，暗面上是一层细网纹
+        result = isFresh ? mix(h, own, 0.22f) : h;
     } else {
         // 没有历史：这一帧新算的四分之一样本双线性放大
         float2 freshCoord = (float2(pixel - pattern)) * 0.5f + 0.5f;
@@ -593,7 +635,9 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
                                 texture2d_array<float> cloudColor [[texture(3)]],
                                 texture2d<float> cloudShadow [[texture(4)]],
                                 texture2d<float> atollMap [[texture(5)]],
-                                texture3d<float> waveNoise [[texture(6)]]) {
+                                texture3d<float> waveNoise [[texture(6)]],
+                                texture2d<float> canopyShadowMap [[texture(14)]],
+                                texture2d<float> bodyShadowMap [[texture(15)]]) {
     float2 screen = screenPosition(in.position.xy, in.viewIndex, F.camera.w > 0.5f, rateMap);
     Ray r = worldRay(screen, views[in.viewIndex], F);
     float3 rd = r.direction;
@@ -615,6 +659,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
 #ifdef PROFILE_FLAT_SCENE
     float3 color = float3(0.02f);
 #else
+    if ((int(F.exposure.z) & 64) != 0) return float4(0.02f, 0.03f, 0.05f, 1.0f);
     float3 color = skyViewLookup(skyLUT, rd, sunDir, camR, ground);
     if (ground && !terrainScene) {
         float t = sea.x;
@@ -634,7 +679,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
         // 自己的伞衣和身体的影子：这个点在舞台空间的位置（视线没转航向的方向 × 距离）
         float3 stageP = views[in.viewIndex].cameraPosition.xyz + rotateHeading(rd, F.heading.x, -F.heading.y) * t;
         float3 Ls = stageSunDirection(F);
-        float3 sunVis = shadow * canopyShadow(stageP, Ls, F) * bodyShadow(stageP, Ls, F);
+        float3 sunVis = shadow * canopyShadow(stageP, Ls, F, canopyShadowMap) * bodyShadow(stageP, Ls, F, bodyShadowMap);
 
         // 水下的颜色：深海往上散出来的光 + 浅处的白沙底（红光被水吸收得最快，越浅越青绿）
         float3 waterAlbedo = float3(0.004f, 0.017f, 0.034f);
@@ -847,6 +892,10 @@ fragment float4 hudFragment(HudOut in [[stage_in]],
         float rate = F.hudStyle.z > 1.5f ? 9.0f : 3.0f;
         float blink = step(0.0f, sin(F.camera.y * rate * 2.0f * PI));
         face = (F.hudStyle.z > 1.5f ? float3(0.75f, 0.03f, 0.02f) : float3(0.8f, 0.3f, 0.02f)) * blink * panel;
+    }
+    // 舱里的「绿灯」：可以松手跳了，表盘整个亮绿、慢慢呼吸（舱壁上的跳伞灯去掉了——握着扶杆时看不到它，表就在眼前）
+    if (F.hudStyle.w > 0.5f) {
+        face = float3(0.03f, 0.85f, 0.16f) * (0.72f + 0.28f * sin(F.camera.y * 2.0f * PI * 1.2f)) * panel;
     }
     float3 rgb = (face * (1.0f - text) + text + rim * (watch ? 0.35f : 0.5f) * (1.0f - text)
                   + arc * orange * (1.0f - text)) * opacity;

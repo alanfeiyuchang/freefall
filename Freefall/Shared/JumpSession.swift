@@ -41,7 +41,12 @@ final class JumpSession {
     private(set) var wetness: Double = 0
     /// 戴手套（拉环挂在袖子外面）、高度表戴在哪只手腕上：渲染器开场设一次
     var gloved = true { didSet { interaction.gloved = gloved } }
-    var watchOnLeft = true { didSet { interaction.ringArm = watchOnLeft ? 1 : 0 } }
+    var watchOnLeft = true {
+        didSet {
+            interaction.ringArm = watchOnLeft ? 1 : 0
+            timeline.barOnLeft = !watchOnLeft          // 扶杆在戴表那只手的另一边
+        }
+    }
     /// 头盔 HUD 开没开（两侧的读数和提示）。默认关，点一下手腕上的表开 / 关；舱里开场的提示（握住扶杆、绿灯松手）不管开没开都显示。
     /// 没有手部追踪时点不了表，一直开着
     var hudOn = false {
@@ -52,6 +57,11 @@ final class JumpSession {
     private var touchingWatch = false
     /// 点了几次表（给声音用）
     private(set) var watchTaps = 0
+    /// 按住表（真手）/ 两只手一起捏住不动（系统捏合）从什么时候开始：按满 quitHold 秒退出这一跳
+    private var quitHoldStart: Double?
+    static let quitHold = 2.0
+    /// 按住多久以后才在提示里显示退出的进度（点一下表开关 HUD 不该闪出这一行）
+    private static let quitHintDelay = 0.35
 
     init(timeline: JumpTimeline = JumpTimeline(), realHands: Bool, autopilot: Autopilot?) {
         self.timeline = timeline
@@ -90,6 +100,7 @@ final class JumpSession {
             timeline.setDive(left: Double(interaction.diveLeft), right: Double(interaction.diveRight))
         } else {
             pinchControls(began: pinchesBegan, touches: touches)
+            if autopilot == nil { checkPinchQuit(touches) }
         }
         // 落地以后捏一下手指：不等了，直接结束
         if pinchesBegan > 0, timeline.phase == .landed { timeline.requestEnd() }
@@ -146,9 +157,40 @@ final class JumpSession {
             touchingWatch = true
             hudOn.toggle()
             watchTaps += 1
+            quitHoldStart = timeline.time
         } else if touchingWatch, d > size / 2 + 0.05 {
             touchingWatch = false
+            quitHoldStart = nil
         }
+        // 一直按着表：按满两秒退出这一跳（点一下开关 HUD 的那一下已经切过了，退出时无所谓）
+        if touchingWatch, let start = quitHoldStart, timeline.time - start >= Self.quitHold {
+            quitHoldStart = nil
+            timeline.quit()
+        }
+    }
+
+    /// 没有手部追踪：两只手一起捏住、不往下拉，两秒退出（舱里不算：捏住就是握着扶杆，等绿灯时常常两只手一起捏）
+    private func checkPinchQuit(_ touches: [PinchState.Touch]) {
+        let both = touches.contains { $0.isLeft } && touches.contains { !$0.isLeft }
+        guard both, touches.allSatisfy({ $0.pull < 0.04 }), timeline.phase != .cabin, timeline.phase != .landed,
+              timeline.phase != .done else {
+            quitHoldStart = nil
+            return
+        }
+        let start = quitHoldStart ?? timeline.time
+        quitHoldStart = start
+        if timeline.time - start >= Self.quitHold {
+            quitHoldStart = nil
+            timeline.quit()
+        }
+    }
+
+    /// 退出按到哪了：0…1；没在按、或者刚按下去还不到显示的时候是 nil
+    var quitProgress: Double? {
+        guard let start = quitHoldStart, !timeline.quitting else { return nil }
+        let held = timeline.time - start
+        guard held >= Self.quitHintDelay else { return nil }
+        return min(held / Self.quitHold, 1)
     }
 
     /// 真手：抓扶杆、松手、拉开伞拉手
@@ -316,10 +358,17 @@ final class JumpSession {
     /// 出了舱门的提示跟着 HUD 开关
     var hudHint: String {
         let t = timeline
+        // 正在按住退出：只显示这一行和进度（不管 HUD 开没开）
+        if let q = quitProgress {
+            let filled = Int((q * 10).rounded(.down))
+            let bar = String(repeating: "■", count: filled) + String(repeating: "□", count: 10 - filled)
+            return (usesRealHands ? String(localized: "继续按住手表，退出这一跳") : String(localized: "两只手继续捏住，退出这一跳"))
+                + "\n" + bar
+        }
         var lines: [String] = []
         if t.phase == .cabin || hudOn, !hint.isEmpty { lines.append(hint) }
         if !hudOn, handsDriving, watchTaps == 0, t.phase == .cabin, t.revealProgress >= 1 {
-            lines.append("点一下手表，打开 HUD")
+            lines.append(String(localized: "点一下手表打开 HUD · 按住两秒退出"))
         }
         return lines.joined(separator: "\n")
     }
@@ -330,59 +379,63 @@ final class JumpSession {
         switch t.phase {
         case .cabin:
             if t.barGrabbedTime == nil {
-                return usesRealHands ? HelmetHUD.barPrompt : "捏住手指 = 握住扶杆"
+                return usesRealHands ? HelmetHUD.barPrompt(left: !watchOnLeft) : String(localized: "捏住手指 = 握住扶杆")
             }
             if !t.greenLight {
                 // 飞机正在长出来：别打扰，松手了就提醒再抓住
-                return t.holdingBar ? "" : (usesRealHands ? "再握住扶杆" : "再捏住手指")
+                return t.holdingBar ? "" : (usesRealHands ? String(localized: "再握住扶杆") : String(localized: "再捏住手指"))
             }
-            if t.holdingBar { return usesRealHands ? "绿灯！松手就跳" : "绿灯！松开手指就跳" }
-            return usesRealHands ? "握住扶杆，松手就跳" : "捏住手指，松开就跳"
+            if t.holdingBar { return usesRealHands ? String(localized: "手表亮绿灯了！松手就跳") : String(localized: "手表亮绿灯了！松开手指就跳") }
+            return usesRealHands ? String(localized: "握住扶杆，松手就跳") : String(localized: "捏住手指，松开就跳")
         case .exit, .opening:
             return ""
         case .freefall:
-            if let until = tooEarlyUntil, t.time < until { return "还没到开伞高度\n等手表报警再拉" }
+            if let until = tooEarlyUntil, t.time < until { return String(localized: "还没到开伞高度\n等手表报警再拉") }
             if t.alarmLevel > 0 {
-                let (hand, arm) = watchOnLeft ? ("左手", "右小臂") : ("右手", "左小臂")
-                return usesRealHands ? "开伞！\n用\(hand)抓住\(arm)上的红色拉环，往外拉" : "开伞！捏一下手指"
+                guard usesRealHands else { return String(localized: "开伞！捏一下手指") }
+                return watchOnLeft ? String(localized: "开伞！\n用左手抓住右小臂上的红色拉环，往外拉")
+                    : String(localized: "开伞！\n用右手抓住左小臂上的红色拉环，往外拉")
             }
-            if let left = t.leftRampTime, t.time - left < 6 { return "手表在 3,500 英尺报警，那时再开伞" }
+            if let left = t.leftRampTime, t.time - left < 6 { return String(localized: "手表在 3,500 英尺报警，那时再开伞") }
             return ""
         case .canopy:
             let (clock, distance) = t.targetBearing
-            let bearing = distance < 25 ? "靶就在你下面" : "靶在 \(clock) 点钟方向 · \(Int(distance / 10) * 10) 米"
+            let bearing = distance < 25 ? String(localized: "降落点就在你下面")
+                : String(localized: "降落点在 \(clock) 点钟方向 · \(Int(distance / 10) * 10) 米")
             if let since = t.sinceDeploy, since < 14 {
                 let how: String
                 if t.toggleSteering {
-                    how = usesRealHands ? "拉下左 / 右操纵环转向，两边一起拉减速，两手往前推俯冲"
-                        : "捏住往下拉：左手左转，右手右转"
+                    how = usesRealHands ? String(localized: "拉下左 / 右操纵环转向，两边一起拉减速，两手往前推俯冲")
+                        : String(localized: "捏住往下拉：左手左转，右手右转")
                 } else {
-                    how = usesRealHands ? "转头、转身来转向，伞跟着你转；操纵环一起拉减速，两手往前推俯冲"
-                        : "转头、转身来转向，伞跟着你转；捏住往下拉减速"
+                    how = usesRealHands ? String(localized: "转头、转身来转向，伞跟着你转；操纵环一起拉减速，两手往前推俯冲")
+                        : String(localized: "转头、转身来转向，伞跟着你转；捏住往下拉减速")
                 }
                 return how + "\n" + bearing
             }
             // 山区：脚下的地面比高度表的读数近得多，快撞上了
             if t.scene.hasTerrain, t.terrainClearance < 150, t.heightAboveGround - t.terrainClearance > 50 {
-                return bearing + "\n离山坡只有 \(Int(t.terrainClearance)) 米，快转开"
+                return bearing + "\n" + String(localized: "离山坡只有 \(Int(t.terrainClearance)) 米，快转开")
             }
             if t.scene == .volcano, t.plumeProximity < 2.5 {
-                return bearing + "\n前面是火山口的毒烟，别过去"
+                return bearing + "\n" + String(localized: "前面是火山口的毒烟，别过去")
             }
             // 天空之城：脚下没有岛，而且已经快掉到岛面以下了
             if t.scene == .sky, t.heightAboveGround < 90, t.terrainClearance > t.heightAboveGround + 200 {
-                return bearing + "\n脚下是云海，快飞回岛上"
+                return bearing + "\n" + String(localized: "脚下是云海，快飞回岛上")
             }
             // 高度管理：直飞还能飞多远（和自动驾驶一样估），比离靶远太多就提醒先飞过去再掉头
             let reach = JumpTimeline.canopySpeed * max(t.heightAboveGround - 6, 0) / JumpTimeline.canopySink + 15
             if distance < 300, reach > distance + 150 {
-                return bearing + (usesRealHands ? "\n高度还多：两手往前推俯冲，或者先飞过靶再掉头" : "\n高度还多：先飞过靶，再掉头回来")
+                return bearing + "\n" + (usesRealHands ? String(localized: "高度还多：两手往前推俯冲，或者先飞过降落点再掉头")
+                    : String(localized: "高度还多：先飞过降落点，再掉头回来"))
             }
-            if reach < distance - 30 { return bearing + "\n高度不够了，对准靶直飞" }
+            if reach < distance - 30 { return bearing + "\n" + String(localized: "高度不够了，对准降落点直飞") }
             return bearing
         case .landed, .done:
-            let ringLine = t.rings.isEmpty ? "" : "穿过光环 \(t.ringsPassed) / \(t.rings.count) · "
-            return resultSummary.map { $0 + "\n" + ringLine + "捏一下手指结束" } ?? ""
+            let end = t.rings.isEmpty ? String(localized: "捏一下手指结束")
+                : String(localized: "穿过光环 \(t.ringsPassed) / \(t.rings.count) · 捏一下手指结束")
+            return resultSummary.map { $0 + "\n" + end } ?? ""
         }
     }
 
@@ -397,19 +450,20 @@ final class JumpSession {
         let t = timeline
         let d = t.landingDistance
         switch t.outcome {
-        case .bullseye: return String(format: "正中靶心！离靶心 %.1f 米", d)
-        case .inTarget: return String(format: "进靶了！离靶心 %.1f 米", d)
+        case .bullseye: return String(format: String(localized: "正中降落点！离中心 %.1f 米"), d)
+        case .inTarget: return String(format: String(localized: "落在降落点上！离中心 %.1f 米"), d)
         case .missed:
-            return t.scene == .atoll ? "落在沙洲上，离靶心 \(Int(d)) 米——没进靶" : "平安落地，离靶心 \(Int(d)) 米——没进靶"
-        case .water: return "掉进水里了——离靶心 \(Int(d)) 米"
-        case .crashed: return String(format: "摔了——落地时每秒 %.0f 米，开伞太晚", t.landingSpeed)
-        case .terrain: return t.scene == .sky ? "撞上了浮岛的岩壁——那里落不了" : "撞上山坡了——那里太陡，落不了"
-        case .trees: return "落进树林，挂在树上了——离靶心 \(Int(d)) 米"
-        case .lava: return "掉进熔岩里了"
-        case .crevasse: return "掉进冰裂缝了"
-        case .plume: return "冲进了火山口的毒烟"
-        case .fell: return "掉出了浮岛，落进云海——离靶心 \(Int(d)) 米"
-        case .ruins: return t.scene == .sky ? "撞上了石头城的塔" : "撞上了障碍物"
+            return t.scene == .atoll ? String(localized: "落在沙洲上，离降落点还差 \(Int(d)) 米")
+                : String(localized: "平安落地，离降落点还差 \(Int(d)) 米")
+        case .water: return String(localized: "掉进水里了——离降落点 \(Int(d)) 米")
+        case .crashed: return String(format: String(localized: "摔了——落地时每秒 %.0f 米，开伞太晚"), t.landingSpeed)
+        case .terrain: return t.scene == .sky ? String(localized: "撞上了浮岛的岩壁——那里落不了") : String(localized: "撞上山坡了——那里太陡，落不了")
+        case .trees: return String(localized: "落进树林，挂在树上了——离降落点 \(Int(d)) 米")
+        case .lava: return String(localized: "掉进熔岩里了")
+        case .crevasse: return String(localized: "掉进冰裂缝了")
+        case .plume: return String(localized: "冲进了火山口的毒烟")
+        case .fell: return String(localized: "掉出了浮岛，落进云海——离降落点 \(Int(d)) 米")
+        case .ruins: return t.scene == .sky ? String(localized: "撞上了石头城的塔") : String(localized: "撞上了障碍物")
         case nil: return nil
         }
     }
@@ -419,7 +473,7 @@ extension JumpTimeline {
     /// 舱门边的扶杆（舞台空间）：跟着飞机走，松手往外跑时也跟着往后退
     var bar: Interaction.Bar {
         let o = planeOffset
-        return Interaction.Bar(x: ProceduralMeshes.barStage.x + Float(o.x),
+        return Interaction.Bar(x: ProceduralMeshes.barStage(onLeft: barOnLeft).x + Float(o.x),
                                z: ProceduralMeshes.barStage.y + Float(o.z - ProceduralMeshes.standOnRamp),
                                bottom: ProceduralMeshes.barBottom + Float(o.y),
                                top: ProceduralMeshes.barTop + Float(o.y))

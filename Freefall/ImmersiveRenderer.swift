@@ -68,9 +68,115 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private let gpuTimes = OSAllocatedUnfairLock(initialState: [Double]())
     private var qualityLevel = 0
     private var lastQualityChange: CFTimeInterval = 0
+    private var lastQualityRaise: CFTimeInterval = -100
+    private var raiseBackoffUntil: CFTimeInterval = 0
     private var lastStatsLog: CFTimeInterval = 0
 
+    // 性能测试（开始窗口里打开）：从出舱到落地，一遍一遍轮流关掉画面的各个部分，每种 1.6 秒，量 GPU 一帧的耗时和帧率
+    // （一遍约 20 秒：高空、穿云、出云、伞下各能量到一两遍）。结果一行行打到标准输出（从 Mac 用 devicectl --console
+    // 启动应用就能收到），也存进 Documents/perf.txt、显示在开始窗口里。测的时候自动画质停掉。
+    private var perfTest = false
+    private var benchIndex = -1
+    private var benchStart: CFTimeInterval = 0
+    private var benchFrames = 0
+    private var benchCycle = 0
+    private var benchText = ""
+    private var benchFinished = false
+    private static let benchConfigs: [(name: String, flags: Int, scale: Float, cloudScale: Float, cloudStep: Float)] = [
+        ("基准", 0, 1, 0.5, 1),
+        ("不用光照缓存（现算）", 4096, 1, 0.5, 1),
+        ("地形不着色", 2, 1, 0.5, 1),
+        ("地表函数换成常数", 128, 1, 0.5, 1),
+        ("不采两层细节噪声", 256, 1, 0.5, 1),
+        ("不采树冠噪声", 512, 1, 0.5, 1),
+        ("不算伞和人的影子", 1024, 1, 0.5, 1),
+        ("不算空气透视", 2048, 1, 0.5, 1),
+        ("地表常数+无细节+无树冠+无影子+无透视", 128 | 256 | 512 | 1024 | 2048, 1, 0.5, 1),
+        ("云不步进", 1, 1, 0.5, 1),
+        ("云最低档", 0, 1, 0.36, 1.7),
+        ("云和地形都不着色", 1 | 2, 1, 0.5, 1),
+    ]
+
+    private func benchEmit(_ line: String) {
+        print("PERF " + line)
+        fflush(stdout)
+        PerfLink.shared.send(line)
+        benchText += line + "\n"
+    }
+
+    private func benchSave() {
+        guard !benchText.isEmpty,
+              let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let url = dir.appendingPathComponent("perf.txt")
+        try? benchText.write(to: url, atomically: true, encoding: .utf8)
+        let text = benchText
+        let finished = benchFinished
+        Task { @MainActor in
+            AppModel.shared.perfReport = text
+            // 只测这一跳：测完自己关掉。之前选上以后一直开着，后面每一跳都在轮流关云、换云的档位（云一段段变糊、漏洞）
+            if finished { AppModel.shared.perfTest = false }
+        }
+    }
+
+    /// 返回要显示的提示（测试进行中），没有就 nil
+    private func runBenchmark(now: CFTimeInterval) -> String? {
+        guard perfTest, !benchFinished else { return nil }
+        let phase = timeline.phase
+        if phase == .landed || phase == .done {
+            benchFinished = true
+            scene.settings.debugFlags = 0
+            scene.setQuality(qualityLevel)
+            benchEmit("END")
+            benchSave()
+            return nil
+        }
+        guard phase == .freefall || phase == .opening || phase == .canopy else { return nil }
+        if benchIndex < 0 {
+            benchIndex = 0
+            benchStart = 0
+            benchEmit("START 场景 \(scene.scene) \(Date())")
+        }
+        let config = Self.benchConfigs[benchIndex]
+        if benchStart == 0 {
+            benchStart = now
+            benchFrames = 0
+            scene.settings.debugFlags = config.flags
+            scene.settings.renderScale = config.scale
+            scene.settings.cloudScale = config.cloudScale
+            scene.settings.cloudStep = config.cloudStep
+        }
+        let elapsed = now - benchStart
+        if elapsed < 0.5 {
+            gpuTimes.withLock { $0.removeAll() }       // 换配置后的头半秒不算
+            benchFrames = 0
+        } else {
+            benchFrames += 1
+        }
+        if elapsed >= 1.6 {
+            let samples = gpuTimes.withLock { $0 }
+            let gpu = samples.isEmpty ? 0 : samples.reduce(0, +) / Double(samples.count)
+            let fps = Double(benchFrames) / (elapsed - 0.5)
+            benchEmit(String(format: "%d|%@|离地%.0f|雨%.2f|%@|gpu %.2f|fps %.0f", benchCycle, String(describing: phase),
+                             timeline.heightAboveGround, timeline.rainIntensity, config.name, gpu, fps))
+            benchIndex += 1
+            benchStart = 0
+            if benchIndex >= Self.benchConfigs.count {
+                benchIndex = 0
+                benchCycle += 1
+                benchSave()
+            }
+        }
+        return "性能测试 第 \(benchCycle + 1) 遍 \(benchIndex + 1) / \(Self.benchConfigs.count)\n往下看着地面（画面一段一段变是正常的）"
+    }
+    private static func qualityKey(_ scene: JumpScene) -> String { "qualityLevel.\(scene.rawValue)" }
+    /// HUD 上的实时帧率：最近一秒里提交了几帧（每半秒更新一次显示的数）
+    private var frameStamps: [CFTimeInterval] = []
+    private var shownFPS = -1
+    private var shownGPU: Float = 0
+    private var lastFPSUpdate: CFTimeInterval = 0
+
     init(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool, toggleSteering: Bool,
+         perfTest: Bool = false,
          jumpScene: JumpScene) throws {
         self.layerRenderer = layerRenderer
         self.handsEnabled = handsEnabled && HandTrackingProvider.isSupported
@@ -85,7 +191,12 @@ final class ImmersiveRenderer: @unchecked Sendable {
                                   colorFormat: layerRenderer.configuration.colorFormat,
                                   depthFormat: layerRenderer.configuration.depthFormat,
                                   maxViewCount: layerRenderer.properties.viewCount,
-                                  queue: queue, scene: jumpScene, gloveDirectory: Bundle.main.resourceURL)
+                                  queue: queue, scene: jumpScene, gloveDirectory: Bundle.main.resourceURL,
+                                  barOnLeft: !watchOnLeft)
+        // 从上一跳这一关用到的画质档位开始（回退一档试试能不能更好）
+        qualityLevel = max(0, min(UserDefaults.standard.integer(forKey: Self.qualityKey(jumpScene)) - 1,
+                                  SceneRenderer.maxAutoQuality))
+        scene.setQuality(qualityLevel)
         panel = TextPanel(device: device)
         helmet = HelmetHUD(device: device)
         audio = DebugOptions.mute ? nil : JumpAudio()
@@ -97,17 +208,21 @@ final class ImmersiveRenderer: @unchecked Sendable {
         session.watchOnLeft = watchOnLeft
         // 拉环转向按开始窗口里的选项（默认关）；自动驾驶靠拉环转向，一直开
         session.toggleSteering = toggleSteering || DebugOptions.autopilot
+        self.perfTest = perfTest
     }
 
     @MainActor
     static func start(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool, toggleSteering: Bool,
+                      perfTest: Bool = false,
                       scene: JumpScene) {
         let renderer: ImmersiveRenderer
         do {
             renderer = try ImmersiveRenderer(layerRenderer, handsEnabled: handsEnabled, watchOnLeft: watchOnLeft,
-                                             gloves: gloves, toggleSteering: toggleSteering, jumpScene: scene)
+                                             gloves: gloves, toggleSteering: toggleSteering, perfTest: perfTest, jumpScene: scene)
         } catch {
             log.error("无法创建渲染器：\(error.localizedDescription)")
+            // 头显上看不到日志：也发回开发用的 Mac（点了 Jump 什么都不出现，多半是这里）
+            PerfLink.shared.send("ERROR 无法创建渲染器：\(error)")
             return
         }
         layerRenderer.onSpatialEvent = { [pinches = renderer.pinches] events in
@@ -281,11 +396,27 @@ final class ImmersiveRenderer: @unchecked Sendable {
         // 高度表：有手部追踪就戴在选好的那只手腕上（手放下时看不到，抬手才看）；没有就放在前下方
         let watchHand = hands.first(where: { $0.isLeft == watchOnLeft })
         uniforms.placeAltimeter(feet: timeline.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand,
-                                alarm: timeline.alarmLevel, gloved: gloves)
+                                alarm: timeline.alarmLevel, gloved: gloves,
+                                go: timeline.phase == .cabin && timeline.greenLight)
         if handsEnabled && watchHand == nil { uniforms.hudUp.w = 0 }
         let objects = session.objects(layout: layout, hands: hands, watchOnLeft: watchOnLeft,
                                       gloves: gloves, head: head)
-        let hudState = session.hudState
+        var hudState = session.hudState
+        if let note = runBenchmark(now: now) {
+            hudState.hint = note
+            if hudState.hintBoot < 0 { hudState.hintBoot = 1 }
+        }
+        frameStamps.append(now)
+        if let first = frameStamps.firstIndex(where: { now - $0 <= 1 }), first > 0 { frameStamps.removeFirst(first) }
+        if now - lastFPSUpdate > 0.5, frameStamps.count >= 2, let oldest = frameStamps.first, now - oldest > 0.3 {
+            lastFPSUpdate = now
+            shownFPS = Int((Double(frameStamps.count - 1) / (now - oldest)).rounded())
+            let recent = gpuTimes.withLock { Array($0.suffix(45)) }
+            if !recent.isEmpty { shownGPU = Float(recent.reduce(0, +) / Double(recent.count)) }
+        }
+        hudState.fps = shownFPS
+        hudState.gpuMs = shownGPU
+        hudState.qualityLevel = qualityLevel
         let hudPanels = helmet.update(hudState, head: stageFromDevice)
         var hudDirty = helmet.dirty
         // 提示都在头盔 HUD 的下沿（HUD 关着时只有舱里开场的提示），老的浮动面板不用了
@@ -346,7 +477,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
                 }
                 let rateMaps = drawable.rasterizationRateMaps
                 let rateMap = rateMaps.isEmpty ? nil : rateMaps[min(textureIndex, rateMaps.count - 1)]
-                scene.encode(commandBuffer,
+                scene.encodeScaled(commandBuffer,
                              views: views,
                              viewports: viewports,
                              frame: uniforms,
@@ -468,15 +599,26 @@ final class ImmersiveRenderer: @unchecked Sendable {
             lastStatsLog = now
             Self.log.notice("GPU \(average, format: .fixed(precision: 2)) ms/帧，画质档位 \(self.qualityLevel)")
         }
-        let maxLevel = SceneRenderer.qualityLevels.count - 1
-        if average > 7.0, qualityLevel < maxLevel, now - lastQualityChange > 1.5 {
+        // 性能测试进行中不自动换档（它自己在换配置）
+        if perfTest, benchIndex >= 0, !benchFinished { return }
+        let maxLevel = min(SceneRenderer.qualityLevels.count - 1, SceneRenderer.maxAutoQuality)
+        // 按实际帧率换档（头显上量过：GPU 这个读数到 14 毫秒上下还是满 90 帧，之前按「超过 7 毫秒就降」，
+        // 等于永远压在最低档）。掉到 86 帧以下降一档云；满帧、GPU 还有余量时试着升回去——
+        // 升完又掉帧就降回来，并且半分钟内不再试（高空云多的那一段会这样）
+        let slow = shownFPS >= 0 && shownFPS < 86
+        let roomy = shownFPS >= 89 && average < 12.5
+        if slow, qualityLevel < maxLevel, now - lastQualityChange > 1.2 {
+            if now - lastQualityRaise < 8 { raiseBackoffUntil = now + 30 }
             qualityLevel += 1
-        } else if average < 4.0, qualityLevel > 0, now - lastQualityChange > 5 {
+        } else if roomy, qualityLevel > 0, now - lastQualityChange > 5, now > raiseBackoffUntil {
             qualityLevel -= 1
+            lastQualityRaise = now
         } else {
             return
         }
         lastQualityChange = now
+        // 记住这一关用到的档位：下一跳直接从这一档开始，不用每次开头再卡几秒慢慢降
+        UserDefaults.standard.set(qualityLevel, forKey: Self.qualityKey(scene.scene))
         scene.setQuality(qualityLevel)
         gpuTimes.withLock { $0.removeAll() }
         Self.log.notice("画质换到 \(self.qualityLevel) 档（GPU 平均 \(average, format: .fixed(precision: 2)) ms）")

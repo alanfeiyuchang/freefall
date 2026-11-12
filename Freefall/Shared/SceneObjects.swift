@@ -64,6 +64,8 @@ struct SceneObjects {
     var terrain: TerrainFrame?
     /// 伞衣的影子（FrameUniforms.canopyCenter / Span / Chord）；没开伞是 nil
     var canopyShadow: CanopyCloth.ShadowShape?
+    /// 伞衣在 meshVertices 里的那一段（PlayerShadow 从太阳方向再画一遍，当影子的剪影）
+    var canopyMeshRange: Range<Int>?
     /// 身体的影子：头顶（舞台空间）；在机舱里是 nil
     var bodyTop: SIMD3<Float>?
     /// 身体的右方向，和左、右手腕（w = 追踪到没有）：胳膊的影子用
@@ -136,7 +138,9 @@ struct SceneObjects {
 
         // 伞衣：布料模拟的网格 + 滑块；伞绳、伸缩带、刹车绳和两个操纵环
         if let cloth = input.cloth, cloth.active, timeline.outcome != .crashed {
+            let canopyStart = o.meshVertices.count
             cloth.buildMesh(into: &o.meshVertices)
+            o.canopyMeshRange = canopyStart..<o.meshVertices.count
             o.canopyShadow = cloth.shadowShape()
             let landed = timeline.phase == .landed || timeline.phase == .done
             let attachments = cloth.lineAttachments
@@ -306,14 +310,15 @@ func scale(_ s: SIMD3<Float>) -> simd_float4x4 {
 
 extension FrameUniforms {
     /// 高度表：追踪到戴表的那只手就戴在手腕上（圆表盘），否则是起跳时头前下方的一块面板。
-    mutating func placeAltimeter(feet: Int, eyeHeight: Float, watchHand: HandPose?, alarm: Int, gloved: Bool) {
+    /// go：舱里亮绿灯了（可以松手跳了）——表盘整个亮绿
+    mutating func placeAltimeter(feet: Int, eyeHeight: Float, watchHand: HandPose?, alarm: Int, gloved: Bool, go: Bool = false) {
         hudGlyphs = FrameUniforms.glyphs(feet: feet)
         if let watchHand {
             let (center, right, up, size) = SceneObjects.watchPlacement(watchHand, gloved: gloved)
             hudCenter = SIMD4(center, size)
             hudRight = SIMD4(right, size)
             hudUp = SIMD4(up, 1)
-            hudStyle = SIMD4(1, min(max(Float(feet) / 30000, 0), 1), Float(alarm), 0)
+            hudStyle = SIMD4(1, min(max(Float(feet) / 30000, 0), 1), Float(alarm), go ? 1 : 0)
         } else {
             let center = SIMD3<Float>(0, eyeHeight - 0.30, -0.50)
             let toEye = normalize(SIMD3<Float>(0, eyeHeight, 0) - center)
@@ -321,7 +326,7 @@ extension FrameUniforms {
             hudCenter = SIMD4(center, 0.15)
             hudRight = SIMD4(right, 0.05)
             hudUp = SIMD4(cross(toEye, right), 1)
-            hudStyle = SIMD4(0, 0, Float(alarm), 0)
+            hudStyle = SIMD4(0, 0, Float(alarm), go ? 1 : 0)
         }
     }
 }

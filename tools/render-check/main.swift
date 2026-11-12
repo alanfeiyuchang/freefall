@@ -25,6 +25,10 @@ let filter = args.count > 4 ? args[4] : ""
 try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
 
 let env = ProcessInfo.processInfo.environment
+// UILANG=en：提示、结算用英文（run.sh 把编好的 app 里的 *.lproj 拷到可执行文件旁边；没编过 app 就还是中文）
+if let lang = env["UILANG"] {
+    UserDefaults.standard.setVolatileDomain(["AppleLanguages": [lang]], forName: UserDefaults.argumentDomain)
+}
 /// 跳哪一关：SCENE=0 环礁（默认）1 草原 2 高山 3 雪山 4 海岛 5 火山 6 天空之城
 let jumpScene = JumpScene(rawValue: Int(env["SCENE"] ?? "0") ?? 0) ?? .atoll
 let device = MTLCreateSystemDefaultDevice()!
@@ -34,7 +38,8 @@ let queue = device.makeCommandQueue()!
 let useGloves = env["GLOVES"] != "0"
 let renderer = try SceneRenderer(device: device, library: library, colorFormat: .bgra8Unorm_srgb,
                                  depthFormat: .depth32Float, maxViewCount: 2, queue: queue, scene: jumpScene,
-                                 gloveDirectory: env["GLOVES_DIR"].map { URL(fileURLWithPath: $0) })
+                                 gloveDirectory: env["GLOVES_DIR"].map { URL(fileURLWithPath: $0) },
+                                 barOnLeft: env["BARLEFT"] != nil)      // BARLEFT=1：表戴在右手时的布局（扶杆在左边）
 if let v = env["EXPOSURE"], let x = Float(v) { renderer.settings.exposure = x }
 if let v = env["SIGMA"], let x = Float(v) { renderer.settings.cloudExtinction = x }
 if let v = env["STEP"], let x = Float(v) { renderer.settings.cloudStep = x }
@@ -165,6 +170,7 @@ func autoSession(from timeline: JumpTimeline = JumpTimeline(scene: jumpScene), d
     s.gloved = useGloves
     // 镜头里默认把 HUD 打开看读数（真机默认关，点表才开）；HUDOFF=1 看关着的样子
     s.hudOn = env["HUDOFF"] == nil
+    if env["BARLEFT"] != nil { s.watchOnLeft = false }
     return s
 }
 
@@ -262,7 +268,7 @@ func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [
     frame.heading = SIMD4(Float(cos(heading)), Float(sin(heading)), turning * 0.85, 0)
     let watchHand = handPoses.first(where: { $0.isLeft == watchOnLeft })
     frame.placeAltimeter(feet: t.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand, alarm: t.alarmLevel,
-                         gloved: useGloves)
+                         gloved: useGloves, go: t.phase == .cabin && t.greenLight)
     // 和真机一样：允许了手部追踪时只有手腕上的表，戴表的手不在视野里就没有高度表
     if handTracking && watchHand == nil { frame.hudUp.w = 0 }
     var objects = session.objects(layout: layout, hands: handPoses, watchOnLeft: watchOnLeft, proxyHands: !useGloves,
@@ -272,7 +278,14 @@ func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [
     if env["NOSHADOW"] != nil { objects.canopyShadow = nil; objects.bodyTop = nil }
     var headMatrix = head
     headMatrix.columns.3 = SIMD4(eyeOffset.x, eyeHeight + eyeOffset.y, eyeOffset.z, 1)
-    let hudPanels = env["NOHUD"] != nil ? [] : helmet.update(session.hudState, head: headMatrix)
+    var hudStateShot = session.hudState
+    if env["FPS"] != nil { hudStateShot.fps = 90; hudStateShot.gpuMs = 6.4; hudStateShot.qualityLevel = 1 }
+    // QUIT=1：提示条换成按住表退出的那一行（进度六成），看排版
+    if env["QUIT"] != nil {
+        hudStateShot.hint = String(localized: "继续按住手表，退出这一跳") + "\n■■■■■■□□□□"
+        hudStateShot.hintBoot = 1
+    }
+    let hudPanels = env["NOHUD"] != nil ? [] : helmet.update(hudStateShot, head: headMatrix)
     textPanel.set("")          // 和真机一样：提示都在 HUD 下沿，老的浮动面板不用了
     let forward = (head * SIMD4<Float>(0, 0, -1, 0)).xyz
     let panel = textPanel.texture.map {
@@ -283,9 +296,24 @@ func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [
     let cb = queue.makeCommandBuffer()!
     renderer.encodeSky(cb, altitude: altitude)
     let vp = MTLViewport(originX: 0, originY: 0, width: Double(width), height: Double(height), znear: 0, zfar: 1)
-    renderer.encode(cb, views: views, viewports: [vp, vp], frame: frame, colorTexture: color, depthTexture: depth,
-                    renderTargetArrayLength: 2, rateMap: nil, objects: objects, panel: panel,
-                    hud: hudPanels, hudDirty: helmet.dirty)
+    // DRS=0.7：按动态分辨率的那条路画（整帧缩到 0.7 再放大）
+    if let drs = env["DRS"].flatMap(Float.init) { renderer.settings.renderScale = drs }
+    if let flags = env["DEBUGFLAGS"].flatMap(Int.init) { renderer.settings.debugFlags = flags }
+    // CACHE_AMORTIZED=1：按头显上的方式一帧只画一条（每个镜头要多画一百多帧才能把缓存攒满，见下面出图的循环）
+    renderer.terrainCache.immediate = env["CACHE_AMORTIZED"] == nil
+    // FOV=1：模拟头显的注视点渲染（中间清楚、四周压缩的 rate map，两只眼各一层）；出的图是压缩过的，
+    // 只用来对比「直接画」和「动态分辨率」两条路在有 rate map 时是不是一样
+    var fovMap: MTLRasterizationRateMap?
+    if env["FOV"] != nil {
+        let h: [Float] = [0.35, 0.6, 1, 1, 0.8, 0.45], v: [Float] = [0.4, 0.75, 1, 1, 0.6, 0.3]
+        let layers = [MTLRasterizationRateLayerDescriptor(horizontal: h, vertical: v),
+                      MTLRasterizationRateLayerDescriptor(horizontal: h.reversed(), vertical: v)]
+        fovMap = device.makeRasterizationRateMap(descriptor: MTLRasterizationRateMapDescriptor(
+            screenSize: MTLSize(width: width, height: height, depth: 0), layers: layers))
+    }
+    renderer.encodeScaled(cb, views: views, viewports: [vp, vp], frame: frame, colorTexture: color, depthTexture: depth,
+                          renderTargetArrayLength: 2, rateMap: fovMap, objects: objects, panel: panel,
+                          hud: hudPanels, hudDirty: helmet.dirty)
     cb.commit()
     cb.waitUntilCompleted()
     if let error = cb.error { print("GPU 错误：\(error)") }
@@ -391,6 +419,12 @@ let revealShots: [Shot] = [
     Shot(name: "v5_reveal_35", session: { at { $0.time >= 6.0 } }, yaw: -22, pitch: -4, fovY: 90),
     Shot(name: "v6_reveal_back", session: { at { $0.time >= 5.5 } }, yaw: 160, pitch: -2, fovY: 90),
     Shot(name: "v7_ready", session: { at { $0.time >= 8.6 } }, yaw: -22, pitch: -4, fovY: 90),
+    // 往左看（BARLEFT=1 时扶杆在左边）：房间里只有扶杆、握住以后、亮绿灯
+    Shot(name: "v9_left_room", session: { at { $0.time >= 1.5 } }, yaw: 22, pitch: -4, fovY: 90),
+    Shot(name: "va_left_reveal", session: { at { $0.time >= 4.0 } }, yaw: 22, pitch: -4, fovY: 90),
+    Shot(name: "vb_left_ready", session: { at { $0.time >= 8.6 } }, yaw: 22, pitch: -4, fovY: 90),
+    // 握着扶杆低头看表：亮绿灯了（表盘整个发绿）
+    Shot(name: "v8_watch_go", session: { at { $0.time >= 8.6 } }, yaw: 22, pitch: -38, hands: .watch, fovY: 40),
 ]
 
 /// 开始窗口里选关卡片的截图（每关一张，NOHUD=1 跑，裁成竖的）：伞下朝着靶飞，看得到地平线
@@ -583,7 +617,7 @@ if mode == "shots" || mode == "all" {
         if let h = shot.lookAtRain {
             (yaw, pitch) = look(atCloud: JumpTimeline.deckCenter, altitude: h, from: session.timeline)
         }
-        for _ in 0..<11 {
+        for _ in 0..<(env["CACHE_AMORTIZED"] == nil ? 11 : 150) {
             render(session, yaw: yaw, pitch: pitch, hands: h, color: color, depth: depth, fovY: shot.fovY,
                    watchOnLeft: shot.watchOnLeft, eye: shot.eye)
         }
@@ -747,6 +781,29 @@ if mode == "hands" || mode == "all" {
                      curl: 0.3)]
     }
     report("张开手（操纵环弹回）")
+    // 伞下按住表退出：按 1 秒松开不退（提示里出进度条），再按满 2 秒退出、很快暗下去
+    let canopyWatch = syntheticHand(left: true, wrist: SIMD3(-0.07, eyeHeight - 0.3, -0.32), forward: SIMD3(1, 0.12, 0.08),
+                                    palm: SIMD3(0, -1, 0.15))
+    let canopyFace = SceneObjects.watchPlacement(canopyWatch, gloved: s.gloved).0
+    step(0.3) { [canopyWatch, pointing(at: canopyFace + SIMD3(0, 0.12, 0))] }
+    step(1.0) { [canopyWatch, pointing(at: canopyFace)] }
+    report("按住表 1 秒")
+    step(0.3) { [canopyWatch, pointing(at: canopyFace + SIMD3(0, 0.12, 0))] }
+    report("松开（不该退出）")
+    step(2.1) { [canopyWatch, pointing(at: canopyFace)] }
+    report(String(format: "按住表 2 秒（退出：%@，亮度 %.2f）", s.timeline.quitting ? "是" : "否", s.timeline.brightness))
+    step(0.6) { [] }
+    print("  0.6 秒后：\(s.timeline.isOver ? "结束了，回开始窗口" : "还没结束")；成绩 \(s.jumpResult.map { $0.summary } ?? "没有（不算）")")
+
+    // 没有手部追踪：两只手一起捏住不动两秒退出
+    let p = JumpSession(timeline: JumpTimeline(freefallFrom: 3000, scene: jumpScene), realHands: false, autopilot: nil)
+    p.setEyeHeight(eyeHeight)
+    let still = [PinchState.Touch(isLeft: true, startY: 1), PinchState.Touch(isLeft: false, startY: 1)]
+    var held = 0.0
+    while held < 1.0 { p.step(dt: 1.0 / 90, hands: [], touches: still, layout: layout); held += 1.0 / 90 }
+    print("  捏合：两只手捏住 1 秒 →「\(p.hudHint.replacingOccurrences(of: "\n", with: " / "))」退出 \(p.timeline.quitting)")
+    while held < 2.1 { p.step(dt: 1.0 / 90, hands: [], touches: still, layout: layout); held += 1.0 / 90 }
+    print("  捏合：两只手捏住 2.1 秒 → 退出 \(p.timeline.quitting)")
 }
 
 if mode == "seq" || mode == "all" {

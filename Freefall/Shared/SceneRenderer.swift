@@ -12,6 +12,12 @@ final class SceneRenderer: @unchecked Sendable {
         var cloudScale: Float = 0.5
         /// 云的步长倍数，越大越快、越粗
         var cloudStep: Float = 1
+        /// 动态分辨率：整帧的长宽各乘这个比例画（< 1 时先画进中间缓冲再放大），见 encodeScaled
+        var renderScale: Float = 1
+        /// 头显上性能测试用的开关（位）：1 云不步进，2 地形不着色，4 不画树和物件，8 不画地形深度预渲染，
+        /// 16 树不着色，32 不画装备和伞，64 天空不着色；地形着色里再拆：128 地表函数换成常数，256 不采两层细节噪声，
+        /// 512 不采树冠噪声，1024 不算伞和人的影子，2048 不算空气透视，4096 不用光照缓存（照旧现算，做对照），16384 被云挡住的地形也照算（关掉优化做对照）
+        var debugFlags = 0
         /// 云的消光系数（每米）：越大云越实、边越硬
         var cloudExtinction: Float = 0.035
         var coverageBias: Float = 0
@@ -20,14 +26,23 @@ final class SceneRenderer: @unchecked Sendable {
     }
 
     /// 画质档位（真机上按 GPU 耗时自动升降，见 ImmersiveRenderer）。0 最好。
-    static let qualityLevels: [(cloudScale: Float, cloudStep: Float)] = [
-        (0.5, 1.0), (0.5, 1.35), (0.42, 1.35), (0.36, 1.7),
+    /// 画质档位：先降云（分辨率、步长），再降视线中心的分辨率（注视点渲染给的比例封顶到这个数，四周不动）
+    static let qualityLevels: [(cloudScale: Float, cloudStep: Float, renderScale: Float)] = [
+        (0.5, 1.0, 1), (0.5, 1.35, 1), (0.42, 1.35, 1), (0.36, 1.7, 1),
+        (0.5, 1.35, 0.86), (0.5, 1.35, 0.74), (0.5, 1.35, 0.64), (0.5, 1.35, 0.56),
     ]
+
+    /// 自动画质最多降到第几档。动态分辨率那几档（4 以后）在头显上试过：帧率能上去，但中心发糊、树和靶的边有锯齿，
+    /// 先不自动用，等把固定开销砍下来再说
+    /// （只用降云的四档；按实际帧率换，见 ImmersiveRenderer.adjustQuality。有了光照缓存以后伞下用不着降，
+    /// 高空云占满画面的那一段才会降一两档）
+    static let maxAutoQuality = 3
 
     func setQuality(_ level: Int) {
         let q = Self.qualityLevels[max(0, min(level, Self.qualityLevels.count - 1))]
         settings.cloudScale = q.cloudScale
         settings.cloudStep = q.cloudStep
+        settings.renderScale = q.renderScale
     }
 
     /// 太阳（世界方向，指向太阳）。
@@ -54,6 +69,8 @@ final class SceneRenderer: @unchecked Sendable {
     let scene: JumpScene
 
     let baseNoise: MTLTexture
+    /// 地形细节层用的噪声：值加上预先算好的差分（见 Terrain.h 的 generateTerrainDetail）
+    let terrainDetail: MTLTexture
     let detailNoise: MTLTexture
     let weather: MTLTexture
     let cloudShadow: MTLTexture
@@ -61,6 +78,8 @@ final class SceneRenderer: @unchecked Sendable {
     let atoll: MTLTexture
     /// 地形高度图（地面坐标 ±32 km，给云被山挡住、山影用）和山影图（r 太阳、g 环境光遮蔽）
     let terrainHeightMap: MTLTexture
+    /// 靶周围 2 米一格的精细高度图（顶点着色器取高度用，见 Terrain.h 的 terrainVertexHeight）
+    let terrainFineHeight: MTLTexture
     let terrainShade: MTLTexture
     /// 地面类型图（树林、水和熔岩的边、冰碛、农田……启动时预算，着色时只查一次）
     let surfaceMap: MTLTexture
@@ -101,6 +120,11 @@ final class SceneRenderer: @unchecked Sendable {
     private let cloudFreshPipeline: MTLRenderPipelineState
     private let cloudResolvePipeline: MTLRenderPipelineState
     private let scenePipeline: MTLRenderPipelineState
+    private let resolvePipeline: MTLRenderPipelineState
+    /// 伞和人的影子：每帧从太阳方向各画一张剪影贴图
+    let playerShadow: PlayerShadow
+    /// 光照缓存（地形关才开；天空之城的岛有顶面底面两套，先不缓存）
+    let terrainCache: TerrainCache
     private let hudPipeline: MTLRenderPipelineState
     private let meshPipeline: MTLRenderPipelineState
     private let conePipeline: MTLRenderPipelineState
@@ -148,7 +172,8 @@ final class SceneRenderer: @unchecked Sendable {
 
     /// - Parameter gloveDirectory: 手套的网格和贴图所在的目录（app 里是 bundle 根目录）
     init(device: MTLDevice, library: MTLLibrary, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat,
-         maxViewCount: Int, queue: MTLCommandQueue, scene: JumpScene = .atoll, gloveDirectory: URL? = nil) throws {
+         maxViewCount: Int, queue: MTLCommandQueue, scene: JumpScene = .atoll, gloveDirectory: URL? = nil,
+         barOnLeft: Bool = false) throws {
         self.device = device
         self.scene = scene
         // 雪山：满眼是太阳直射的雪，按别的关的曝光整片雪面都顶到纯白、看不出起伏。像拍雪景一样收小光圈，天也跟着更蓝
@@ -204,6 +229,7 @@ final class SceneRenderer: @unchecked Sendable {
         // 带 mip：地形拿它的一层当细节噪声，中远处一个像素盖十几个纹素，不按 mip 取的话又闪又慢（每次采样都不在缓存里）。
         // 云的步进还是取第 0 级
         baseNoise = texture(.type3D, .rgba8Unorm, 128, 128, 128, mipmapped: true)
+        terrainDetail = texture(.type3D, .rgba16Unorm, 128, 128, 128, mipmapped: true)
         detailNoise = texture(.type3D, .rgba8Unorm, 32, 32, 32)
         weather = texture(.type2D, .rgba8Unorm, 1024, 1024)
         cloudShadow = texture(.type2D, .r16Float, 2048, 2048)
@@ -211,6 +237,7 @@ final class SceneRenderer: @unchecked Sendable {
         atoll = texture(.type2D, .rgba8Unorm, 2048, 2048)
         let terrainSize = scene.hasTerrain ? 2048 : 4
         terrainHeightMap = texture(.type2D, .r16Float, terrainSize, terrainSize)
+        terrainFineHeight = texture(.type2D, .r32Float, terrainSize, terrainSize)
         terrainShade = texture(.type2D, .rg8Unorm, terrainSize, terrainSize)
         surfaceMap = texture(.type2D, .rgba8Unorm, terrainSize, terrainSize, mipmapped: true)
         transmittanceLUT = texture(.type2D, .rgba16Float, 256, 64)
@@ -228,6 +255,10 @@ final class SceneRenderer: @unchecked Sendable {
                                                   colors: [.rgba16Float, .r16Float], depth: .invalid, blend: false)
         scenePipeline = try renderPipeline("skyVertex", "sceneFragment", colors: [colorFormat],
                                            depth: depthFormat, blend: false)
+        resolvePipeline = try renderPipeline("skyVertex", "resolveFragment", colors: [colorFormat],
+                                             depth: depthFormat, blend: false)
+        playerShadow = try PlayerShadow(device: device, library: library)
+        terrainCache = try TerrainCache(device: device, library: library, enabled: scene.hasTerrain && scene != .sky)
         terrainPipeline = try renderPipeline("terrainVertex", "terrainFragment", colors: [colorFormat],
                                              depth: depthFormat, blend: false)
         revealPipelines = (
@@ -332,7 +363,7 @@ final class SceneRenderer: @unchecked Sendable {
         mistPipeline = try renderPipeline("mistVertex", "mistFragment", colors: [colorFormat], depth: depthFormat,
                                           blend: true)
 
-        let plane = ProceduralMeshes.plane()
+        let plane = ProceduralMeshes.plane(barOnLeft: barOnLeft)
         planeVertexCount = plane.count
         planeMesh = device.makeBuffer(bytes: plane, length: MemoryLayout<MeshVertex>.stride * plane.count,
                                       options: .storageModeShared)!
@@ -385,6 +416,9 @@ final class SceneRenderer: @unchecked Sendable {
 
         enc.setTexture(baseNoise, index: 0)
         dispatch(enc, try kernel("generateBaseNoise"), MTLSize(width: 128, height: 128, depth: 128))
+        enc.setTexture(terrainDetail, index: 0)
+        enc.setTexture(baseNoise, index: 1)
+        dispatch(enc, try kernel("generateTerrainDetail"), MTLSize(width: 128, height: 128, depth: 128))
         enc.setTexture(detailNoise, index: 0)
         dispatch(enc, try kernel("generateDetailNoise"), MTLSize(width: 32, height: 32, depth: 32))
         enc.setTexture(weather, index: 0)
@@ -410,6 +444,8 @@ final class SceneRenderer: @unchecked Sendable {
             enc.setTexture(terrainHeightMap, index: 0)
             enc.setBytes(&sceneIndex, length: MemoryLayout<Int32>.stride, index: 0)
             dispatch(enc, try kernel("generateTerrainHeight"), MTLSize(width: 2048, height: 2048, depth: 1))
+            enc.setTexture(terrainFineHeight, index: 0)
+            dispatch(enc, try kernel("generateFineHeight"), MTLSize(width: 2048, height: 2048, depth: 1))
             enc.setTexture(terrainShade, index: 0)
             enc.setTexture(terrainHeightMap, index: 1)
             enc.setBytes(&sun, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
@@ -435,6 +471,7 @@ final class SceneRenderer: @unchecked Sendable {
         enc.endEncoding()
         if let blit = cb.makeBlitCommandEncoder() {
             blit.generateMipmaps(for: baseNoise)
+            blit.generateMipmaps(for: terrainDetail)
             if scene.hasTerrain { blit.generateMipmaps(for: surfaceMap) }
             blit.endEncoding()
         }
@@ -557,6 +594,7 @@ final class SceneRenderer: @unchecked Sendable {
         var views = views
         var frame = complete(frame)
         frame.camera.w = rateMap == nil ? 0 : 1
+        frame.exposure.z = Float(settings.debugFlags)
         // 伞衣和身体的影子（地形、海面、装备、绳子都要用）
         if let shadow = objects.canopyShadow {
             frame.canopyCenter = shadow.center
@@ -568,6 +606,14 @@ final class SceneRenderer: @unchecked Sendable {
             frame.bodyRight = SIMD4(objects.bodyRight, 0)
             frame.armShadow = objects.wrists
         }
+        // 两张剪影贴图：从太阳的方向（转到舞台空间，和 shader 的 stageSunDirection 一样）画伞衣和人
+        let sun = frame.sunDirection, heading = frame.heading
+        let placement = playerShadow.encode(commandBuffer, objects: objects,
+                                            sun: SIMD3(sun.x * heading.x - sun.z * heading.y, sun.y,
+                                                       sun.x * heading.y + sun.z * heading.x))
+        frame.shadowU = placement.u
+        frame.shadowV = placement.v
+        frame.shadowCenters = placement.centers
         // 开场的实体化：还在进行时换成带遮罩的管线，没出现的像素不画（混合沉浸里透出房间）
         frame.reveal = objects.reveal
         let revealing = objects.reveal.w < 1000
@@ -577,11 +623,17 @@ final class SceneRenderer: @unchecked Sendable {
         var terrainDraw: TerrainDraw?
         var terrainDepth = emptyTerrainDepth
         if scene.hasTerrain || city != nil, let terrain = objects.terrain, let draw = prepareTerrain(terrain, views: views) {
-            frame.exposure.y = 1
             terrainDraw = draw
-            terrainDepth = terrainDepthTexture(group: group, like: colorTexture, layers: max(viewCount, 1))
-            encodeTerrainDepth(commandBuffer, draw, target: terrainDepth, views: &views, frame: &frame,
-                               viewports: viewports, renderTargetArrayLength: renderTargetArrayLength, rateMap: rateMap)
+            terrainCache.update(commandBuffer, camera: SIMD2(Double(draw.uniforms.origin.z), Double(draw.uniforms.origin.w)),
+                                scene: scene, frame: frame, atmosphere: atmosphereConstants, noise: baseNoise,
+                                surfaceMap: surfaceMap, detail: terrainDetail, skySeaLUT: skySeaLUT,
+                                cloudShadow: cloudShadow, terrainShade: terrainShade)
+            if settings.debugFlags & 8 == 0 {
+                frame.exposure.y = 1
+                terrainDepth = terrainDepthTexture(group: group, like: colorTexture, layers: max(viewCount, 1))
+                encodeTerrainDepth(commandBuffer, draw, target: terrainDepth, views: &views, frame: &frame,
+                                   viewports: viewports, renderTargetArrayLength: renderTargetArrayLength, rateMap: rateMap)
+            }
         }
 
         let cloudWidth = Int((Float(colorTexture.width) * settings.cloudScale).rounded(.up))
@@ -688,6 +740,9 @@ final class SceneRenderer: @unchecked Sendable {
         pass.rasterizationRateMap = rateMap
         guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
         enc.label = "Scene"
+        // 伞和人的剪影：这个 pass 里的地形、海面、物件、装备、绳子都从这两个槽位取
+        enc.setFragmentTexture(playerShadow.canopyMap, index: 14)
+        enc.setFragmentTexture(playerShadow.bodyMap, index: 15)
         enc.setViewports(viewports)
         amplify(enc)
 
@@ -736,7 +791,9 @@ final class SceneRenderer: @unchecked Sendable {
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: ringVertexCount, instanceCount: rings.count)
         }
 
-        encodeObjects(enc, objects: objects, views: &views, frame: &frame, revealing: revealing)
+        if settings.debugFlags & 32 == 0 {
+            encodeObjects(enc, objects: objects, views: &views, frame: &frame, revealing: revealing)
+        }
 
         // 身边的雾团（在雨丝后面画：雨丝是叠加上去的亮线）
         if var mist = objects.mist {
@@ -790,7 +847,7 @@ final class SceneRenderer: @unchecked Sendable {
             enc.setFragmentTexture(panel.texture, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
-        // 头盔 HUD：最后画，测深度（手伸到它前面会挡住它），也写深度。
+        // 头盔 HUD：最后画，测深度（手伸到它前面会挡住它），也写深度。（试过永远画在最前面：远的东西盖在近的手上，看着别扭，改回来了）
         // 要写：混合沉浸里系统按深度把画面和透视合成。开场房间里那行提示后面什么都没画（深度还是清屏的 0 = 无穷远），
         // 之前只有颜色没有深度，真机上看不到；同一帧里写了深度的扶杆看得到。（推断出来的原因，离屏测试里两种都画得出来）
         for p in hud {
@@ -910,6 +967,7 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setVertexBuffer(draw.buffer, offset: 0, index: 2)
         enc.setVertexBytes(&tu, length: MemoryLayout<TerrainUniforms>.stride, index: 3)
         enc.setVertexTexture(terrainHeightMap, index: 0)
+        enc.setVertexTexture(terrainFineHeight, index: 1)
         if draw.count > 0 {
             enc.drawIndexedPrimitives(type: .triangle, indexCount: patchIndexCount, indexType: .uint16,
                                       indexBuffer: patchIndices, indexBufferOffset: 0, instanceCount: draw.count)
@@ -921,7 +979,7 @@ final class SceneRenderer: @unchecked Sendable {
                                           indexBuffer: patchIndices, indexBufferOffset: 0, instanceCount: draw.count)
             }
         }
-        if let city, city.buildingCount > 0 {
+        if let city, city.buildingCount > 0, settings.debugFlags & 4 == 0 {
             // 实体模型（云不能盖到它们前面）
             var cu = draw.city
             enc.setRenderPipelineState(city.depthPipeline)
@@ -947,6 +1005,7 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setVertexBuffer(draw.buffer, offset: 0, index: 2)
         enc.setVertexBytes(&tu, length: MemoryLayout<TerrainUniforms>.stride, index: 3)
         enc.setVertexTexture(terrainHeightMap, index: 0)
+        enc.setVertexTexture(terrainFineHeight, index: 1)
         enc.setFragmentBytes(&views, length: viewsLength, index: 0)
         enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
         enc.setFragmentBuffer(rateBuffer, offset: 0, index: 2)
@@ -960,6 +1019,10 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setFragmentTexture(terrainShade, index: 5)
         enc.setFragmentTexture(baseNoise, index: 6)
         enc.setFragmentTexture(surfaceMap, index: 7)
+        enc.setFragmentTexture(terrainDetail, index: 8)
+        enc.setFragmentBuffer(terrainCache.uniforms, offset: 0, index: 5)
+        enc.setFragmentTexture(terrainCache.color, index: 9)
+        enc.setFragmentTexture(terrainCache.info, index: 10)
         if draw.count > 0 {
             enc.drawIndexedPrimitives(type: .triangle, indexCount: patchIndexCount, indexType: .uint16,
                                       indexBuffer: patchIndices, indexBufferOffset: 0, instanceCount: draw.count)
@@ -971,7 +1034,7 @@ final class SceneRenderer: @unchecked Sendable {
                                           indexBuffer: patchIndices, indexBufferOffset: 0, instanceCount: draw.count)
             }
         }
-        if let city, city.buildingCount > 0 {
+        if let city, city.buildingCount > 0, settings.debugFlags & 4 == 0 {
             // 实体模型：片元的缓冲和贴图和地形绑的是同一套
             var cu = draw.city
             enc.setRenderPipelineState(revealing ? city.revealPipeline : city.pipeline)
@@ -1094,6 +1157,166 @@ final class SceneRenderer: @unchecked Sendable {
 
     /// 和 Objects.h 的 CONE_VERTICES 一致：(10 圈 - 1) × 12 × 6
     private static let coneVertexCount = 9 * 12 * 6
+
+    // MARK: - 动态分辨率
+
+    private struct ScaledTarget {
+        var color: MTLTexture
+        var depth: MTLTexture
+        var colorArray: MTLTexture
+        var depthArray: MTLTexture
+        var map: MTLRasterizationRateMap
+        var rates: [Float]
+    }
+    private var scaledTargets: [Int: ScaledTarget] = [:]
+    private var resolveRateBuffers: [MTLBuffer] = []
+    private var resolveRateIndex = 0
+
+    /// 和 encode 一样，但整帧按 settings.renderScale 缩小了画：GPU 吃紧时用（M2 的 Vision Pro 上，地形关往下看
+    /// 原生分辨率只有五十几帧）。做法：按系统给的 rate map 造一张「每处都再缩小 renderScale 倍」的 rate map，
+    /// 场景照常画进一张小的中间缓冲（所有 shader 不用改：它们本来就按 rate map 把物理像素换回屏幕坐标），
+    /// 最后一个全屏 pass 把颜色和深度放大回系统的画面。renderScale ≥ 1 时直接画，不走这条路。
+    func encodeScaled(_ commandBuffer: MTLCommandBuffer,
+                      views: [ViewUniforms],
+                      viewports: [MTLViewport],
+                      frame: FrameUniforms,
+                      colorTexture: MTLTexture,
+                      depthTexture: MTLTexture,
+                      renderTargetArrayLength: Int,
+                      rateMap: MTLRasterizationRateMap?,
+                      objects: SceneObjects = SceneObjects(),
+                      panel: (texture: MTLTexture, uniforms: PanelUniforms)? = nil,
+                      hud: [HelmetHUD.Panel] = [], hudDirty: [MTLTexture] = [],
+                      group: Int = 0) {
+        let scale = settings.renderScale
+        guard scale < 0.99, let target = scaledTarget(group: group, color: colorTexture, depth: depthTexture,
+                                                       rateMap: rateMap, scale: scale) else {
+            encode(commandBuffer, views: views, viewports: viewports, frame: frame, colorTexture: colorTexture,
+                   depthTexture: depthTexture, renderTargetArrayLength: renderTargetArrayLength, rateMap: rateMap,
+                   objects: objects, panel: panel, hud: hud, hudDirty: hudDirty, group: group)
+            return
+        }
+        encode(commandBuffer, views: views, viewports: viewports, frame: frame, colorTexture: target.color,
+               depthTexture: target.depth, renderTargetArrayLength: renderTargetArrayLength, rateMap: target.map,
+               objects: objects, panel: panel, hud: hud, hudDirty: hudDirty, group: group)
+
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = colorTexture
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        pass.depthAttachment.texture = depthTexture
+        pass.depthAttachment.loadAction = .dontCare
+        pass.depthAttachment.storeAction = .store
+        pass.renderTargetArrayLength = renderTargetArrayLength
+        pass.rasterizationRateMap = rateMap
+        guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
+        enc.label = "Resolve"
+        enc.setViewports(viewports)
+        if views.count > 1 {
+            var mappings = (0..<views.count).map {
+                MTLVertexAmplificationViewMapping(viewportArrayIndexOffset: UInt32($0),
+                                                  renderTargetArrayIndexOffset: UInt32($0))
+            }
+            enc.setVertexAmplificationCount(views.count, viewMappings: &mappings)
+        }
+        enc.setRenderPipelineState(resolvePipeline)
+        enc.setDepthStencilState(alwaysWriteDepth)
+        // 两张 rate map 的参数各拷一份（场景那一遍用的缓冲是轮换的，这里另开一组，免得被覆盖）
+        func parameters(_ map: MTLRasterizationRateMap) -> MTLBuffer {
+            let size = map.parameterDataSizeAndAlign.size
+            if resolveRateBuffers.count < 8 {
+                resolveRateBuffers.append(device.makeBuffer(length: max(size, 512), options: .storageModeShared)!)
+                resolveRateIndex = resolveRateBuffers.count - 1
+            } else if resolveRateBuffers[resolveRateIndex].length < size {
+                resolveRateBuffers[resolveRateIndex] = device.makeBuffer(length: size, options: .storageModeShared)!
+            }
+            let buffer = resolveRateBuffers[resolveRateIndex]
+            resolveRateIndex = (resolveRateIndex + 1) % 8
+            map.copyParameterData(buffer: buffer, offset: 0)
+            return buffer
+        }
+        enc.setFragmentBuffer(rateMap.map(parameters) ?? emptyRateMapBuffer, offset: 0, index: 2)
+        enc.setFragmentBuffer(parameters(target.map), offset: 0, index: 4)
+        var info = SIMD4<Float>(1 / Float(target.color.width), 1 / Float(target.color.height), rateMap == nil ? 0 : 1, 0)
+        enc.setFragmentBytes(&info, length: MemoryLayout<SIMD4<Float>>.stride, index: 5)
+        enc.setFragmentTexture(target.colorArray, index: 0)
+        enc.setFragmentTexture(target.depthArray, index: 1)
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        enc.endEncoding()
+    }
+
+    /// 中间缓冲和它的 rate map。rate map：把系统那张在横竖各 32 个点上采样（屏幕坐标 → 物理坐标的斜率就是那里的比例），
+    /// 每处的比例封顶到 scale：只有视线中心那一块（系统给的比例高于 scale 的地方）变粗，四周原样不动。
+    /// 第一版是每处都再乘 scale：四周本来就被注视点渲染压到三四成，再乘一次只剩一两成，戴上能看到一圈糊得很厉害。
+    /// 系统的图没变（比例一样）就接着用上一帧造的。
+    private func scaledTarget(group: Int, color: MTLTexture, depth: MTLTexture, rateMap: MTLRasterizationRateMap?,
+                              scale: Float) -> ScaledTarget? {
+        let samples = 32
+        let layerCount = max(rateMap?.layerCount ?? 1, 1)
+        let screen = rateMap?.screenSize ?? MTLSize(width: color.width, height: color.height, depth: 0)
+        var rates: [Float] = [scale]
+        var layers: [MTLRasterizationRateLayerDescriptor] = []
+        for layer in 0..<layerCount {
+            var horizontal = [Float](repeating: scale, count: samples), vertical = horizontal
+            if let rateMap {
+                func physical(_ x: Double, _ y: Double) -> MTLCoordinate2D {
+                    rateMap.physicalCoordinates(screenCoordinates: MTLCoordinate2D(x: Float(x), y: Float(y)), layer: layer)
+                }
+                let w = Double(screen.width), h = Double(screen.height)
+                for i in 0..<samples {
+                    let a = Double(i) / Double(samples), b = Double(i + 1) / Double(samples)
+                    let dx = physical(b * w, h / 2).x - physical(a * w, h / 2).x
+                    let dy = physical(w / 2, b * h).y - physical(w / 2, a * h).y
+                    horizontal[i] = min(max(dx / Float(w / Double(samples)), 0.02), scale)
+                    vertical[i] = min(max(dy / Float(h / Double(samples)), 0.02), scale)
+                }
+            }
+            rates += horizontal + vertical
+            layers.append(MTLRasterizationRateLayerDescriptor(horizontal: horizontal, vertical: vertical))
+        }
+        if let cached = scaledTargets[group], cached.rates == rates,
+           cached.color.arrayLength == color.arrayLength, cached.color.textureType == color.textureType {
+            return cached
+        }
+        let descriptor = MTLRasterizationRateMapDescriptor(screenSize: screen, layers: layers)
+        guard let map = device.makeRasterizationRateMap(descriptor: descriptor) else { return nil }
+        // 中间缓冲要装得下每一层的物理尺寸；留一点余量，注视点跟着眼睛动、尺寸小幅变的时候不用每帧重新分配
+        var needWidth = 0, needHeight = 0
+        for layer in 0..<layerCount {
+            let size = map.physicalSize(layer: layer)
+            needWidth = max(needWidth, size.width)
+            needHeight = max(needHeight, size.height)
+        }
+        if var cached = scaledTargets[group], cached.color.arrayLength == color.arrayLength,
+           cached.color.textureType == color.textureType,
+           cached.color.width >= needWidth, cached.color.width <= needWidth + 160,
+           cached.color.height >= needHeight, cached.color.height <= needHeight + 160 {
+            cached.map = map
+            cached.rates = rates
+            scaledTargets[group] = cached
+            return cached
+        }
+        let width = (needWidth / 32 + 2) * 32, height = (needHeight / 32 + 2) * 32
+        func make(_ like: MTLTexture) -> (MTLTexture, MTLTexture)? {
+            let d = MTLTextureDescriptor()
+            d.textureType = like.textureType
+            d.pixelFormat = like.pixelFormat
+            d.width = width
+            d.height = height
+            d.arrayLength = like.arrayLength
+            d.usage = [.renderTarget, .shaderRead]
+            d.storageMode = .private
+            guard let t = device.makeTexture(descriptor: d) else { return nil }
+            if t.textureType == .type2DArray { return (t, t) }
+            guard let view = t.makeTextureView(pixelFormat: t.pixelFormat, textureType: .type2DArray, levels: 0..<1,
+                                               slices: 0..<1) else { return nil }
+            return (t, view)
+        }
+        guard let c = make(color), let z = make(depth) else { return nil }
+        let target = ScaledTarget(color: c.0, depth: z.0, colorArray: c.1, depthArray: z.1, map: map, rates: rates)
+        scaledTargets[group] = target
+        return target
+    }
 
     private static let rateMapBufferCount = 6
 

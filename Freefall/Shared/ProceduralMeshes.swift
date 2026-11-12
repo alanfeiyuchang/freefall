@@ -237,7 +237,10 @@ enum ProceduralMeshes {
     static let doorAngles: (Float, Float) = (wallAngle(0.05), wallAngle(1.85))
 
     /// 类似 C-130 的运输机。坐标：原点在你起跳时站的地板上；-Z 朝机尾（舱门、你面朝的方向），+Z 朝机头，y 向上。
-    static func plane() -> [MeshVertex] {
+    /// 扶杆在哪一边：戴表那只手的另一边（表在左手 → 杆在右边，用右手抓，抓着的时候左手腕上的表看得到）
+    static func barStage(onLeft: Bool) -> SIMD2<Float> { SIMD2(onLeft ? -barStage.x : barStage.x, barStage.y) }
+
+    static func plane(barOnLeft: Bool = false) -> [MeshVertex] {
         var m = MeshBuilder()
         // ---- 货舱内部（越往机头越暗，舱门附近照得到太阳；舱顶四盏红色夜灯在 shader 里当点光源）----
         m.interiorAt = { p in smoothstepF(-6.8, 1.5, p.z) }
@@ -248,8 +251,9 @@ enum ProceduralMeshes {
         cabinCeiling(&m)
         cabinDoorsAndWindows(&m)
         cabinBulkhead(&m)
-        jumpLights(&m)
-        bar(&m)
+        // （舱壁和跳板顶上的红绿跳伞灯去掉了：握着扶杆的时候它们不在视野里，很难注意到变绿。
+        // 现在是手腕上的表亮绿灯，见 hudFragment）
+        bar(&m, onLeft: barOnLeft)
         // ---- 外壳（出舱以后回头看到的飞机）----
         m.interiorAt = { _ in 0 }
         exterior(&m)
@@ -666,8 +670,8 @@ enum ProceduralMeshes {
 
     /// 舱门边的竖扶杆：喷黄漆的钢管（直径 38 毫米），中段半米长的黑色橡胶握把（一圈圈防滑棱、两头有挡圈），
     /// 上下两头是镀锌的套筒和法兰盘，四颗六角螺栓。开场在你的房间里只有它
-    private static func bar(_ m: inout MeshBuilder) {
-        let x = barStage.x, z = barStage.y - Float(standOnRamp)
+    private static func bar(_ m: inout MeshBuilder, onLeft: Bool) {
+        let x = barStage(onLeft: onLeft).x, z = barStage.y - Float(standOnRamp)
         let yellow = SIMD3<Float>(0.62, 0.42, 0.015)
         let rubber = SIMD3<Float>(0.045, 0.045, 0.047)
         let zinc = SIMD3<Float>(0.62, 0.63, 0.65)

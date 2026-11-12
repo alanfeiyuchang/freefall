@@ -46,6 +46,12 @@ struct FrameUniforms {
     var bodyRight = SIMD4<Float>(1, 0, 0, 0)
     /// 左、右手腕（舞台空间），w 有没有：胳膊的影子从肩膀连到这里
     var armShadow = (SIMD4<Float>(0, 0, 0, 0), SIMD4<Float>(0, 0, 0, 0))
+    /// 伞和人的剪影贴图（PlayerShadow）：xyz 贴图的横轴，w 伞那张的半宽（米）
+    var shadowU = SIMD4<Float>(1, 0, 0, 1)
+    /// xyz 贴图的纵轴，w 人那张的半宽
+    var shadowV = SIMD4<Float>(0, 0, 1, 1)
+    /// xy 伞那张的中心在（横轴, 纵轴）上的坐标，zw 人那张的
+    var shadowCenters = SIMD4<Float>(0, 0, 0, 0)
     /// 开场的实体化：xyz 起点（舞台空间），w 波前半径（米；-1 = 还在房间里只有扶杆，≥ 1000 = 全部完成）
     var reveal = SIMD4<Float>(0, 0, 0, 1e6)
 }

@@ -4,7 +4,7 @@ options:
   createIntermediateGroups: true
   deploymentTarget:
     visionOS: "27.0"
-  developmentLanguage: zh-Hans
+  developmentLanguage: en
 
 # 工程文件由 `xcodegen generate` 从这里生成，Freefall.xcodeproj 在 .gitignore 里。
 # 要改设置就改这个文件，别在 Xcode 里改。
@@ -32,6 +32,7 @@ targets:
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UIApplicationPreferredDefaultSceneSessionRole: UIWindowSceneSessionRoleApplication
         INFOPLIST_KEY_NSWorldSensingUsageDescription: 用来跟踪你头部的位置和朝向。
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: 性能测试时把测量结果发回开发用的 Mac。
         INFOPLIST_KEY_NSHandsTrackingUsageDescription: 用来让你用手抓扶杆、拉开伞拉手和操纵环，并把高度表戴在你的手腕上。
         # 手套的法线贴图、材质贴图按原始数值读，不让 Xcode 把 PNG 改写成 iOS 专用格式
         COMPRESS_PNG_FILES: NO

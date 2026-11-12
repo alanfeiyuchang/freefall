@@ -13,5 +13,7 @@ xcrun swiftc -O -swift-version 5 -target arm64-apple-macos15 \
   "$ROOT/tools/render-check/main.swift" \
   "$ROOT/Freefall/Shared/"*.swift \
   -o "$WORK/render-check"
+# 编过 app 的话把语言文件拷过来（UILANG=en 出英文）
+for L in "$ROOT"/build/device/Build/Products/Release-xros/Freefall.app/*.lproj; do [ -d "$L" ] && cp -R "$L" "$WORK/"; done
 GLOVES_DIR="$ROOT/Freefall/Resources/Gloves" "$WORK/render-check" "$WORK/Freefall.metallib" "$OUT" "${@:2}"
 rm -rf "$WORK"

@@ -32,6 +32,9 @@ struct FrameUniforms {
     float4 bodyShadow;       // 身体的影子：xyz 头顶（舞台空间），w 有没有。身体是从头顶竖直垂到脚的胶囊
     float4 bodyRight;        // xyz 身体的右方向（肩膀在头顶下面、往两边），w 未用
     float4 armShadow[2];     // 左、右手腕（舞台空间），w 有没有（追踪到才有）：从肩膀到手腕各一条胳膊的影子
+    float4 shadowU;          // 伞和人的剪影贴图（PlayerShadow.swift）：xyz 贴图的横轴（垂直于阳光），w 伞那张的半宽（米）
+    float4 shadowV;          // xyz 贴图的纵轴，w 人那张的半宽
+    float4 shadowCenters;    // xy 伞那张的中心在（横轴, 纵轴）上的坐标，zw 人那张的
     float4 reveal;           // 开场的实体化：xyz 起点（舞台空间），w 波前半径（米；< 0 只有扶杆，≥ 1000 全部完成）
 };
 
@@ -185,97 +188,84 @@ static inline float3 srgbToLinear(float3 c) {
 }
 
 // MARK: - 伞衣和身体的影子
+//
+// 两个影子都查贴图：PlayerShadow.swift 每帧从太阳的方向把伞衣、人各画进一张剪影（正交投影，带 mip）。
+// 这里顺着阳光把要着色的点投到贴图上取一下。伞那张存的是透过伞布的光的颜色（按伞衣网格的顶点颜色画的：
+// 换伞的配色不用改这里），人那张存的是没被挡住的比例。
+// 之前是公式：伞是一块圆角长方形的平板、九个气室的透光颜色写死，人是一根粗细变化的柱子加两根胶囊。
 
-/// 两层伞布透过来的阳光（伞衣配色见 CanopyCloth.buildMesh：深蓝、橙、白相间，9 个气室）。
-/// 尼龙透得最多的是它自己颜色的光（一层约 0.4 × 反照率^1.5），上下两层再平方。
-static inline float3 canopyCellTransmission(int cell) {
-    const float3 navy = float3(0.00002f, 0.00016f, 0.0052f);
-    const float3 orange = float3(0.098f, 0.0017f, 0.00002f);
-    const float3 white = float3(0.088f, 0.088f, 0.082f);
-    if (cell == 0 || cell == 8) return navy;
-    return (cell & 1) ? orange : white;
+constexpr sampler shadowMapSampler(filter::linear, mip_filter::linear, address::clamp_to_edge);
+
+/// 取剪影。xy：这一点在贴图平面上相对贴图中心的位置（米）；extent：贴图的半宽；
+/// R：太阳圆盘（0.53°）投到遮挡物那里的半径（米）——离遮挡物越远影子越虚，按它取模糊的那一级 mip。
+/// 离地 1 km 的时候半影 9 米宽，比伞衣还大，地上几乎看不出影子；快落地时影子才清楚起来，越来越小、越来越实。
+static inline float3 shadowMapLookup(texture2d<float> map, float2 xy, float extent, float R) {
+    float2 uv = float2(xy.x, -xy.y) / (2.0f * extent) + 0.5f;
+    // （取纹素和太阳圆盘的半径一样大的那一级：双线性再抹开一个纹素，合起来差不多是圆盘的直径）
+    float lod = max(log2(max(R * float(map.get_width()) / extent, 1.0f)) - 1.0f, 0.0f);
+    float3 t = map.sample(shadowMapSampler, uv, level(lod)).rgb;
+    // 半影比整张贴图还大：最粗的一级 mip 已经是整张的平均了，再按面积比淡下去
+    float over = R / (1.128f * extent);
+    if (over > 1.0f) t = 1.0f - (1.0f - t) / (over * over);
+    // 出了贴图的范围没有影子（边上留了余量；很虚的时候在边外四分之一的地方淡完，不留一道硬边）
+    float2 m = abs(uv - 0.5f) * 2.0f;
+    return mix(float3(1.0f), t, saturate((1.25f - max(m.x, m.y)) * 4.0f));
 }
-#define CANOPY_T_AVERAGE float3(0.083f, 0.039f, 0.038f)
 
 /// 阳光被伞衣挡掉以后剩下多少（rgb：透过伞布的光带着布的颜色）。p、L（指向太阳）都在舞台空间。
-/// 伞衣当成一块平板（展向投影后约 7.9 × 3 米），太阳是 0.53° 的圆盘：离伞越远，影子边越糊、越淡——
-/// 太阳圆盘投到伞衣平面上有多大，两个方向各算一次被挡住的比例再相乘（盒子模糊近似圆盘）。
-/// 离地 1 km 的时候半影 9 米宽，比伞衣还大，地上几乎看不出影子；快落地时影子才清楚起来，越来越小、越来越实。
-static inline float3 canopyShadow(float3 p, float3 L, constant FrameUniforms &F, float minDistance = 0.05f) {
+static inline float3 canopyShadow(float3 p, float3 L, constant FrameUniforms &F, texture2d<float> map,
+                                  float minDistance = 0.05f) {
     float strength = F.canopyCenter.w;
     if (strength <= 0.0f) return float3(1.0f);
-    float3 ex = F.canopySpan.xyz, ez = F.canopyChord.xyz;
-    float3 n = cross(ez, ex);
+    float extent = F.shadowU.w;
+    {
+        // 先粗筛：这一点顺着阳光往回看，离伞衣中心的垂直距离比贴图的对角线加半影还远，就不可能在影子里。
+        // 整片地形每个像素都要过这个函数，头显上量过，不筛的话伞和人的影子两项合起来一帧要七毫秒
+        float3 v = p - F.canopyCenter.xyz;
+        float along = -dot(v, L);
+        if (along <= 0.0f) return float3(1.0f);
+        float3 off = v + L * along;
+        float reach = extent * 1.8f + along * 0.0047f;
+        if (dot(off, off) > reach * reach) return float3(1.0f);
+    }
+    // 顺着阳光往回走多远碰到伞衣（伞衣当成过中心的一个平面）：决定影子多虚；也用来认出伞衣自己和伞衣背后的点
+    float3 n = cross(F.canopyChord.xyz, F.canopySpan.xyz);
     float denom = dot(L, n);
     if (abs(denom) < 1e-3f) return float3(1.0f);
-    float s = dot(F.canopyCenter.xyz - p, n) / denom;      // 顺着阳光往回走多远碰到伞衣
-    if (s <= minDistance) return float3(1.0f);    // 伞衣自己（或者伞衣在点的背后）
-    float3 h = p + L * s - F.canopyCenter.xyz;
-    float x = dot(h, ex), z = dot(h, ez);
-    float R = max(s * 0.00465f, 0.004f);                     // 太阳圆盘在伞衣那里的半径（米）
-    float az = F.canopyChord.w;
-    // 平面形状：长方形，两个翼尖的四个角是圆的（离前缘、后缘越近，展向越短）
-    float corner = az * 0.75f;
-    float dz = max(abs(z) - (az - corner), 0.0f);
-    float ax = F.canopySpan.w - corner + sqrt(max(corner * corner - dz * dz, 0.0f));
-    float fx = saturate((min(x + R, ax) - max(x - R, -ax)) / (2.0f * R));
-    float fz = saturate((min(z + R, az) - max(z - R, -az)) / (2.0f * R));
-    float cover = fx * fz * strength;
-    if (cover <= 0.0f) return float3(1.0f);
-    int cell = clamp(int((x / F.canopySpan.w * 0.5f + 0.5f) * 9.0f), 0, 8);
-    float3 t = mix(canopyCellTransmission(cell), CANOPY_T_AVERAGE, saturate(R / 0.5f));
-    return 1.0f - cover * (1.0f - t);
+    float s = dot(F.canopyCenter.xyz - p, n) / denom;
+    if (s <= minDistance) return float3(1.0f);
+    float2 xy = float2(dot(p, F.shadowU.xyz), dot(p, F.shadowV.xyz)) - F.shadowCenters.xy;
+    float3 t = shadowMapLookup(map, xy, extent, max(s * 0.00465f, 0.004f));
+    return 1.0f - strength * (1.0f - t);
 }
 
-/// 阳光被身体挡掉以后剩下多少：身体当成从头顶竖直垂到脚（舞台地板）的一根柱子，粗细按头、肩、腿变。
-/// 快落地时自己的影子从远处朝脚下收过来——判断离地多高最直观的线索。
-static inline float bodyShadow(float3 p, float3 L, constant FrameUniforms &F) {
+/// 阳光被身体挡掉以后剩下多少。快落地时自己的影子从远处朝脚下收过来——判断离地多高最直观的线索。
+static inline float bodyShadow(float3 p, float3 L, constant FrameUniforms &F, texture2d<float> map) {
     if (F.bodyShadow.w <= 0.0f) return 1.0f;
     float3 a = F.bodyShadow.xyz;
-    float3 d2 = float3(0.0f, 0.12f - a.y, 0.0f);             // 头顶 → 脚
+    float extent = F.shadowV.w;
+    {
+        // 粗筛（同 canopyShadow）
+        float3 v = p - a;
+        float along = -dot(v, L);
+        if (along <= -2.0f) return 1.0f;
+        float3 off = v + L * along;
+        float reach = extent * 1.8f + 1.0f + max(along, 0.0f) * 0.0047f;
+        if (dot(off, off) > reach * reach) return 1.0f;
+    }
+    // 光线上离身体（头顶 → 脚的这条线）最近的地方有多远：决定影子多虚；身体在这一点背后就没有影子
+    float3 d2 = float3(0.0f, 0.12f - a.y, 0.0f);
     float3 r = p - a;
     float e = dot(d2, d2), f = dot(d2, r), b = dot(L, d2), c = dot(L, r);
     float den = e - b * b;
-    float t = den > 1e-6f ? (b * f - c * e) / den : 0.0f;     // 光线上离身体最近的地方
-    t = max(t, 0.0f);
+    float t = max(den > 1e-6f ? (b * f - c * e) / den : 0.0f, 0.0f);
     float u = saturate((b * t + f) / e);
     t = max(dot(a + d2 * u - p, L), 0.0f);
     if (t <= 0.05f) return 1.0f;
-    float dist = length(p + L * t - a - d2 * u);
-    // 粗细按人的轮廓变：头、脖子、肩、胸、腰、胯、大腿、膝、脚踝。第一版只有三段（头 / 一块方的上身 / 一根腿），
-    // 边又是硬的，落地时脚下像贴了一个厕所门上的小人
-    const float us[10] = { 0.0f, 0.055f, 0.105f, 0.15f, 0.24f, 0.37f, 0.47f, 0.62f, 0.75f, 1.0f };
-    const float rs[10] = { 0.07f, 0.10f, 0.058f, 0.185f, 0.165f, 0.135f, 0.165f, 0.135f, 0.105f, 0.085f };
-    float radius = rs[9];
-    for (int i = 0; i < 9; i++) {
-        if (u < us[i + 1]) {
-            float k = (u - us[i]) / (us[i + 1] - us[i]);
-            radius = mix(rs[i], rs[i + 1], k * k * (3.0f - 2.0f * k));
-            break;
-        }
-    }
-    // 半影：太阳圆盘的张角，再加一点起码的虚边（身体本来就不是硬边的圆柱）
-    float R = max(t * 0.00465f, 0.0f) + 0.022f;
-    float cover = saturate((min(dist + radius, R) - max(dist - radius, -R)) / (2.0f * R));
-    // 两条胳膊：肩膀 → 手腕的胶囊（手举着操纵环，影子里的胳膊也举着，跟着你的手动）
-    float3 shoulderMid = a + float3(0.0f, -0.36f, 0.0f);
-    for (int i = 0; i < 2; i++) {
-        if (F.armShadow[i].w <= 0.0f) continue;
-        float3 s0 = shoulderMid + F.bodyRight.xyz * (i == 0 ? -0.19f : 0.19f);
-        float3 seg = F.armShadow[i].xyz - s0;
-        float3 rr = p - s0;
-        float e2 = dot(seg, seg), f2 = dot(seg, rr), b2 = dot(L, seg), c2 = dot(L, rr);
-        float den2 = e2 - b2 * b2;
-        float t2 = max(den2 > 1e-6f ? (b2 * f2 - c2 * e2) / den2 : 0.0f, 0.0f);
-        float u2 = saturate((b2 * t2 + f2) / max(e2, 1e-6f));
-        t2 = max(dot(s0 + seg * u2 - p, L), 0.0f);
-        if (t2 <= 0.05f) continue;
-        float d = length(p + L * t2 - s0 - seg * u2);
-        float ra = mix(0.055f, 0.04f, u2);
-        float Ra = t2 * 0.00465f + 0.018f;
-        cover = max(cover, saturate((min(d + ra, Ra) - max(d - ra, -Ra)) / (2.0f * Ra)));
-    }
-    return 1.0f - cover * 0.94f;
+    float2 xy = float2(dot(p, F.shadowU.xyz), dot(p, F.shadowV.xyz)) - F.shadowCenters.zw;
+    // （起码留一点虚边：人不是硬边的剪纸）
+    float lit = shadowMapLookup(map, xy, extent, t * 0.00465f + 0.012f).r;
+    return 1.0f - (1.0f - lit) * 0.94f;
 }
 
 /// 太阳在舞台空间的方向（伞下转向是世界绕你转，舞台里的东西要按航向反过来转）

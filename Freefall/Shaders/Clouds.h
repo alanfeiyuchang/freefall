@@ -305,7 +305,9 @@ static CloudHit marchClouds(float3 ro, float3 rd, float jitter, constant FrameUn
     }
 
     hit.radiance = L;
-    hit.transmittance = T;
+    // 步进在透射率掉到 2% 时就停了：剩下的这 2% 不能留着——云后面的东西（一块块颜色反差很大的农田、地平线）
+    // 会淡淡地透出来，在云背阴的暗面上尤其看得出，像是云薄得能看穿。把 2%…100% 重新拉回 0…100%
+    hit.transmittance = saturate((T - 0.02f) / 0.98f);
     hit.depth = weightSum > 0.0f ? depthSum / weightSum : t1;
     return hit;
 }
