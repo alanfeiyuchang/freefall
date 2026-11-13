@@ -1,465 +1,87 @@
 # Freefall
 
-Apple Vision Pro 上的第一人称高空跳伞小游戏：从一万八千英尺的运输机尾舱门跳出去，穿过下着雨的云层，手表报警时自己拉开伞，
-拉着操纵环飞到地上的降落点（铺在地上的红白圆圈）里才算赢。七关：环礁、草原、高山、雪山、海岛、火山、天空之城。
-开场在你自己的房间里，握住扶杆以后，飞机和高空从你手边一点点长出来。
+**English · [简体中文](README.zh-CN.md)**
 
-灵感来自小红书上一段网页作品「THIN AIR」的录屏。除了手套，所有东西都是程序实时生成的：飞机、伞、装备、云、海、声音。
-手套是苹果示例代码里的手套模型（MIT 式许可），换成了跳伞配色，跟着你的真手动；用真手抓扶杆、拉开伞拉手、拉操纵环，
-高度表戴在手腕上（左右手开始窗口里选）；点一下手表，头盔里像钢铁侠那样的 HUD 出现在视野两侧。
+<p align="center">
+  <a href="https://alanfeiyuchang.github.io/freefall-support/donate.html"><img src="https://img.shields.io/badge/%E2%98%95%20Tip%20the%20developer-WeChat%20Pay%20%C2%B7%20Venmo-ff7a00?style=for-the-badge" alt="Tip the developer (WeChat Pay / Venmo)"></a>
+</p>
 
-![预览](docs/preview-contact.jpg)
+A first-person skydiving game for Apple Vision Pro. Jump out of the open ramp of a transport plane at 18,000 feet, fall through
+a rain cloud, pull your own ripcord when your wrist altimeter alarms, and fly your canopy onto the red-and-white landing circle on
+the ground. Seven worlds: Atoll, Grassland, Alpine, Snow Peaks, Island, Volcano and Sky City.
+It starts in your own room: grab the bar beside you, and the plane and the sky grow out from your hand.
 
-## 玩法（约 4 分钟）
+Inspired by a screen recording of a web piece called "THIN AIR". Apart from the gloves, everything is generated in real time:
+the plane, the canopy, the gear, the clouds, the sea and the sound. The gloves are the hand model from Apple's sample code
+(MIT-style license), recoloured as skydiving gloves and driven by your real hands. You grab the bar, the ripcord handle and the
+toggles with your real hands, and the altimeter sits on your wrist; tap it and an Iron Man–style helmet HUD appears at the edges of your view.
 
-1. 开始窗口：左右滑卡片选关（每张是那一关伞下的截图，下面一行字说落在哪、要躲开什么），顶上是这一关和所有关落地离降落点最近的一次，
-   窗口下面的浮条里选高度表戴哪只手腕、语言（默认跟随系统，点一下弹出菜单选十种之一）等（都会记住）。点「跳」。第一次打开时系统会弹手部追踪授权（不用先点什么）。
-2. 一开始你还在自己的房间里（混合沉浸，透出房间），只有一根黄色的竖杆立在你右手边，一明一暗地等你去握。
-3. **握住这根竖杆**（握拳或者捏住都算）：飞机从你握的地方开始长出来——一道青色发光的波前越扩越快，
-   扫过的地方变成运输机的货舱（绗缝的隔热垫和一道道加强框、滚轮轨道和系留环、铝管架的红色编织座椅、舷窗、伞兵门、
-   跳板的液压作动筒和黄黑警示条、舱顶的管线和钢索、四盏红色夜灯）；扫过舱门外面时，房间像起雾一样化开，变成高空的天和云海，
-   发动机和风声先像隔着墙一样闷，跟着一点点变清楚。约 4.6 秒长完，再过一秒舱门上方的跳伞灯由红变绿，「叮」一声。
-   绿灯以前松手不算跳（再握住就行）；绿灯以后在舱里等多久都行：地面不跟着飞机走，什么时候跳，出舱点都在同一个地方。
-4. **绿灯后松手就跳**：往外跑两步滑出跳板。两只手都抓着的话，两只都松开才算。手偶尔跑出追踪范围不会误跳（半秒内不算松手）。
-5. 自由落体：速度从 0 加到约 90 m/s，高空空气稀薄，越往下越慢。旁边一座浓积云塔（各关的云不一样：环礁的信风积云、
-   草原晴天的淡积云、高山午后的大块积云、雪山稀疏的碎云、海岛长得很高的热带积云、火山把天让给烟柱；天空之城是脚下的云海）。
-   3,200 → 2,400 米穿过一层**正在下雨的碎积云**：云里白茫茫一片，一团团雾从脚下往上急掠过去（只在真有云的地方），
-   大大小小的水珠从你身边往上嗖嗖地掠过（你掉得比雨快得多），雨点噼里啪啦打在头盔上，手套、袖子越来越湿
-   （颜色变深、反光变亮，手套上挂着一颗颗小水珠）；穿出云底还在雨里，四周灰蒙蒙的，到 1,500 米左右雨蒸发完，又是晴天。
-   这片云沿航线拉得很长，不管在舱里等多久再跳都会穿过它。
-6. **手表在 3,500 英尺报警**（橙色闪、三声一组的哔哔），这时才能开伞；2,000 英尺以下是急促的红色报警。
-   报警前去拉，拉手拉不动，面前会提示「还没到开伞高度」。
-7. **用戴表的那只手抓住另一只小臂上的红色拉环（只有一个，在没戴表的那只小臂手背那一侧，紧挨着手腕；表戴左手，拉环就在右小臂上），往外拉 13 厘米**：引导伞把伞包拽出去，伞绳拉直（这一秒还是全速往下掉），
-   伞衣从中间的气室往两边一格格鼓起来，滑块顺着伞绳滑下来，4.5 秒飞稳。整个开伞要掉 160 多米：
-   **拉得太晚（约 550 英尺以下），伞还没张开就到地面了——摔。**
-8. 伞下**转头、转身来转向，伞跟着你转**（默认）；伸手抓头两侧的黄色操纵环，**两边一起拉减速，两手抓着往前推是俯冲**。
-   开始窗口下面的「伞下转向」选「加拉环」以后（会先提示可能引起晕动症，要确认），**拉左边往左转、拉右边往右转**
-   （真的跳伞是拉下两根前组伸缩带：伞头往下栽，下沉从 8.5 m/s 加到 15 m/s 左右、前进也快 30%，高度太多时不用一直滑翔；
-   只推一边是往那边俯冲着转）。转弯时世界绕着你转，视野四周会压暗一圈防晕。
-   **人自己转了（在转椅上转过去），伞跟着转**：伞衣、操纵环转到你身体的正前方，飞的方向也变成你身体朝的方向
-   （身体朝向按头和手估：舱里和自由落体时只转头 40° 以内不算；伞下头偏过 15° 就开始跟，一直慢慢跟着头转，
-   所以伞下转头也会转向，提示里说「伞的方向和人的身体方向一致」）。这是你自己真的在转，世界不用跟着转，不压暗。
-   开伞后头 14 秒和各种警告（快撞山、毒烟、掉出岛）里都带着降落点在几点钟方向、多远（HUD 关着也说）；
-   HUD 开着时一直显示，高度太多或不够时会提醒你俯冲 / 左右来回转几下（拉环模式是先飞过去再掉头），或者对准降落点直飞。
-9. 落地（离地 6 米内自动拉平；开始窗口设置条「拉平」选「手动」以后要自己拉：离地 12 米以内两边操纵环一起拉下去，
-   离地 25 米起提示「拉平！」（HUD 关着也说）。没拉平落地超过 4.5 m/s 是**重着陆**：不算失败，但不给靶心。
-   摔的门槛是 11 m/s——开伞太晚、没开、贴地俯冲）：
-   - 落在降落点上（半径 20 米）就赢，3 米内是正中；
-   - 平安落地但没落在降落点上、掉进水里、落地太快（开伞太晚 / 没开伞）都算输；
-   - 山区里还有：坡太陡（超过 32°）算撞山，落进树林（海岛上是雨林）挂在树上，掉进熔岩 / 火山口，冲进火山的烟柱，都是直接失败。
-   伞塌下来盖在地上。点一下手表结束（不点 10 秒后自己结束），开始窗口会显示这一跳的结果；旁边的「航线」打开俯视回放：开伞以后的全程和靶附近的放大，
-   开伞时多高、离靶多远，落点顺着最后几秒飞的方向看是落长 / 落短、偏左 / 偏右多少米（`ReplayView.swift`）。
-   **练习**：一关平安落地过一次以后，开始窗口里「开伞前开始」直接从离着陆区 5,000 英尺开始（`JumpTimeline.practice`：
-   把正常的一跳在 CPU 上快进到那里，出舱点、云和雨的位置都一样），一跳一分半，专门练开伞以后那一段。
-10. **皮肤**：每关一顶降落伞、一套手套和袖子，颜色和图案都从那一关的景物里来。**落进那一关的降落点（20 米内）解锁那一关的伞，
-    落进正中的黄色靶心（3 米内）再解锁那一关的手套和袖子**（靶心也算进靶，两样一起解锁）。落地时提示条里说这一跳新解锁了什么
-    （没解锁新东西时提醒这一关还差什么），开始窗口顶上也有一行，点它打开皮肤页。开始窗口「跳」左边的「皮肤」打开皮肤页：
-    上面切降落伞 / 手套和袖子，下面一个转盘，中间一张大的、两边露出上一张和下一张，滑的时候每张卡绕竖轴转（从一边到另一边转半圈）；
-    没解锁的去色带锁、写着怎么解锁，解锁了的点「换上」。关卡卡片右上角两个小徽章（伞、手）亮着就是这一关的那样解锁了。
-    解锁状态和选择都记住（UserDefaults）；默认的橙白蓝伞、黑手套一直能用。
+![One jump: grab the bar, the plane grows around you, exit, pull, fly to the target, land on the bullseye](docs/media/freefall.gif)
 
-    | 关 | 伞 | 手套和袖子 |
-    |---|---|---|
-    | 环礁 | 潟湖：从中间往外一圈圈白沙、潟湖的浅水、礁、一道白浪、外海、深海，边是起伏的 | 白沙：碧蓝的护甲、白沙色的布；碧蓝的袖子上一道波浪边的白条 |
-    | 草原 | 拼布田：一格格麦田、草、翻过的土，树篱隔开，有的田里一垄垄作物 | 麦穗：草绿的护甲、麦秆色的布；草绿的袖子上一道麦黄 |
-    | 高山 | 群峰：天、雪峰、岩石、一排尖尖的云杉 | 云杉：深绿的护甲、岩石灰的布；深绿的袖子上一道锯齿边（山峰）的白条 |
-    | 雪山 | 冰川：白底上冰蓝的人字纹，翼尖冰川蓝 | 雪原：冰蓝的护甲、雪白的布；白袖子上一道深蓝 |
-    | 海岛 | 棕榈：中间一片棕榈叶，两边扶桑花红、礁坪绿、白沙 | 扶桑花：叶绿的护甲、花红的点缀；叶绿的袖子上一道扇贝边的花红 |
-    | 火山 | 熔岩：黑底上从前缘烧过来的三层火苗（红、橙、黄），翼尖火山灰 | 黑曜石：黑色护甲、火山灰的布、微微发光的熔岩橙点缀；黑袖子上一道火苗 |
-    | 天空之城 | 城堞：铜绿的天、奶白石墙的城垛、一排柱廊、两道金线 | 铜绿：铜绿的护甲、奶白石头色的布、金色点缀；石头色的袖子上一道城垛边的铜绿 |
+![Recorded on Apple Vision Pro: grabbing the bar in your room, free fall, the canopy opening, flying toward the atoll, the bullseye, landing](docs/media/stills.jpg)
 
-    山、火苗、城墙这些有上下的图案按「后缘是上」画：玩家几乎总是在伞下仰头看，前缘在视野的下方。
+<sub>All of the above was recorded on Apple Vision Pro (the Atoll world).</sub>
 
-**风**：每一跳开跳时随机抽一个（`JumpScene.windRange` / `randomWind`），每关按地形给范围：
-环礁顺着靶旁边的风向袋 ±20°、1~3 m/s；草原哪个方向都行、0.5~3.5 m/s；高山、雪山在 U 形谷里，横风被两边的山墙挡住，
-只顺着山谷上谷或下谷 ±15°、1~4 m/s；海岛四面是海、2~5 m/s；天空之城 0.5~3.5 m/s；火山 0.5~2 m/s，只有横风到斜着的顺风
-（按时开伞离靶 960 米、没有富余，1 m/s 逆风就差六七十米；烟柱固定往进场的反方向倒，风的横向和它一致，顺风那一点对不上）。
-逆风分量有上限（草原 2.5、雪山和天空之城 3、高山和海岛 4），超了按比例压风速。
-人和云一起随风漂，地面上的落点被吹偏（JumpTimeline 里 landShift 每帧加这一跳的风）；
-出舱点按「出舱到手表报警」这段的漂移往上风挪，按时开伞还在设计的开伞点上——所以每跳的出舱点和航线都不一样。
-HUD 罗盘里一个从上风那一侧指进来的青色箭头和风速（km/h）；航线页右上角是一个同样画法的小罗盘（图北朝上，N E S W 在圈外），下面一行写风速和逆风 / 顺风 / 侧风。
-离屏测试（render-check、`-autopilot`）不随机，用 `JumpScene.designWind`（草原逆风 2.5、海岛横风 3.5、别的关没风），镜头每次一样。
-`tools/render-check/run.sh <目录> wind`：每关取风的范围的边角（方向两头和中间、风速最小 / 中间 / 最大、上谷下谷），
-自动驾驶 3,000 ft 开伞各跳一次。现在 142 次里 138 次进靶、中位数离靶心 9.7 米；没进的 4 次都在小风里（离靶心 22~41 米），
-是自动驾驶的航线不够准，不是飞不到。
-自动驾驶按地速侧风修正（`JumpTimeline.crab`），提示里「太高了 / 太低了」也按顺着降落点方向的地速算。
-自动驾驶高度富余又不够飞出去掉头一趟时两边一起刹（滑翔变陡，逆风里几乎往下落），刹到直飞刚好够、离地 12 米松开；
-之前不会刹，逆风里到了靶上空还有一百多米，只能飞过头。
+## How to play (about 4 minutes a jump)
 
-**七关**（靶都在地面坐标的同一个地方；开伞点一般在靶的左后方 640 米，草原、火山挪开了，让这一关的危险落在要飞的路上，
-见 `JumpScene.exitShift`）：
+1. In the start window, swipe the cards to pick a world and tap **Jump**. Freefall is played only with your real hands; the first time, it asks for hand tracking.
+2. You are still in your own room, with a yellow bar beside you. **Grab it**, and the cargo hold of a transport plane grows out from your hand, with the sky beyond the open ramp.
+3. When the jump light turns green, **let go** and you're out. Free fall lasts a little over a minute, through a cloud deck that is raining.
+4. Your watch alarms at 3,500 feet: **with the watch hand, grab the red handle on your other forearm and pull it out** to open the canopy. Pull too late and you crash.
+5. Under canopy, **turn your head and body to steer**; the canopy follows you. Grab the toggles beside your head: pull both to slow down, push them forward to dive.
+6. **Land inside the red-and-white circle to win**; the yellow bullseye in the middle is a perfect landing. Tap the watch on your wrist to toggle the helmet HUD; hold it for two seconds to quit a jump.
 
-| 关 | 着陆区海拔 | 地形和危险 |
+Every jump has its own wind. Landing on a world's target unlocks its canopy, and hitting the bullseye unlocks its gloves and sleeves;
+once you've landed safely in a world you can practice from 5,000 feet; after each jump there's a top-down replay of your flight.
+The full gameplay and design notes are in [docs/gameplay.md](docs/gameplay.md) (in Chinese).
+
+## Seven worlds
+
+| World | Landing zone | Watch out for |
 |---|---|---|
-| 环礁 | 0 | 潟湖里一片白沙洲，四周是水；沙洲上三丛椰子树（影子投在沙上），沙上有漂木、珊瑚石，靶旁边一个风向袋（椰子树和风向袋撞上算失败） |
-| 草原 | 240 m | 缓丘、拼布一样的农田、一条弯弯的河、池塘、成片的树林（一棵棵立着的阔叶树）、草跑道；河和树林落不了。开伞点在靶的正后方 770 米，靶前横着那条河和河边的林子：落短了掉河里、挂树上，高度又富余，得管住 |
-| 高山 | 1,150 m | U 形谷，开伞时两边的山比你还高；谷底草甸、一条深潭浅滩交替的溪，坡上的云杉林，林线以上是岩石和雪；撞岩壁、落林子都算失败 |
-| 雪山 | 2,750 m | 冰斗里一大片雪坡，四周五千米的雪峰，零星露出鼓出雪面的岩石和石块；海拔高、空气稀，掉得更快，开伞要早 |
-| 海岛 | 3.5 m | 四面环海的热带小岛：开伞点在海上，往岛飞；岸边一圈碧绿的珊瑚礁坪（礁边碎浪），白沙滩后面的草地上是靶（草地上零星的椰子树，撞上算失败），往里两座长满雨林的山。落短了掉海里，往里落进雨林 |
-| 火山 | 620 m | 破火山口里一座正在喷的火山锥，一柱翻滚的深灰火山灰被风吹斜、喷口上方被熔岩映红；两条熔岩流（两边是黑色的熔岩堤）；灰地上散着大大小小的石块（扁的、长的、半埋的，有的带一点氧化红）；火山口、熔岩、烟柱都是禁区。自由落体紧挨着烟柱下来，在火山锥上方开伞，靶在右手边 960 米：开伞以后马上往右飞离烟柱，开晚了飞不到 |
-| 天空之城 | 3,300 m | 云海上面浮着十六座岛（岛底是倒过来的山），主岛上一座废弃的石头城：三层台基上的柱廊、铜皮穹顶和尖塔，靶在城堡前面的草坪上，周围一圈残柱、花树林、水池；别的岛上有塔、圆亭、立着的石环，拱桥连着，瀑布从岛边跌进云海。开伞点在岛外，飞过头掉出岛外（进云海）、从侧面撞上岛壁、撞上塔和城堡都算输；这一关云在脚下，下落不穿雨云 |
+| Atoll | A white sandbar in a lagoon | Water |
+| Grassland | Rolling hills and farmland | The river, the woods |
+| Alpine | A meadow in a U-shaped valley | Rock walls, forest |
+| Snow Peaks | A snowfield at 2,750 m | Slopes too steep to land on; thin air, so pull early |
+| Island | A meadow behind the beach | The sea, the rainforest |
+| Volcano | A caldera | Lava, the crater, the ash plume |
+| Sky City | A stone city on floating islands above a sea of clouds | Falling off the island, hitting towers and the castle |
 
-高度表和真的一样按着陆区归零：山区里脚下的地面可能比读数高得多，离山坡太近时面前会提示「快转开」。
+## Comfort
 
-**必须允许手部追踪**：游戏只能用真手玩，以前那套捏合手势的备用操作（捏住抓杆、捏一下开伞、捏住往下拉转向、两手捏住退出）删掉了。
-没允许时开始窗口上弹出一个关不掉的引导（`HandAccessSheet`，做法照 Wandless），后面什么都点不了：系统还肯问就是「允许访问」（弹系统的授权），
-拒绝过就是「打开设置」（跳到这个 app 的设置页），从设置回来窗口自己再查一次，允许了弹窗就收起。第一次打开时系统的授权直接弹出来。
-模拟器没有手部追踪：不拦，跳下去一律自动驾驶，高度表在前下方的一块面板上（`-demoHandAccess denied|undetermined` 可以在模拟器里看引导弹窗）。
+Best played seated, with headphones; you never need to walk. By default you steer by turning your head and body, so the world never
+spins around you. The optional "+ Toggles" canopy steering does rotate the world, and shows a motion-sickness warning before it's turned on.
+The edges of your view darken while turning, and the helmet HUD moves with your head as a fixed frame of reference.
 
-**手和高度表**：
-- **跳伞手套**（一直戴着；以前开始窗口里还能选「真手」，去掉了：真手是房间里的光，和高空对不上，也换不了皮肤。下面「真手」那条路在渲染器里还留着，离屏测试 `GLOVES=0` 用）：真手和前臂整个藏起来（`upperLimbVisibility(.hidden)`），画一副跳伞手套和跳伞服的小臂袖子（只有小臂和手，没有大臂）。
-  - 手套来自苹果示例「[Animating hand models in visionOS](https://developer.apple.com/documentation/visionos/animating-hand-models-in-visionos)」，
-    27 个关节的顺序和 ARKit 手部骨骼一致。`tools/gloves/convert_gloves.py` 把它转成游戏的格式：白色布面压成炭灰、彩色点缀换成橙色，
-    贴图压到 2K，网格减到每只 3.8 万个三角形（细节靠法线贴图）。许可见 `tools/gloves/LICENSE-Apple-sample.txt`。
-  - 蒙皮只用手部追踪给的 27 个关节**位置**：每节骨头的方向 + 手掌法线推出坐标系，绑定姿势用同一套推法，
-    蒙皮矩阵 = 现在 × 绑定的逆（离屏测试的合成手也只有位置，两边一套代码）。手比手套大或小时，每节手指跟着真的关节走。
-  - 手套和装备用同一套光：太阳、伞衣的影子、天空和地面的反射、舱里的红灯。真手做不到这些（它是房间里的光）。
-  - 袖子从手套袖口外面套上去，沿前臂到手肘（前臂长按 27 厘米推），在手肘那里收成一个圆口。
-    大臂和肩膀没有追踪，之前按身体朝向猜、连到肩膀，猜错了袖子会横在脸前，所以去掉了：只画追踪得准的小臂和手。
-  - 抓操纵环时，环套在四根手指的第一节上（布片在食指那头），不然整个被拳头包住看不见。
-- **真手**：透视进来的真手（`upperLimbVisibility(.automatic)`）。系统按 app 写的深度把真手和画面合成：比手远的东西（舱壁、伞绳）被手挡住，比手近的东西盖在手上面。
-  不能用 `.visible`：那样真手永远盖在最上面，手腕上的表就看不见了（[WWDC24 10092](https://developer.apple.com/videos/play/wwdc2024/10092/?time=275)）。
-- 高度表：一圈表带，手背那一侧一块圆表盘。真手时离皮肤 2 厘米左右，深度在手前面，所以显示在手腕上；戴手套时表带放大一圈，套在手套袖口外面。
-  左右手都按「抬手看表，字是正的」摆。
+## Build and run
 
-**头盔 HUD**（`Shared/HelmetHUD.swift`）：**默认关着，用另一只手的食指点一下手腕上的表开 / 关**（「嘀嘀」一声）。
-两块半透明面板在视野两侧（左右各偏 17°、往下 6°，1.2 米远，中间 ±10° 空着不挡），背后垫一层淡淡的暗底，在白云前面也看得清；
-左边高度、离地高、下降速度和滚动的高度带（3,500 / 2,000 英尺两条色带），报警时闪「PULL」；右边罗盘、降落点（LZ）的方位和距离、地速，
-伞下是左右刹车量和俯冲，舱里是 JUMP GO / HOLD。底下一条提示：舱里开场的提示（握住扶杆、绿灯松手）不管 HUD 开没开都在，
-出了舱门只留要动手的和要命的，字越少越好（「开伞！拉右小臂红环」「快撞山了，转开」「拉平！两环拉到底」）——开伞、拉早了、
-伞下头 14 秒怎么转向（「伞的方向和人的身体方向一致」）和降落点在哪、快撞山 / 毒烟 / 掉出岛（带着降落点的方位）、手动拉平、落地结果和怎么结束；
-HUD 开着时再加「太高了，绕一绕 / 太低了，直飞」（方位罗盘上有，不再写）。刹车、俯冲不在提示里教，出舱后报警高度也不再提前说。
-「点手表看仪表，按住退出」在出舱后第 6~16 秒说一次
-（以前在舱里长完以后说：握着扶杆的正是点表要用的那只手，绿灯后照做就松手跳出去了）。最多三行（落地：结果 / 新解锁的皮肤 / 怎么结束）。CoreGraphics 按两倍分辨率每秒画 15 次，按 mip 采样，
-加一点辉光和开机时从上往下扫出来的动画（0.35 秒；第一版 1.2 秒，点了表要等一秒多才看全）。第一版放在 ±31°、固定取第 0 级 mip 还加了扫描线，真机上太靠外、发糊。
-提示条在正前方往下 15°；两侧读数开着时再往下让 2.5°（不然它的两头被读数的下沿挡住），太长的提示按面板宽度缩字号。
-**HUD 也写深度**：混合沉浸里系统按深度把画面和透视合成，开场房间里那行提示背后什么都没画（深度还是清屏的无穷远），
-第一版只画颜色不写深度，真机上开场的提示就看不到（同一帧里写了深度的扶杆看得到）。
-
-**身上没有背带**（低头会挡视线），**也没有大臂**，**也没有伸缩带和 3 环**：没有身体，两根黑带子从肩膀竖到头顶正好挡在视野两侧，
-带子下端的金属环悬在眼睛旁边，都出戏。开伞以后伞绳汇到头顶上方两侧的四个小连接环上就结束，操纵环挂在刹车绳上。
-开伞拉环挂在小臂上（跟着手部追踪的前臂走），只有一个，在没戴表的那只手臂上。
-**拉环好抓**：环比真的大一圈（8 厘米宽），在腕关节往手肘 10 厘米处；另一只手伸到 15 厘米以内握把就亮起来，这时握拳或者捏住就抓到了
-（手心、捏合点、食指 / 中指 / 拇指尖里最近的一个算距离）；先握着拳再伸过去，贴近到 7.5 厘米也算。第一版要张着手伸到 10 厘米以内再握、
-还要拉开 20 厘米，两只手交叉着很别扭。
-身体没有追踪，操纵环、连接环的朝向按头和手猜（头转 40° 以内身体不动，再多慢慢跟过去；两只手都在身前时按两手中点的方向）。
-伞下也不锁：伞衣的布料在「身体朝正前方」的坐标里模拟，输出时绕身体的竖轴转到身体的朝向，飞行方向 = 航向 + 身体转过的角度。
-
-**看手心不会冒出 Home 键**：沉浸空间里 `persistentSystemOverlays(.hidden)`（跳伞时一直张着手，很容易误点）。随时按一下数码表冠退出；游戏里也可以**按住手腕上的表两秒**退出这一跳（提示条里出进度，松手取消），中途退出不记成绩。
-
-**语言**：十种，和 Wandless 一样：英文、简体中文、繁体中文（台湾用语）、日文、韩文、西班牙文、法文、德文、意大利文、巴西葡萄牙文。
-默认跟着系统语言走（别的语言显示英文）；开始窗口设置条里的「语言」点一下弹出菜单，可以指定一种，马上生效、不用重开（`Localization.swift`）：
-SwiftUI 的 `Text` 按窗口环境里的 locale 取翻译；代码里的 `String(localized:)` 走模块里同名的一个（`Shared/AppLanguage.swift`），
-带上选中语言的 .lproj——Foundation 的那个只按启动时定下的语言列表查，运行中改 `AppleLanguages`、传 `locale:` 都没用。
-不写 app 的 `AppleLanguages`（写了再选回「跟随系统」就回不去了），所以系统画的授权弹窗还是系统语言。模拟器里 `-appLanguage ja` 启动就是日文。翻译都写在 `tools/l10n/strings.py`（键是代码里的中文原文），改完跑 `python3 tools/l10n/make.py` 生成 `Freefall/Resources/Localizable.xcstrings` 和 `InfoPlist.xcstrings`（会检查每条十种语言齐全、占位符一致）。HUD 上的读数标签（ALT、PULL、LZ 这些）所有语言都是英文。离屏渲染 `UILANG=ja tools/render-check/run.sh …` 出对应语言的提示（要先编过一次 app）。
-
-**声音**：风声（空气流动的声音）是一段真实的录音——麦克风伸出车窗录的快速气流，
-[Freesound 上 Huggy13ear 的 "wind 2.wav"](https://freesound.org/people/Huggy13ear/sounds/138970/)，CC BY 4.0，
-放在 `Freefall/Resources/Audio/`（署名在同目录的 `CREDITS.txt`）。载入时把首尾交叉淡化成无缝的循环，
-左右耳各一个读头错开播放，音量、音高、明暗（低通）跟着速度变。合成的风声太假，不像真的破空声。
-开伞的那一下和伞下伞布的抖动也是同一个音效包里的录音（"parachute 2.wav"、"nylon flapping 1.wav"，同样 CC BY 4.0）：
-开伞声在拉开半秒后响一次，张满时再慢放一次；伞布声循环播放，转弯、阵风、刚开伞那几秒更响。
-其余的都是实时合成的（下面列的开伞、伞布两条是录音读不到时的后备）：
-- 开场：握住扶杆以后，舱里的声音（发动机、舱门灌进来的风）先过一道低通，像隔着墙听；飞机长出来的几秒里截止频率从 110 Hz 一路打开。
-  再叠上很轻的一层气流、一颗颗像冰晶一样的细碎「叮」（跟着波前越来越密），舱门外的天出现时一声很轻的闷响。没有旋律。
-- 舱里：四台螺旋桨的叶片通过频率略微失谐地拍，加低频轰鸣，出舱后随距离变小；抓杆、绿灯的金属声和「叮」。
-- 所有声音最后过一个软限幅，几个声音叠在一起也不削波。
-- 自由落体：低沉的呼啸 + 随速度变尖的嘶嘶声，一阵阵的冲击，跳伞服被风扯的啪啪声。
-- 穿过雨云：沙沙的雨声，雨点打在头盔、护目镜上左右随机的「嗒嗒」声。
-- 高度表报警：三声一组 / 急促连响。
-- 开伞：魔术贴撕开的噼啪，扫频的「呼——」，伞衣越抖越慢，张满时「嘭」一声。
-- 伞下：风轻了，伞衣一阵阵抖，转弯时风声大一点。
-- 环礁、海岛：离地 300 米内渐渐听到海浪拍礁、左右随机的海鸥。草原、高山：近地有林子里的鸟叫。火山：离火山锥越近、火山口的低吼越响（60~300 Hz 的带通噪声，一阵一阵），偶尔一声闷响和稀疏的碎石噼啪。第一版是 80 Hz 以下的棕噪声，比海浪响 11 dB、五分之一的时间顶在限幅器上，头显喇叭放不出那么低的音，听到的全是压出来的毛刺（「呲」）；现在音量和海浪近地时差不多（离屏量过：伞下 −17.6 dBFS，环礁 −17.0），不碰限幅器。
-- 落地一声闷响（落水「噗通」、摔是重重的撞击），然后赢 / 输的提示音。
-
-**为了不晕：**
-- 镜头不会自己转，想看哪里就转头；伞下转向时世界绕你转，转速有上限（约 26°/s）。
-- 转速不是一拉就到：两级 0.32 秒的低通串起来，起转和停下都是 S 形的（前庭最怕的是角加速度的突变）；转的时候四周压暗一圈。
-- 头盔 HUD 跟着头走，转弯时是一个不动的参照物。
-- 出舱是一秒多的加速滑出，开伞减速分摊在几秒里。
-- 开头从黑场淡入，结尾淡出。
-- 建议坐着体验。
-
-## 运行
-
-需要 Xcode 27 和 visionOS 27 SDK，没装过 Metal Toolchain 的话先装：`xcodebuild -downloadComponent MetalToolchain`。
+Requires Xcode 27, the visionOS 27 SDK and [XcodeGen](https://github.com/yonaskolb/XcodeGen). The Xcode project is generated from `project.yml` and isn't checked in.
 
 ```bash
-xcodegen generate
-open Freefall.xcodeproj
+xcodegen generate && open Freefall.xcodeproj
+tools/install-device.sh --launch   # build Release, install on Apple Vision Pro and launch
 ```
 
-工程文件不进仓库，由 `project.yml` 生成：加了新的源文件或资源以后要重新跑一次 `xcodegen generate`。
+Simulator launch arguments, the offscreen render checks (`tools/render-check`: renders frames, measures performance and runs
+autopilot tests on a Mac) and the code layout are in [docs/development.md](docs/development.md).
 
-装到头显上（头显开机、解锁，和 Mac 在同一个 Wi-Fi 里）：
+## Docs
 
-```bash
-tools/install-device.sh            # 编 Release 并安装
-tools/install-device.sh --launch   # 装完直接启动
-```
+The detailed docs are written in Chinese.
 
-### 模拟器里不点按钮跑完整流程（只在 DEBUG 构建或模拟器里生效）
-
-```bash
-xcrun simctl launch <设备> com.feiyuchang.freefall -autoEnter YES -mute YES -autopilot YES -lookDown 30 -timeScale 4
-```
-
-| 参数 | 作用 |
+| Doc | Contents |
 |---|---|
-| `-autoEnter YES` | 启动直接跳。落完窗口重新打开后会再跳一次 |
-| `-mute YES` | 不出声 |
-| `-lookDown <度>` / `-lookUp <度>` / `-turnLeft <度>` | 模拟器里头不会动，用这几个参数让它低头、抬头、左转。只能给正数：UserDefaults 会把 `-30` 当成参数名 |
-| `-startAltitude <米>` | 跳过机舱，从这个高度直接开始自由落体 |
-| `-timeScale <倍>` | 快进 |
-| `-autopilot YES` | 自动跳：几秒后抓杆、松手，到 `-autoDeploy <英尺>`（默认 3000）拉伞，伞下自己飞向靶 |
-| `-scene <0~6>` | 跳哪一关：0 环礁 1 草原 2 高山 3 雪山 4 海岛 5 火山 6 天空之城（就是开始窗口里的选择，会记住） |
+| [docs/gameplay.md](docs/gameplay.md) | Gameplay and design: wind, the seven worlds, hands and the altimeter, the helmet HUD, languages, sound, motion comfort |
+| [docs/development.md](docs/development.md) | Building and running, simulator launch arguments, offscreen render checks, file layout |
+| [docs/rendering.md](docs/rendering.md) | Rendering: atmosphere, volumetric clouds, terrain, rain, the opening materialization, Sky City |
+| [docs/performance.md](docs/performance.md) | Performance work and measurements on the headset |
+| [docs/known-issues.md](docs/known-issues.md) | Known issues and next steps |
 
-模拟器没有手部追踪，所以高度表在前下方，跳下去一律自动驾驶。
+## Credits
 
-## 离屏渲染检查（不开窗口、不出声）
+- The glove model comes from Apple's sample code "[Animating hand models in visionOS](https://developer.apple.com/documentation/visionos/animating-hand-models-in-visionos)"; its license is in `Freefall/Resources/Gloves/LICENSE-Apple-sample.txt`.
+- The wind, parachute-opening and canopy-flapping sound effects are by Huggy13ear on freesound.org, CC BY 4.0; see `Freefall/Resources/Audio/CREDITS.txt`.
 
-```bash
-tools/render-check/run.sh <输出目录> shots   # 舱门、抓杆、绿灯、出舱、雨云里、看表、报警、拉手、开伞五个阶段、操纵环、靶、落地、摔等 30 个镜头，
-                                             # x 开头：装备近景（拉环、伸缩带、操纵环、3 环、表、第三人称正面 / 侧面、快落地时地上的影子）
-                                             # v：开场实体化的几个阶段；cab：机舱（扶杆、地板、舱壁、座椅、跳板、舱顶）；w：穿云后湿手套、云里的雾团
-SCENE=<0~6> NOHUD=1 tools/render-check/run.sh <目录> shots card   # 开始窗口的卡片截图（伞下朝靶飞），裁成 3:4 放进 Freefall/Resources/Cards/
-tools/render-check/run.sh <输出目录> sim     # 不出图：自动驾驶在 3,500 ft ~ 不开伞之间各跳一次，打印结果（PILOT=3000 打印伞下每 2 秒的状态）
-tools/render-check/run.sh <输出目录> skins   # 不出图：皮肤的解锁规则（每关 × 每种落地结果）、存进去再读出来（= 重启以后）、落地提示里的那几行
-SKINS=all tools/render-check/run.sh <目录> shots xh_canopy,x1_ring   # 每个镜头按默认 + 七套皮肤各画一张（<镜头>_skin<关>.png，-1 是默认）；
-                                             # SKIN=<0~6> 整个跑一套，CANOPYSKIN / GLOVESKIN 只换一样。xe：伞下仰头看伞，xh：前上方看伞（皮肤页的缩略图），
-                                             # xi：低空看伞投在地上的影子；镜头名过滤可以写几个，逗号隔开
-tools/render-check/run.sh <输出目录> hands   # 不出图：用合成的手走真手的抓握逻辑（抓杆、手短暂丢失、松手、提前拉、报警后拉、左右环转向）
-tools/render-check/run.sh <输出目录> terrain # 不出图：同一批点上比对 GPU（TerrainField.h）和 CPU（TerrainField.swift）的地形高度和地面类型
-tools/render-check/run.sh <输出目录> hazards # 不出图：火山口、熔岩、冰裂缝、冰湖、河、陡坡、烟柱这几个点的判定
-SCENE=2 tools/render-check/run.sh <输出目录> shots   # 环境变量 SCENE 选关；地形关有自己的一套镜头（俯瞰、穿云、开伞后看靶、看两边的山、低空、落地）
-tools/render-check/run.sh <输出目录> perf    # 按真机分辨率（两只眼各 1888×1792）测 GPU 耗时
-tools/render-check/run.sh <输出目录> seq     # 连续下落 + 转头 90 帧，查云层重投影有没有拖影（SEQ=cabin 从机舱开始）
-tools/render-check/run.sh <输出目录> film    # 整段跳伞按 90 Hz 跑，存成 30 fps 的预览帧
-tools/render-check/run.sh <输出目录> maps    # 天气图、环礁图（叠上伞降路线）、云影图、时间线和大气常量
-```
+## Support the project
 
-它在 Mac 上用和 Vision Pro 一样的方式（2 层纹理数组 + vertex amplification）跑同一份 `SceneRenderer`、`JumpSession`（输入 → 时间线 → 布料）和 shader，
-镜头用自动驾驶从机舱一路跑到那个时刻，所以和真机上的过程一模一样，提示文字也画出来。
-手部追踪和透视只有真机有，这里用合成的关节姿态摆手（握扶杆、抓拉手、抓操纵环、看表），画肤色的「替身手」代替真手。
-
-- 环境变量 `EXPOSURE`、`SIGMA`、`STEP`、`CLOUDSCALE` 可以临时改参数。
-- `METAL_DEFINES="-DPROFILE_SKIP_MARCH"` 关掉云的步进，`"-DPROFILE_FLAT_SCENE"` 关掉天空和海面着色，用来拆开量各个 pass 的耗时。
-
-## 结构
-
-| 文件 | 内容 |
-|---|---|
-| `Freefall/Shared/JumpTimeline.swift` | 物理和规则：抓杆 → 松手出舱 → 自由落体（重力 + 随高度变的终端速度）→ 报警 → 开伞（先全速再减速）→ 伞下转向 / 刹车 → 落地判定（靶、水、摔、撞山、树林、熔岩、冰裂缝、烟柱）→ 淡出 |
-| `Freefall/Shared/JumpScene.swift` | 七关：名字、介绍、着陆区海拔、云层抬多高、地形的海拔范围 |
-| `Freefall/Shared/SkyCity.swift` | 天空之城的建筑网格（城堡、柱廊、塔、石环、拱桥、花树、晶石灯）和瀑布，启动时生成一次；撞塔的判定 |
-| `Freefall/Shared/Skins.swift` + `Freefall/Shaders/Skins.h` | 皮肤：七套伞、手套和袖子的颜色表、名字、解锁规则（`Skins.earned`）和存档（`SkinUnlocks`、`SkinChoice`）；图案在 shader 里按 uv 现算 |
-| `Freefall/SkinPicker.swift` + `Freefall/Resources/Skins/` | 皮肤页（转盘）和卡片上的小徽章；缩略图是离屏渲染裁的（`xh_canopy_front_above`、`x1_ring` 两个镜头，`SKINS=all` 出图后裁成 3:2） |
-| `Freefall/Shared/PlayerShadow.swift` | 伞和人的影子：每帧从太阳方向把伞衣（实际网格，透过来的颜色按皮肤的图案算，和伞衣同一个函数）和人（按身形搭的简化人体，手臂跟着手腕）各画进一张剪影贴图，地面、物件、装备着色时顺着阳光查（Common.h 的 canopyShadow / bodyShadow）；离地越高取越模糊的 mip |
-| `Freefall/Shared/SceneProps.swift` + `Props<关名>.swift` + `PropBuilder.swift` | 各关立起来的东西：云杉、阔叶树、椰子树、漂木、石头、风向袋。都是启动时算一次的程序网格（从靶往外撒，越远越稀，每关最多约 17 万个顶点），和天空之城的建筑走同一条管线；立在能落的地方的（椰子树、风向袋）带撞击判定 |
-| `Freefall/Assets.xcassets` | visionOS 的分层图标（前景降落伞、中景云、后景环礁）；三层原图在 `Design/AppIcon/Final` |
-| `Freefall/Shaders/TerrainField.h` + `Freefall/Shared/TerrainField.swift` | 地形的高度和地面类型（同一个程序函数写了 Metal 和 Swift 两份，逐行对应：GPU 画、CPU 判断落地） |
-| `Freefall/Shared/TerrainCache.swift` | 地形的光照缓存：一摞以相机为中心的贴图，存算完光照的地面颜色；分层、跟着相机移动、分帧重画（见「性能」） |
-| `Freefall/Shared/TerrainLOD.swift` | 地形网格的 LOD（CDLOD 四叉树选块） |
-| `Freefall/Shaders/Terrain.h` | 地形网格的顶点 / 片元着色、深度预渲染，启动时生成高度图、山影图、地面类型图 |
-| `Freefall/Shaders/Rain.h` | 雨：身边大大小小的水珠、云底下的雨帘、云里往上掠的雾团（按真的云密度） |
-| `Freefall/Shared/Interaction.swift` | 真手的抓握判定（握拳 / 捏合，带迟滞）和身上能抓的东西：扶杆、左右两个开伞拉环、两个操纵环；身体的朝向（BodyLayout、BodyYaw：按头和两只手估） |
-| `Freefall/Shared/JumpSession.swift` | 每帧的推进（真手 / 自动驾驶 → 时间线 → 布料）、提示文字、提示面板的摆放 |
-| `Freefall/Shared/CanopyCloth.swift` | 伞衣的布料模拟（PBD，55×13 个粒子，每个气室 6 列，只限拉伸）：伞包拽出、气室逐个鼓起、后缘抖动、刹车拽下后缘、落地塌下；伞衣投影的形状 |
-| `Freefall/Shared/Gear.swift` | 装备的程序网格（照真装备的尺寸）：小臂上的拉环（金属 D 形环 + 红色橡胶握把，拉出来连着钢索）、伸缩带和 3 环、连接环、导向环、操纵环（挂着 / 抓在手里）、滑块扣眼、表壳和表圈、跳伞服袖子；扁带 / 圆管 / 圆环 / 软枕头 / 旋转体几个基本形状 |
-| `Freefall/Shared/HelmetHUD.swift` | 头盔 HUD：两侧两块面板 + 底下的提示条，CoreGraphics 画，三张贴图轮着用 |
-| `Freefall/Shared/Glove.swift` + `Freefall/Resources/Gloves/` | 手套：读网格和贴图，按手部追踪的关节位置算蒙皮矩阵（`tools/gloves/convert_gloves.py` 从苹果示例的 USDZ 转出来） |
-| `Freefall/Shared/Autopilot.swift` | 自动跳（模拟器和离屏测试用），伞下飞着陆航线 |
-| `Freefall/Shared/SceneRenderer.swift` | 所有渲染 pass |
-| `Freefall/Shared/ProceduralMeshes.swift` | 程序生成的飞机：货舱（T 形加强框、地板和滚轮轨道、系留环、跳板和作动筒、座椅管架、舷窗、伞兵门、舱顶管线、前端隔板和灭火器）、外壳、扶杆（钢管 + 橡胶握把 + 法兰螺栓）、跳伞灯 |
-| `Freefall/Shared/SceneObjects.swift` | 每帧摆飞机、伞衣、滑块、伞绳（A、B 排穿前扣眼到前伸缩带，C、D 排到后伸缩带）、刹车绳（分叉 → 滑块 → 导向环 → 操纵环）、装备、表和高度表 |
-| `Freefall/Shared/TextPanel.swift` | CoreText 把提示文字画成贴图 |
-| `Freefall/StartView.swift` + `Freefall/Resources/Cards/` | 开始窗口：关卡卡片（截图）、最近距离、设置浮条 |
-| `Freefall/ImmersiveRenderer.swift` | CompositorServices 渲染循环、头和手的追踪、声音事件、自动画质 |
-| `Freefall/WindAudio.swift` | 合成声音 |
-| `Freefall/Shaders/` | 大气、云、海、环礁、沙洲和靶、物体、高度表、提示面板 |
-
-坐标约定：
-- 你（舞台）始终不动、不转，-Z 是你起跳时面朝的方向（机尾的舱门）。伞下转向是世界绕着你转（航向 `heading`）。
-- 飞机、伞跟着舞台坐标走。
-- 云按你在「云坐标」里的水平位置平移；海、环礁、靶在「地面坐标」里，地面坐标 = 云坐标 + `landShift`。
-  机舱里云照样往后掠，但地面不跟飞机走（`landShift` 抵消），松手以后固定。
-- 云相对地面的位置取决于你在舱里等了多久，所以靶周围几百米不落云影（阳光从云缝里照下来），靶总是亮的。
-
-## 渲染
-
-**启动时算一次**
-- 云的噪声：形状噪声 128³（Perlin-Worley），细节噪声 32³（Worley）。
-- 天气图：64 km 平铺，存覆盖率、云顶、云底、柱状程度。
-- 云顶上限图：步进时跳过空段。
-- 云影图：海面朝太阳方向穿过云层的光学深度。
-- 环礁图。
-- 大气：透射率表、多次散射表、海平面的天空表，以及几个常量。
-- 飞机的网格；伸缩带（不动的装备，画的时候平移到身体的位置）。
-
-**开场的实体化**（`JumpTimeline.revealRadius`、`Common.h` 的 `revealAt` / `revealEnvironment`）：
-- 沉浸方式是混合（`.mixed`）：主 pass 清成 (0, 0, 0, 0)，没画到的像素系统透出房间；全部长完以后画面盖满，看起来和完全沉浸一样（中途不切换沉浸方式，免得渲染层被重建）。
-- 波前从握住扶杆的那只手开始，半径 1.6·t^1.5 米，边被两层值噪声打碎。网格（飞机、装备）硬边：没扫到的片元丢掉（深度留 0），刚扫过的地方一道亮线加一圈扫描纹；
-  扶杆不参与，房间里按屋里的光打，飞机长出来以后换成舱里的光。手套一直在（你本来就戴着）。
-- 天空、海、云、地形按视线上舱壁外面的点算（朝舱门 7 米、朝机头 16 米），噪声放大四倍，软边半透明（预乘 alpha），像房间起雾化开。
-- 带 discard 的着色器会让 GPU 没法提前剔除被挡住的片元，所以用函数常量编两套管线（天空海面、地形、网格），只有开场那几秒用带遮罩的。
-- 离屏测试没有透视：存图时在透明的地方垫一张灰色渐变的「房间」，`v` 开头的镜头是开场的几个阶段。
-
-**每帧**
-0. 地形关：CPU 按到头的距离选地形块（CDLOD，根块 1,048 km 见方，近处格距 2 米，一直铺到地平线），
-   先画一遍只有深度的预渲染，云层 pass 按它截断视线（山后面的云不算、云会绕着山峰）。
-1. 按头部海拔重算天空视图表（192×108）。
-2. 新算云样本（四分之一大小）：云层分辨率是渲染分辨率的一半，每帧只重算 2×2 块里的一个像素。起步抖动每帧换。
-3. 云层合成：其余三个像素用刚算出的云深度投到上一帧取历史，再夹到周围新样本的范围里，避免拖影。你的下落和水平移动都算在重投影里。
-4. 主 pass：
-   - 天空和太阳；
-   - 海面：噪声高度场的浪，加上 Beckmann 统计粗糙度的太阳倒影；
-   - 环礁：浅水按深度吸收红光，沙洲用双三次采样加细节噪声，近看边缘不糊；
-   - 合成云层，ACES 色调映射（`-DTONEMAP_AGX` 可以换 AgX 对比，试过发灰，没用），抖动。
-4.5 地形（先画，天空 pass 再按深度只填没盖住的像素）：顶点着色器直接算程序高度函数，远处按地球曲率往下沉；
-   片元按关决定地面材质（草、林、岩、碎石、雪、冰、裂缝、冰碛、水、熔岩、火山灰、农田），太阳 × 山影 × 云影 + 天光 × 环境光遮蔽，
-   天光不只是蓝天：天上一半是被太阳照白的积云，补光更亮、更白（`cloudySkyFill`），云影底下也漏两三成阳光——
-   只按晴空算的话，背阴的山坡和云影经过色调映射是一片发黑的藏蓝色。
-   细节分四层：37 米、6 米两层（远了淡掉），落地前一两百米再加 1.9 米、0.37 米两层，按材质给深浅和凹凸
-   （草丛和零星的小花、沙纹、雪粒的闪光、火山灰里的黑石头）；树林用倒过来的 Worley 噪声当树冠的高度场，
-   差分出法线，一棵棵树朝太阳的一面亮、背面暗，林子的边也是一棵棵树；农田之间有土路和树篱。
-   空气透视按指数大气解析积分（不查表：查表在地平线附近不准，地形上会出一道线），最后叠上云层（雨帘也在云层里）。
-   树林、冰碛、熔岩这些每个都要算好几层噪声的地面类型，启动时预先存进一张图，着色时只查一次。
-5. 实体：
-   - 飞机：机舱的花纹都在 shader 里按机身坐标现算（`Objects.h` 的 `shadeCabin`）：隔热垫一块块的菱形绗缝（高度场求梯度当凹凸）、
-     地板的拼缝 / 沉头螺钉 / 系留环凹坑、跳板的防滑棱和黄黑警示条、编织带座椅的篮纹。太阳只从尾段敞开的两侧和后口照进来
-     （从这一点朝太阳射一条线，解析地算它从机身圆柱的哪里出去），舱顶四盏红色夜灯是点光源（灯罩朝下，地上一圈圈光斑），
-     舷窗里是天和云海。扶杆在房间里按屋里的光打，长出来以后换成舱里的光。
-   - 伞衣：布料模拟每帧重建网格；两面都画，逆光时透光（透过来的光染成布的颜色），承重肋、半肋、拼缝从下面看是一格格暗线，
-     近看还有 6 毫米的防撕裂格，转向后太阳方向跟着航向转。
-   - 装备（Gear.swift 的网格）：GGX 高光 + 天空反射（反射方向查天空表，朝下看到地面、朝身体看到自己的深色衣服），
-     金属（3 环、连接环、扣眼、钢索）、织带（1.8 毫米的斜纹 + 绒光，小于几个像素就淡掉）、塑料（软管、表壳）、橡胶（表带）各按真材料给粗糙度；
-     细环上的高光按法线变化加宽（几何高光抗锯齿），VR 里不闪。
-   - 伞绳、刹车绳：朝着眼睛的细长条，按真实粗细（1.8 毫米）画，不到一个像素就按覆盖率变淡，横截面当圆柱打光。
-   - 伞衣和身体的影子：伞衣当一块圆角平板（中心、展向、弦向每帧从布料算），身体当一根胶囊；
-     地形、海面、沙洲、装备、绳子都按太阳方向做相交，太阳圆盘 0.53° 的半影按距离算，所以高空看不出、快落地时越来越实；
-     透过伞布的光带着气室的颜色（橙色气室底下的影子发红）。
-   - 光照和天空同一套单位，最后同样曝光和色调映射。
-   - 深度都按真实距离写：系统靠它把透视的真手合成进来。
-6. 高度表：CoreText 生成的字形图集，表盘或面板两种样式，报警时橙色 / 红色闪。
-7. 提示面板：圆角半透明底板 + 文字贴图，在视线下方 1.2 米外，转头超过 20° 才慢慢跟过来。
-8. 雨：主 pass 里沿视线积分云底下面的雨帘（竖着拉长的噪声），身边 14 米的盒子里 6000 颗水珠（实例化的屏幕空间细线，
-   按雨相对你的速度拖影、在盒子里循环；0.8 ~ 3.8 毫米大小不一，头上亮、尾巴细，少数大颗闪一下），叠加混合，只做深度测试不写深度。
-9. 云里的雾团：身边 44 米的盒子里 180 片朝着眼睛、顺着相对速度拉长的方片，顶点着色器按它所在位置的真实云密度定透明度
-   （晴的地方直接丢掉），片元里两层值噪声做出絮状。
-10. 淋湿：在雨里、云里越来越湿（`JumpSession.wetness`），手套、袖子颜色变深、表面一层水膜；
-    手套上按绑定姿势的位置在 7 毫米的格子里撒水珠（跟着手套动），边上一圈暗、中间一点亮的倒影。
-11. 皮肤（`Skins.h`）：颜色在 Swift 的一张小表里（`SkinUniforms`，15 个 float4，每帧原样传），形状在 shader 里按 uv 现算，
-    不加贴图、不加 pass。伞衣按展向、弦向（米）算八种图案之一（默认的气室条纹、环礁的同心圈、拼布田、山脊、人字纹、棕榈叶、火苗、城垛），
-    边按一个像素在 uv 上多宽抗锯齿（原来气室的色块边落在三角形的边上，是硬边）；伞的剪影贴图用同一个函数，影子的颜色跟着伞变；
-    滑块跟着伞换色。袖子按（沿小臂、绕一圈的比例）在手背那一侧画一道条纹，边按这一关的形状起伏（波浪、锯齿、城垛、火苗、扇贝），加一圈袖口。
-    手套不另做贴图：原贴图就是「布面亮度 × 炭灰 + 点缀程度 × 橙」（`convert_gloves.py` 这么配的色，线性组合，mip 以后也成立），
-    用红、蓝两个通道解出两者，原来的白布（亮度约 0.62）和黑色橡胶护甲（约 0）之间按亮度插两种颜色，再加上点缀，火山那套点缀微微自发光。
-    每个片元多十几到几十条算术、没有采样，量不出耗时的变化（见「性能」）。
-
-**天空之城的浮岛**（`TerrainField.h` 的 `sky*`、`Terrain.h` 的 `city*`、`SkyCity.swift`）
-- 岛是谷坐标里的十六个椭圆，边被噪声啃得参差不齐，俯视互不重叠，所以顶面还是一张高度场，沿用地形的 CDLOD 网格。
-  同一批网格块画两遍：顶面，和底面（另一张高度场：岛边一圈崖壁，往里是倒过来的山）。岛外面的网格用顶点的裁剪距离
-  （`[[clip_distance]]` = 岛的 mask）沿岛的轮廓裁掉，不用片元 discard，深度预渲染和隐藏面剔除都不受影响。
-  底面的厚度在岛边两侧是 mask 的线性函数：裁口上的高度是两头顶点的线性插值，过零点对不上的话顶面和底面之间会裂缝。
-- CPU 选块时四叉树只往碰得到岛的块里走。岛外的「地面」在 CPU 那边是 2,880 米（云海里）：伞降到那里算掉出浮岛。
-- 建筑是真的网格（约十几万个顶点，启动时生成）：也画进地形的深度预渲染，云层按它截断，片元里再把前面的云叠上来；
-  砌石的错缝、风化的水痕和青苔、铜皮的接缝都按世界坐标现算。没有阴影贴图：城堡和塔当成往上收的圆柱，解析地算落在岛面上的影子。
-- 岛下面是原来环礁那一关的海面着色（不带环礁和沙洲）；云层不抬高，云顶 3,200 米的那层云正好在岛下面。
-- 瀑布是半圆管形的带子，半透明叠在上面，水纹按下落的时间走（越往下越快），越落越稀，最后化成水雾。
-- 灵感是「云海上的浮岛和遗迹」这个题材；岛的布局、建筑的样式（石柱廊、铜绿穹顶、立着的石环）都是这里自己设计的，没有照搬哪个游戏的美术。
-
-**参考**
-- 大气：Hillaire 2020《A Scalable and Production Ready Sky and Atmosphere Rendering Technique》，写法照 [sebh/UnrealEngineSkyAtmosphere](https://github.com/sebh/UnrealEngineSkyAtmosphere)（MIT）。
-- 云：Schneider《GPU Pro 7: Real-Time Volumetric Cloudscapes》（Nubis），噪声照 sebh 的 TileableVolumeNoise；多次散射用 Wrenninge 的八度近似；每步内的解析积分照 Hillaire 2016。
-- 渲染循环骨架来自 Bubble Dream（再往上是 [MetalSplatter](https://github.com/scier/MetalSplatter) 的 visionOS 示例，MIT）。
-
-## 性能
-
-M3 Max（30 核 GPU）上两只眼 1888×1792、不开注视点渲染，整帧：环礁 1.3~3.4 ms，地形关 2.4~3.5 ms（取 24 次里最快的一次）。
-地形关一开始要 5~8 ms：地形着色里每个像素现算树林、溪流这些（好几层噪声）、沿视线积分雨帘、9 次细节采样，
-改成地面类型预先存图、雨帘挪进低分辨率的云层 pass、细节采样减到 6 次以后降了一半多。
-后来给地形加近处的细节层、树冠的法线（多了约 0.2 ms），同时给噪声贴图生成了 mip、地形按像素在地上盖多大取对应的一级
-（之前中远处一个像素跨十几个纹素跳着采，每次采样都落在缓存外面，还闪），两边抵掉：高山关 34 个镜头的中位耗时平均还是 3.3 ms，
-低空贴地的镜头从 4.0 降到 3.2 ms。云的光照步进在视线已经被挡掉八成五以后用便宜的版本（4 步、不带细节噪声）。
-后来加了立起来的树（每关十几万个顶点）、溪流和草地的细化、岩层，同时修了云在平视方向步进不跳空区的问题（省下来的比加的多）：
-七关的中位耗时平均在 3.3~4.8 ms。最后一轮（远处的树、雪山鼓起来的露岩、石块、云层压低 300 米）之后草原和雪山比加之前慢一成左右，
-具体是哪一项带来的没有量清楚（把远处的树或云层高度单独还原，都回不到之前的数）。
-试过没用的：云的形状噪声也按 mip 取（没有可测的提速）；开场给机舱加一遍只写深度的预渲染（带 discard 的那一遍照样每层都着色，
-反而多出预渲染的 1.3 ms）。
-伞衣布料 + 时间线在 CPU 上每帧 0.27 ms，每帧组装网格（伞衣、滑块、装备、拉环、袖子、表，约 4 万个顶点）和 58 段绳子 0.44 ms。
-机舱的镜头 2~4 ms；开场实体化时往机舱里看最重（约 5 ms：带 discard 的管线没有隐藏面剔除，舱里层层叠叠的面都要着色）。`METAL_DEFINES` 还可以给 `-DPROFILE_TERRAIN_FLAT` 拆开量地形着色。
-
-**不改画面的一轮优化**（每项都和改之前逐镜头比过像素：除了靶的圈边，差别都在 1 / 255 的抖动以内，或者是山脊、树冠轮廓上零星几个亚像素的点）。
-Mac 上七关 47 个镜头，环礁、地形关各快 2~6%，海岛快 24%（看海的镜头 4.9 → 3.0 ms、4.3 → 2.6 ms）：
-- 着色器按关卡特化（`Common.h` 的函数常量 `sceneConstant`）：地形顶点 / 片元、缓存烘焙、云的步进里到处是「是哪一关」的分支，
-  关卡号是常量以后另外六关的代码整个删掉，着色器小了、寄存器少了。各关普遍快 3~6% 主要是这一项。
-- 海浪的坡度（所有水面：环礁、海岛、火山的海，河和湖）：每个尺度原来在三处各采一次三维噪声再相减，改成启动时把差分存进一张
-  `rg16Float` 的三维贴图（`generateWaveGradient`），一个尺度采一次。线性插值是线性的，两种做法数学上相等。
-- 海岛礁外的深海、火山外面的海：水的颜色只跟浪、太阳和影子有关，不再先把陆地那一整套（细节噪声、地面类型、近处细节、靶）算完再丢掉；
-  海岛的深海也不再去查光照缓存（水不进缓存，查了也是白查）。判断「离礁边的白浪够远」先用不带噪声的上界粗筛，大多不用算那四层噪声。
-- 环礁：整个像素都是沙洲 / 椰林时不算浪和水面反光（落地以后往下看几乎整屏都是）。
-- 开场实体化那几秒先画飞机、装备、手套：舱壁先写了深度，后面的地形和天空在深度测试就被挡掉（带 discard 的管线没有隐藏面剔除）。
-  画面逐像素一样；Mac 上量不出可靠的差别，头显上逐像素着色占的比重大得多，留着。
-- 顺手修了一处锯齿：靶的红白圈原来只有「红→白」那条边抗锯齿，「白→红」（fract 从 1 绕回 0）是硬边，一圈圈台阶。现在两条边都按到边的距离过渡。
-没动的：云的步进（伞下每帧 1~1.7 ms，Mac 上最大的一块）每个有云的样本朝太阳再走 4~5 步、十几次采样，再省就得少走或少采，画面会变。
-
-头显上高山关跳了一次，对比上一版的一次（两次不是同一个视角，单次的数会有起伏）：
-伞下基准 12~13 ms → 8~10 ms，一直满 90 帧；关掉缓存现算的那一档 26~31 ms → 18~22 ms（特化让现算路径整体变轻）；
-测试行里低于 88 帧的从 26 / 99 降到 7 / 102，上一版落地前几十米那段 68~74 帧的掉帧没有了。
-还掉帧的只剩出舱后头十秒（离地 5300~4500 米，77~87 帧）：那一段把云降到最低档就是 9 ms、满帧，瓶颈是高空满屏的云。
-
-### 头显上（M2 Vision Pro）
-
-上面都是 Mac 上的数。头显上实测完全是另一回事：地形关原来只有 45~55 帧，而且各部分的比例和 Mac 不一样——
-地形的逐像素着色一帧要二十毫秒（Mac 上一两毫秒），其余全部加起来才七毫秒；树、物件、深度预渲染、装备关掉都量不出变化。
-是在头显上一项项关掉量出来的（见下面的性能测试），在 Mac 上猜了几轮都猜错了。按量出来的结果做的：
-
-- **光照缓存**（`TerrainCache.swift`，Terrain.h 的「光照缓存」）：地面算完光照的颜色几乎只跟位置有关，预先画进一摞以相机为中心的贴图
-  （十层 2048²，纹素 3 厘米 ~ 16 米，最外一层盖住方圆 32 公里；相机走远了在后台每帧重画一条，画完整层对调）。
-  片元按像素在地上盖多大取纹素差不多大的那一层，再叠上伞和人的影子、空气透视和云。二十五米以内的地面、靶、水面仍然现算。
-  高山伞下从 28~31 ms（52~56 帧）到 12~13 ms（88~90 帧）。和现算不是逐像素一样：五关平均差 0~5 / 255，
-  主要在陡坡上地面类型的分界（缓存按每个纹素自己的坡度，现算按网格顶点的坡度插值）。
-  `DEBUGFLAGS=4096` 关掉缓存出图对照，`CACHE_AMORTIZED=1` 按头显上分帧更新的方式出图。
-  天空之城原来没开缓存（伞下、低空的地形每个像素现算，Mac 上 3.8~4.7 ms）；打开以后 2.7 ms 左右，
-  和现算平均差 0.07~1.3 / 255，看得出的只有广场地砖缝在二三十米外淡了一点（缝比纹素细）。岛的底面仍然现算。**还没在头显上看过。**
-  海岛的开阔海面还是走地形网格现算（水不进缓存），但深海不再白算陆地那一套（见上面「不改画面的一轮优化」），看海的镜头整帧 3 ms 左右。
-- 被云整个挡住的地形像素直接用云的颜色，不着色（穿云时原来照算不误）。
-- 伞和人的影子先粗筛（不可能在影子里的像素不往下算）；地形的细节噪声把差分预先存进贴图，一次采样顶三次。
-- 顶点的高度查一张 2 米一格的精细高度图，不现算程序噪声；细节层按像素实际大小取（注视点四周的大像素不按中心的精度算）。
-
-自动画质只剩降云的四档（云层比例 0.5 → 0.36，步长 1.0 → 1.7），按实际帧率换：掉到 86 帧以下降一档，满帧、GPU 有余量时试着升回去，
-升完又掉帧就降回来、半分钟内不再试。高空云占满画面的那一段会降一两档，伞下不用降。
-（之前按「GPU 超过 7 ms 就降」：头显上这个读数到 14 ms 还是满帧，等于永远压在最低档。）
-头盔 HUD 右上面板的左上角显示实时帧率、GPU 一帧的毫秒数和档位。
-
-动态分辨率（`SceneRenderer.encodeScaled`，画质档位表里 4 以后的几档）做出来了但没有启用：按系统的 rate map 造一张比例封顶的 rate map，
-整帧画进小的中间缓冲再放大回去。帧率能上去，但戴上看中心发糊、树和靶的边有锯齿。`FOV=1 DRS=0.7 tools/render-check/run.sh …`
-在 Mac 上用一张模拟的 rate map 对比这条路和直接画是不是一致。
-
-**性能测试**：开始窗口里把「性能测试」选成「这一跳测」，从出舱到落地轮流关掉画面的各个部分（每种 1.6 秒，一遍约 20 秒），
-量 GPU 耗时和帧率，每条带着当时的离地高度和雨量。头显不让 `devicectl` 取应用里的文件、也不让接管标准输出，所以结果走局域网发回 Mac：
-在 `Freefall/Resources/perf-host.txt` 里写上 Mac 的局域网地址（一行，这个文件不进仓库），Mac 上跑 `nc -lk 8765 > perf.log`，
-第一次会弹「允许访问本地网络」。结果也显示在开始窗口下面。
-
-## 已知的不足 / 下一步
-
-- 海岛：开阔的海面还是走地形网格、每个像素现算（水不进光照缓存）。深海已经只算水（看海的镜头 4.9 → 3.0 ms），
-  再往下得把深海交给 sceneFragment 现成的海面（环礁那条路，省掉地形网格的光栅化），要处理好两种算法在接缝上对不对得上。
-- 云层（半分辨率）放大回全分辨率时没看深度：山脊、拱桥、树梢对着天的轮廓上一圈白齿 / 蓝点，云每帧只重算四分之一像素，头显上会沿轮廓闪。
-  该做按深度加权的双边放大（地形、建筑、天空三处共用）。
-- 整个渲染器没有 MSAA：几何边（浮岛轮廓、塔尖、树、机舱、装备）全是硬锯齿。
-- 皮肤（伞、手套和袖子的配色和图案、皮肤页的转盘、落地的解锁提示）只在 Mac 的离屏渲染和模拟器里看过，还没上头显看：
-  伞下仰头看时滑块挡在伞衣中间一块（真伞也这样；真跳伞的人会把滑块收到脑后，以后可以做）。
-- 混合沉浸 + Metal 的开场还没在头显上验过：房间透出来的样子、手套盖在真手上的样子都要上头显看；模拟器里看不到透视。
-- 头盔 HUD 的位置和大小、点表的灵敏度、藏 Home 键（`persistentSystemOverlays`）、小臂拉环好不好抓、俯冲的手感，都还没上头显试过。
-- 卡片截图是离屏测试渲的，关卡画面改了以后要重新渲（命令见上面）。
-- 图标是本机 FLUX.2 klein 生成的三层图（中景、前景在绿幕上生成再抠出来），头显主屏幕上的视差还没看过。
-- 雾团只是近处的近似（片状的，离脸 1.5 米以内不画）；没有护目镜上的水珠（贴着眼睛的东西在 VR 里没法对焦）。
-
-- 选「真手」时，真手是房间里的光照，和舱里的红灯、高空的太阳对不上（默认的手套没有这个问题）。
-- 手套的手指扭转按手掌推，没有用 ARKit 给的关节朝向；手腕大幅弯的时候，手套袖口和跳伞服袖子的接缝可能露出来。
-- 抓扶杆、拉手的手感全靠阈值（握拳 / 捏合 + 距离），真机上可能要调。
-- 地形近看还是偏「程序生成」：岩壁上的冲沟太规整。树种到靶周围两公里半（一公里开外的只是一个棱锥），再远还是画在地上的林子。
-  环礁沙洲上只有椰子树有影子（按一张写死的表在沙面着色里投的），漂木、石头没有。
-- 火山关的地面整体偏淡（破火山口底的灰和老熔岩在这个曝光下发白发粉），熔岩是靠提高亮度才压过霾的。
-- 自动驾驶只会沿山谷飞（测试用），不会主动躲山。
+Freefall is made by one indie developer. If you enjoy it, **[☕ tip the developer](https://alanfeiyuchang.github.io/freefall-support/donate.html)** (WeChat Pay / Venmo) — completely optional, and it doesn't unlock anything in the game.
