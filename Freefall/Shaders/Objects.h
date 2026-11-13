@@ -2,6 +2,7 @@
 #include "Common.h"
 #include "Noise.h"
 #include "Atmosphere.h"
+#include "Skins.h"
 
 // 场景里的实体：飞机（货舱内部 + 外壳）、伞衣、伞绳和背带、手腕上的表带和高度表、前方高度表面板（没有手部追踪时）。
 // 手是透视出来的真手：系统按这里写的深度把手和画面合成（upperLimbVisibility = automatic），所以深度要写对。
@@ -36,6 +37,9 @@ struct MeshVertex {
 #define MATERIAL_HAZARD 17     // 黄黑警示条
 #define MATERIAL_WINDOW 18     // 舷窗：透出去看到天
 #define MATERIAL_SEAT 19       // 红色尼龙编织带的座椅
+// 换皮肤的两样（Skins.h）：颜色不看顶点，按 uv 现算图案，算完当伞布 / 织带打光
+#define MATERIAL_CANOPY 20     // 伞衣（uv 是展向、弦向，米）
+#define MATERIAL_SLEEVE 21     // 跳伞服的袖子（uv：x 从手腕往手肘，米；y 绕一圈 0…1）
 
 struct ObjectUniforms {
     float4x4 model;      // 物体 → 舞台
@@ -137,7 +141,7 @@ static inline float sceneGroundAlbedo(int scene) {
     case 1: return 0.13f;     // 草原
     case 2: return 0.12f;     // 高山
     case 3: return 0.65f;     // 雪山
-    case 4: return 0.45f;     // 冰川
+    case 4: return 0.13f;     // 海岛：草地、雨林、一圈白沙和礁坪，外面是海（0.45 是这一关以前还是冰川时的值）
     case 5: return 0.07f;     // 火山
     case 6: return 0.5f;      // 天空之城：脚下是云海
     default: return 0.06f;    // 环礁：海面
@@ -566,6 +570,7 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
                                constant FrameUniforms &F [[buffer(1)]],
                                constant AtmosphereConstants &A [[buffer(2)]],
                                constant ObjectUniforms &O [[buffer(3)]],
+                               constant SkinUniforms &skin [[buffer(4)]],
                                texture2d<float> skyLUT [[texture(0)]],
                                texture2d<float> canopyShadowMap [[texture(14)]]) {
     float3 eye = views[in.viewIndex].cameraPosition.xyz;
@@ -580,8 +585,23 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
     // 太阳在世界坐标里；伞下转向是世界绕着你转，舞台里的东西要按航向反过来转一下太阳
     float3 L = stageSunDirection(F);
     int material = int(in.color.a + 0.5f);
-    bool isBar = material >= MATERIAL_BAR && material <= MATERIAL_BAR_METAL;
     float3 albedo = in.color.rgb;
+    // 伞衣、袖子：颜色按皮肤的图案现算（边按一个像素在 uv 上多宽抗锯齿），然后照原来的伞布 / 织带打光。
+    // 袖子的 uv.y 是绕一圈的比例，织纹要米：一圈约 0.32 米
+    float2 twillUV = in.uv, twillDx = duvx, twillDy = duvy;
+    bool isSleeve = material == MATERIAL_SLEEVE;
+    if (material == MATERIAL_CANOPY) {
+        albedo = canopySkinAlbedo(in.uv, abs(duvx) + abs(duvy), skin);
+        material = MATERIAL_FABRIC;
+    } else if (material == MATERIAL_FABRIC) {
+        albedo = skin.slider.rgb;                 // 伞布做的只剩滑块：跟着伞换色
+    } else if (material == MATERIAL_SLEEVE) {
+        albedo = sleeveSkinAlbedo(in.uv, abs(duvx) + abs(duvy), skin);
+        material = MATERIAL_WEBBING;
+        const float2 toMeters = float2(1.0f, 0.32f);
+        twillUV *= toMeters; twillDx *= toMeters; twillDy *= toMeters;
+    }
+    bool isBar = material >= MATERIAL_BAR && material <= MATERIAL_BAR_METAL;
     float daylight = 1.0f - in.interior;
     // 开场：还没实体化的地方丢掉（深度留 0，系统透出你的房间）；扶杆和替身手一直在
     float2 reveal = float2(1.0f, 0.0f);
@@ -628,16 +648,31 @@ fragment float4 objectFragment(ObjectOut in [[stage_in]],
             // 织出来的面不是一整块光滑的面，镜面反射比实心塑料弱得多（黑织带在太阳下也还是黑的）
             g.roughness = 0.75f; g.sheen = 1.0f; g.specScale = 0.4f;
             // 斜纹：一道道 1.8 毫米的斜棱，按 uv（米）画；小于几个像素就淡掉（VR 里细纹会闪）
-            float3 Tu = cross(dpy, N) * duvx.x + cross(N, dpx) * duvy.x;
-            float3 Tv = cross(dpy, N) * duvx.y + cross(N, dpx) * duvy.y;
-            float footprint = max(length(duvx) + length(duvy), 1e-6f);
+            float3 Tu = cross(dpy, N) * twillDx.x + cross(N, dpx) * twillDy.x;
+            float3 Tv = cross(dpy, N) * twillDx.y + cross(N, dpx) * twillDy.y;
+            float footprint = max(length(twillDx) + length(twillDy), 1e-6f);
             float fade = saturate(0.0018f / (footprint * 3.0f) - 0.3f);
             if (fade > 0.0f && length(Tu) > 1e-9f && length(Tv) > 1e-9f) {
                 Tu = normalize(Tu); Tv = normalize(Tv);
-                float phase = (in.uv.x * 0.8f + in.uv.y) / 0.0018f * 2.0f * PI;
-                float warp = sin(in.uv.x / 0.0009f * 2.0f * PI);
+                float phase = (twillUV.x * 0.8f + twillUV.y) / 0.0018f * 2.0f * PI;
+                float warp = sin(twillUV.x / 0.0009f * 2.0f * PI);
                 diffuseAlbedo *= 1.0f + fade * (0.12f * sin(phase) + 0.05f * warp);
                 N = normalize(N - (Tu * 0.8f + Tv) * (cos(phase) * 0.13f * fade));
+            }
+            // 袖子的布褶：网格本身只有几道大的起伏，换成大面积鲜艳的皮肤图案以后像一根光滑的管子。
+            // 加两层褶子扰动法线：绕着小臂一道道、有点歪斜的横褶（4~6 厘米一道，靠袖口密），顺着小臂的几道长褶；
+            // 褶子的凹处颜色压暗一点。按像素大小淡掉（远了不画，不闪）
+            if (isSleeve && length(Tu) > 1e-9f && length(Tv) > 1e-9f) {
+                float3 Ta = normalize(Tu), Tb = normalize(Tv);
+                float along = twillUV.x, around = twillUV.y;
+                float foldFade = saturate(0.02f / (footprint * 3.0f) - 0.3f);
+                float p1 = along / 0.05f * 2.0f * PI + 2.2f * sin(around / 0.11f * 2.0f * PI) + 6.0f * along * along;
+                float p2 = around / 0.07f * 2.0f * PI + 3.0f * along;
+                float h = 0.65f * sin(p1) + 0.35f * sin(p2);
+                float2 slope = float2(0.65f * cos(p1) * (2.0f * PI / 0.05f + 12.0f * along),
+                                      0.65f * cos(p1) * 2.2f * (2.0f * PI / 0.11f) + 0.35f * cos(p2) * (2.0f * PI / 0.07f));
+                N = normalize(N - (Ta * slope.x + Tb * slope.y) * (0.0016f * foldFade));
+                diffuseAlbedo *= 1.0f - 0.10f * foldFade * saturate(-h);
             }
         } else if (material == MATERIAL_METAL) {
             g.roughness = 0.24f; metallic = 1.0f;
@@ -759,6 +794,7 @@ fragment float4 gloveFragment(GloveOut in [[stage_in]],
                               constant FrameUniforms &F [[buffer(1)]],
                               constant AtmosphereConstants &A [[buffer(2)]],
                               constant ObjectUniforms &O [[buffer(3)]],
+                              constant SkinUniforms &skin [[buffer(4)]],
                               texture2d<float> skyLUT [[texture(0)]],
                               texture2d<float> albedoTex [[texture(1)]],
                               texture2d<float> normalTex [[texture(2)]],
@@ -790,7 +826,9 @@ fragment float4 gloveFragment(GloveOut in [[stage_in]],
     GearSurface g;
     g.position = in.stagePos;
     g.normal = N;
-    g.albedo = albedoTex.sample(tex, in.uv).rgb;
+    // 皮肤：把贴图拆成布面和点缀，换成这一套的两种颜色（默认原样）
+    float4 dyed = gloveSkinAlbedo(albedoTex.sample(tex, in.uv).rgb, skin);
+    g.albedo = dyed.rgb;
     // 高光贴图原本给的是 RealityKit 的镜面颜色，有的地方（护条、标签）高到像金属；布、胶、塑料的反射率都在 2%~6%
     g.F0 = float3(min(pow(mat.b, 2.2f) * 0.25f, 0.06f));
     g.roughness = clamp(mat.r, 0.1f, 1.0f);
@@ -806,6 +844,7 @@ fragment float4 gloveFragment(GloveOut in [[stage_in]],
     g.bead = bead.x * beadFade;
     g.beadR = bead.y;
     float3 radiance = shadeGear(g, V, dnx, dny, F, A, skyLUT, canopyShadowMap);
+    radiance += dyed.a * skin.glove[2].rgb;        // 火山那套：点缀像熔岩一样自己微微发光
     float3 c = tonemap(radiance * F.exposure.x) * F.camera.z;
     c += REVEAL_GLOW_COLOR * reveal.y * F.camera.z;
     return float4(c, 1.0f);
@@ -917,6 +956,7 @@ struct ShadowPassUniforms {
 struct ShadowPassOut {
     float4 position [[position]];
     float3 color;
+    float2 uv;           // 伞布的展向、弦向（米）：皮肤的图案按它算，影子的颜色和伞一样
 };
 
 static inline float4 shadowPassPosition(float3 p, constant ShadowPassUniforms &S) {
@@ -932,13 +972,15 @@ vertex ShadowPassOut canopyShadowVertex(uint vid [[vertex_id]],
     ShadowPassOut o;
     o.position = shadowPassPosition(v.position.xyz, S);
     o.color = v.color.rgb;
+    o.uv = float2(v.position.w, v.normal.w);
     return o;
 }
 
 /// 一层伞布透过来的光：尼龙透得最多的是它自己颜色的光（约 0.4 × 反照率^1.5）。
 /// 管线是相乘混合：上下两层布、叠在一起的褶子，画一层乘一次
-fragment float4 canopyShadowFragment(ShadowPassOut in [[stage_in]]) {
-    return float4(0.4f * pow(max(in.color, 0.0f), float3(1.5f)), 1.0f);
+fragment float4 canopyShadowFragment(ShadowPassOut in [[stage_in]], constant SkinUniforms &skin [[buffer(0)]]) {
+    float3 albedo = canopySkinAlbedo(in.uv, fwidth(in.uv), skin);
+    return float4(0.4f * pow(max(albedo, 0.0f), float3(1.5f)), 1.0f);
 }
 
 /// 人：一堆三角形（舞台空间），不透光
@@ -948,6 +990,7 @@ vertex ShadowPassOut bodyShadowVertex(uint vid [[vertex_id]],
     ShadowPassOut o;
     o.position = shadowPassPosition(vertices[vid].xyz, S);
     o.color = 0.0f;
+    o.uv = 0.0f;
     return o;
 }
 

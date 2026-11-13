@@ -16,14 +16,14 @@ struct ShadowPassUniforms {
 ///
 /// 之前两个影子都是公式算的：伞是一块圆角长方形的平板、九个气室的透光颜色写死在 shader 里，
 /// 人是一根粗细变化的柱子加两根胶囊。换成贴图以后形状是真的（伞衣鼓起来的气室、塌下去的样子、头盔、伞包、两条腿），
-/// 伞那张存的是透过伞布的光的颜色，直接按伞衣网格的顶点颜色算——以后换伞的配色（皮肤），影子自己跟着变。
+/// 伞那张存的是透过伞布的光的颜色，按伞衣的皮肤图案算（Skins.h，和主 pass 的伞衣同一个函数）——换了伞，影子的颜色跟着变。
 /// 两张分开：伞一张、人一张，各管各的。
 ///
 /// 离地越高影子越虚（太阳是个 0.53° 的圆盘）：贴图带 mip，按「太阳圆盘投到遮挡物那里有多大」取模糊的那一级。
 final class PlayerShadow {
-    /// 伞那张 512²（伞衣十米见方，一格两厘米）；人那张 256²（三米多见方，一格一厘米多）
+    /// 伞那张 512²（伞衣十米见方，一格两厘米）；人那张 512²（三米多见方，一格不到一厘米：256² 时落地脚下的影子能看出台阶）
     static let canopyMapSize = 512
-    static let bodyMapSize = 256
+    static let bodyMapSize = 512
 
     /// rgb 透过伞布的光（没挡住的地方是 1）
     let canopyMap: MTLTexture
@@ -90,7 +90,9 @@ final class PlayerShadow {
     }
 
     /// 每帧调一次（主 pass 之前）。sun：指向太阳的方向（舞台空间）。没开伞 / 还在机舱里的那张不画（着色那边按强度是 0 跳过）
-    func encode(_ commandBuffer: MTLCommandBuffer, objects: SceneObjects, sun: SIMD3<Float>) -> Placement {
+    /// skin：伞那张按皮肤的图案算透过来的颜色（和主 pass 的伞衣同一个函数）
+    func encode(_ commandBuffer: MTLCommandBuffer, objects: SceneObjects, sun: SIMD3<Float>,
+                skin: SkinUniforms = SkinChoice().uniforms) -> Placement {
         var placement = Placement()
         let L = simd_normalize(sun)
         // 贴图的两根轴：垂直于阳光。横轴取水平的那根
@@ -103,8 +105,12 @@ final class PlayerShadow {
         bufferIndex = (bufferIndex + 1) % canopyBuffers.count
         var drawn: [MTLTexture] = []
 
-        /// 把一堆点框进贴图：中心和半宽（四周留四分之一的边，影子的虚边要地方）
-        func fit(_ count: Int, _ point: (Int) -> SIMD3<Float>) -> (center: SIMD2<Float>, half: Float) {
+        /// 把一堆点框进贴图：中心和半宽（四周留四分之一的边，影子的虚边要地方）。
+        /// 半宽按 step 往上取整、中心对齐到纹素网格：每帧按包围盒原样重算的话，纹素网格每帧都在缩放平移，
+        /// 剪影的边（尤其是人那张）会在地上一格格地爬（顺着阳光的两根轴只在转向时转，直飞时影子是稳的）
+        /// alignTexels：中心对齐到几个纹素的格子（人那张落地时实际取的是第 1 级 mip，按 2 个纹素对齐，mip1 的相位才不跳）
+        func fit(_ count: Int, mapSize: Int, step: Float, alignTexels: Float = 1,
+                 _ point: (Int) -> SIMD3<Float>) -> (center: SIMD2<Float>, half: Float) {
             var lo = SIMD2<Float>(repeating: .greatestFiniteMagnitude), hi = -lo
             for i in 0..<count {
                 let p = point(i)
@@ -113,7 +119,9 @@ final class PlayerShadow {
                 hi = simd_max(hi, q)
             }
             let size = hi - lo
-            return ((lo + hi) / 2, max(size.x, size.y) / 2 * 1.25 + 0.15)
+            let half = ((max(size.x, size.y) / 2 * 1.25 + 0.15) / step).rounded(.up) * step
+            let texel = 2 * half / Float(mapSize) * alignTexels
+            return ((((lo + hi) / 2) / texel).rounded(.toNearestOrEven) * texel, half)
         }
         func pass(_ texture: MTLTexture, _ pipeline: MTLRenderPipelineState, _ buffer: MTLBuffer, count: Int,
                   center: SIMD2<Float>, half: Float, label: String) {
@@ -128,6 +136,8 @@ final class PlayerShadow {
             enc.setRenderPipelineState(pipeline)
             enc.setVertexBuffer(buffer, offset: 0, index: 0)
             enc.setVertexBytes(&uniforms, length: MemoryLayout<ShadowPassUniforms>.stride, index: 1)
+            var skin = skin
+            enc.setFragmentBytes(&skin, length: MemoryLayout<SkinUniforms>.stride, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: count)
             enc.endEncoding()
             drawn.append(texture)
@@ -140,7 +150,7 @@ final class PlayerShadow {
             objects.meshVertices.withUnsafeBytes { raw in
                 canopyBuffers[slot].contents().copyMemory(from: raw.baseAddress! + range.lowerBound * stride, byteCount: count * stride)
             }
-            let box = fit(count) { i in
+            let box = fit(count, mapSize: Self.canopyMapSize, step: 0.5) { i in
                 let p = objects.meshVertices[range.lowerBound + i].position
                 return SIMD3(p.x, p.y, p.z)
             }
@@ -158,7 +168,7 @@ final class PlayerShadow {
             body.withUnsafeBytes { raw in
                 bodyBuffers[slot].contents().copyMemory(from: raw.baseAddress!, byteCount: count * MemoryLayout<SIMD4<Float>>.stride)
             }
-            let box = fit(count) { i in SIMD3(body[i].x, body[i].y, body[i].z) }
+            let box = fit(count, mapSize: Self.bodyMapSize, step: 0.25, alignTexels: 2) { i in SIMD3(body[i].x, body[i].y, body[i].z) }
             placement.v.w = box.half
             placement.centers.z = box.center.x
             placement.centers.w = box.center.y

@@ -378,7 +378,7 @@ enum Gear {
             let bulge = 0.03 * sin(Float.pi * s) * sin(Float.pi * t)
             return a + (b - a) * t + up * bulge
         }
-        let color = SIMD3<Float>(0.8, 0.8, 0.77)          // 白色尼龙（和伞衣的白色气室一样）
+        let color = SIMD3<Float>(0.8, 0.8, 0.77)          // 白色尼龙（shader 里按皮肤换成 Skins.slider 的颜色）
         for i in 0..<nx {
             for j in 0..<nz {
                 let p00 = point(i, j), p10 = point(i + 1, j), p11 = point(i + 1, j + 1), p01 = point(i, j + 1)
@@ -450,14 +450,18 @@ enum Gear {
             // 法线：侧面的椭圆法线，收口处往手肘方向倒
             let radial = simd_normalize(side * (cos(a) / rs) + back * (sin(a) / rb))
             let normal = simd_normalize(radial * (1 - c * 0.85) + arm * (c * 1.2))
-            return (wrist + arm * along + side * (rs * cos(a)) + back * (rb * sin(a)), normal, SIMD2(along, r * a))
+            // uv：沿袖子（米）、绕一圈的比例（0.25 是手背那一侧）。k = sides 那一圈记成 1 不是 0，接缝那一格的 uv 才连续
+            return (wrist + arm * along + side * (rs * cos(a)) + back * (rb * sin(a)), normal,
+                    SIMD2(along, Float(k) / Float(sides)))
         }
-        let color = SIMD3<Float>(0.028, 0.034, 0.05)      // 深海军蓝的跳伞服
+        // 颜色（底色、手背那一道条纹、袖口）按皮肤在 shader 里算（Skins.h 的 sleeveSkinAlbedo），顶点颜色不用；
+        // 圆口里面的盖子还是按默认的深海军蓝压暗
+        let color = SIMD3<Float>(0.028, 0.034, 0.05)
         for i in 0..<rings {
             for k in 0..<sides {
                 let p00 = point(i, k), p10 = point(i + 1, k), p11 = point(i + 1, k + 1), p01 = point(i, k + 1)
                 quad(&out, (p00.0, p10.0, p11.0, p01.0), (p00.1, p10.1, p11.1, p01.1),
-                     (p00.2, p10.2, p11.2, p01.2), color, .webbing)
+                     (p00.2, p10.2, p11.2, p01.2), color, .sleeve)
             }
         }
         // 圆口里面：一片往里凹的深色圆盖（袖子里是暗的）

@@ -46,7 +46,11 @@ struct JumpTimeline {
     /// 单边拉到底的转向角速度（弧度/秒，约 26°/s；再快容易晕）
     static let maxTurnRate: Double = 0.45
     // 落地
-    static let crashSpeed: Double = 8            // 落地时下沉速度超过这个就是摔了
+    /// 落地时下沉速度超过这个就是摔了（开伞太晚、没开、贴地俯冲）。原来是 8：伞下正常下沉 8.5，
+    /// 自动拉平时没关系，手动拉平没拉的话会被判成摔，所以提到 11，中间那段算「重着陆」
+    static let crashSpeed: Double = 11
+    /// 落地时下沉超过这个（手动拉平时没拉平）是重着陆：不算失败，但不给靶心
+    static let hardLandingSpeed: Double = 4.5
     static let maxLandingSlope: Float = 32       // 坡度超过这个（度）落不了，算撞山
     static let targetRadius: Double = 20
     static let bullseyeRadius: Double = 3
@@ -66,6 +70,9 @@ struct JumpTimeline {
 
     /// 这一关
     let scene: JumpScene
+    /// 这一跳的风（地面坐标，m/s，空气往哪边走；JumpScene.windRange）。人和云都随风漂：出舱以后地面相对你按 -wind 往回退
+    /// （landShift 每帧加 wind·dt），所以云的位置不受影响，地面上的落点被吹偏
+    let wind: SIMD2<Double>
 
     private(set) var phase: Phase = .cabin
     private(set) var time: Double = 0
@@ -88,6 +95,11 @@ struct JumpTimeline {
     /// 不能（app 里默认）：只靠转头、转身，伞跟着你转（bodyYaw）；操纵环只管减速，一边拉算一半。
     /// 自动驾驶和离屏测试靠拉环转向，所以这里默认开，app 按开始窗口里的选项设
     var toggleSteering = true
+    /// 离地 6 米以内自动拉平（默认，app 里按开始窗口的「拉平」设）。关掉以后要自己两边一起拉操纵环拉平，
+    /// 没拉平落地超过 hardLandingSpeed 是重着陆
+    var autoFlare = true
+    /// 这一跳是重着陆（手动拉平时没拉平）
+    private(set) var hardLanding = false
     /// 自由落体时用手控制的横移：输入（-1 左 … 1 右）、现在横移的速度（m/s）、离正路线偏了多少（米，右为正）
     private var trackInput: Double = 0
     private(set) var trackVelocity: Double = 0
@@ -118,6 +130,8 @@ struct JumpTimeline {
     }
     private(set) var exitTime: Double?
     private(set) var leftRampTime: Double?
+    /// 练习（从开伞前开始）是从哪一刻开始的：淡入从这里算，开头提醒一句什么时候开伞
+    private(set) var practiceStartTime: Double?
     private(set) var deployTime: Double?
     private(set) var landedTime: Double?
     private(set) var fadeTime: Double?
@@ -139,8 +153,11 @@ struct JumpTimeline {
     /// 舞台地板在眼睛下面多少（渲染器在对齐头部时设）：落地时你的脚踩在地上
     var eyeHeight: Double = 1.6
 
-    init(scene: JumpScene = .atoll) {
+    /// wind 不给就用这一关固定的风（JumpScene.designWind：镜头、测试每次一样）；正常开跳传 scene.randomWind()
+    init(scene: JumpScene = .atoll, wind: SIMD2<Double>? = nil) {
         self.scene = scene
+        self.wind = wind ?? scene.designWind
+        landShift = Self.landShiftStart + scene.exitShift(wind: self.wind)    // 这一跳的出舱点（跟着风挪）
         altitude = scene.exitAltitude
         groundHeight = scene.groundHeight(at: groundPosition)
     }
@@ -148,18 +165,52 @@ struct JumpTimeline {
     /// 调试用：跳过机舱，从某个高度直接开始自由落体（已经是终端速度）。
     init(freefallFrom startAltitude: Double, scene: JumpScene = .atoll) {
         self.scene = scene
+        wind = scene.designWind
         phase = .freefall
         time = 20                       // 跳过开头的淡入
         altitude = startAltitude
         verticalSpeed = Self.terminalVelocity(at: startAltitude)
         position = SIMD2(0, 0)
-        landShift = .zero
+        landShift = scene.exitShift(wind: wind)
         velocity = SIMD2(0, 0)
         barGrabbedTime = 5
         exitTime = 10
         leftRampTime = 12
         planeOffset = SIMD3(0, scene.exitAltitude - startAltitude + 5000, 5000)
         groundHeight = scene.groundHeight(at: groundPosition)
+    }
+
+    /// 从离开跳板到手表报警（离着陆区 3,500 ft）要多少秒：只算竖直方向（重力 + 随高度变的终端速度），按出舱时的高度。
+    /// 出舱点按它往上风挪（JumpScene.exitShift）
+    static func freefallDuration(scene: JumpScene) -> Double {
+        var altitude = scene.exitAltitude, v = 0.0, t = 0.0
+        while altitude - scene.dzElevation > alertAGL, t < 400 {
+            let vt = terminalVelocity(at: altitude)
+            v += 9.81 * (1 - (v / vt) * (v / vt)) * 0.05
+            altitude -= v * 0.05
+            t += 0.05
+        }
+        return t
+    }
+
+    /// 练习从多高开始（离着陆区，米）：5,000 英尺，离手表报警还有八九秒
+    static let practiceAGL: Double = 1524
+
+    /// 练习：从开伞前开始（开始窗口里这一关平安落地过一次以后可选）。一跳三分钟里，练靶心有用的只有开伞以后那一分半，
+    /// 每次都要重走机舱和七十秒的自由落体太慢。把正常的一跳在 CPU 上快进一遍（抓杆、亮绿灯就松手、自由落体），
+    /// 停在离着陆区 5,000 英尺：出舱点、甩出去的那段、云和雨的位置都和正常跳一模一样，开伞、伞下、落地照常由你来
+    static func practice(scene: JumpScene, wind: SIMD2<Double>? = nil) -> JumpTimeline {
+        var t = JumpTimeline(scene: scene, wind: wind)
+        var guardSteps = 0
+        t.grabBar()
+        while !t.greenLight, guardSteps < 20_000 { t.step(1.0 / 30); guardSteps += 1 }
+        t.releaseBar()
+        while t.phase == .exit, guardSteps < 40_000 { t.step(1.0 / 60); guardSteps += 1 }
+        while t.phase == .freefall, t.heightAboveGround > Self.practiceAGL, guardSteps < 80_000 {
+            t.step(1.0 / 30); guardSteps += 1
+        }
+        t.practiceStartTime = t.time
+        return t
     }
 
     /// 终端速度（m/s）：∝ 1/√空气密度，密度按 8.5 km 标高指数衰减
@@ -259,7 +310,7 @@ struct JumpTimeline {
         nextRing = 0
     }
 
-    /// 落地以后捏一下手指：提前结束
+    /// 落地以后点一下手表：提前结束
     mutating func requestEnd() {
         if phase == .landed, fadeTime == nil { fadeTime = time }
     }
@@ -363,6 +414,10 @@ struct JumpTimeline {
                 landedTime = time
             }
         }
+        // 风：离开跳板以后人随着空气走，地面相对你往回退（云和你一起漂，位置不受影响）。落地以后不再漂
+        if leftRampTime != nil, phase == .freefall || phase == .opening || phase == .canopy {
+            landShift += wind * dt
+        }
         if let fadeTime, time - fadeTime >= fadeDuration { phase = .done }
         // 离开跳板以后，飞机按自己的速度飞走、高度不变
         if leftRampTime != nil {
@@ -396,8 +451,11 @@ struct JumpTimeline {
         var speed = Self.canopySpeed * (1 - 0.45 * both) * (1 + 0.3 * dive)
         var sink = Self.canopySink * (1 - 0.25 * both) * (1 + 0.8 * dive) + abs(turnRate) / Self.maxTurnRate * 2.5
             + (toggleSteering ? abs(diveLeft - diveRight) * 2 : 0)
-        // 离地 6 米以内自动拉平：下沉和前进都慢下来，落地是轻轻一顿
-        let flare = 1 - min(max(terrainClearance / 6, 0), 1)
+        // 拉平：下沉和前进都慢下来，落地是轻轻一顿。自动的是离地 6 米以内自己拉；手动的是离地 12 米以内
+        // 两边一起拉下去（拉得越多拉平得越多）——伞把前进的速度换成升力。高处一起拉只是刹车（上面那 25%）
+        let assist = autoFlare ? 1 - min(max(terrainClearance / 6, 0), 1) : 0
+        let manual = both * (1 - min(max((terrainClearance - 1.5) / 10, 0), 1))
+        let flare = max(assist, manual)
         sink += (1.5 - sink) * flare
         speed += (4 - speed) * flare
         verticalSpeed = sink
@@ -413,6 +471,8 @@ struct JumpTimeline {
         let hazard = scene.hasTerrain ? TerrainField.hazard(scene, p, Float(groundHeight)) : nil
         // 浮岛：从侧面飞进来、比岛面低一大截，是撞在岛边的崖壁上（不能把人搬到岛顶上去）
         let hitCliff = scene == .sky && hazard != .void && terrainClearance < -12
+        // 重着陆：没摔，但没拉平（手动拉平时）。不算失败，只是不给靶心
+        hardLanding = verticalSpeed > Self.hardLandingSpeed && verticalSpeed <= Self.crashSpeed
         if hazard == .void {
             outcome = .fell
         } else if hitCliff {
@@ -429,7 +489,7 @@ struct JumpTimeline {
             outcome = .crevasse
         } else if scene.hasTerrain, TerrainField.slopeDegrees(scene, p) > Self.maxLandingSlope {
             outcome = .terrain
-        } else if landingDistance <= Self.bullseyeRadius {
+        } else if landingDistance <= Self.bullseyeRadius, !hardLanding {
             outcome = .bullseye
         } else if landingDistance <= Self.targetRadius {
             outcome = .inTarget
@@ -497,11 +557,24 @@ struct JumpTimeline {
     /// 前进的方向（云坐标）
     var forward: SIMD2<Double> { SIMD2(-sin(flightHeading), -cos(flightHeading)) }
 
+    /// 有风时要往 dir（地面坐标的单位向量）走：伞得朝哪个方向飞（侧风修正：空速 + 风速正好指向 dir），沿 dir 的地速多少。
+    /// 风比伞快、顶不过去时地速是 0
+    static func crab(toward dir: SIMD2<Double>, wind: SIMD2<Double>,
+                     airspeed: Double = canopySpeed) -> (air: SIMD2<Double>, groundSpeed: Double) {
+        let along = dot(dir, wind)
+        let cross = wind - dir * along
+        let c2 = airspeed * airspeed - dot(cross, cross)
+        guard c2 > 0 else { return (dir, 0) }
+        let s = along + c2.squareRoot()
+        guard s > 0 else { return (dir, 0) }
+        return (normalize(dir * s - wind), s)
+    }
+
     private var fadeDuration: Double { quitting ? 0.5 : isFatal ? 0.6 : Self.fadeOutDuration }
 
     /// 画面亮度：开头淡入，最后淡出
     var brightness: Double {
-        let fadeIn = Self.smoothstep(min(time / Self.fadeInDuration, 1))
+        let fadeIn = Self.smoothstep(min(max(time - (practiceStartTime ?? 0), 0) / Self.fadeInDuration, 1))
         guard let fadeTime else { return fadeIn }
         return fadeIn * (1 - Self.smoothstep(min((time - fadeTime) / fadeDuration, 1)))
     }

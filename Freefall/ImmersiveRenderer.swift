@@ -8,7 +8,7 @@ import SwiftUI
 
 // 渲染循环的骨架来自 Bubble Dream（再往上是 MetalSplatter 的 visionOS 示例，MIT，© Sean Cier）。
 
-/// 每帧：拿头和手的位姿 → 手的抓握 / 捏合推动时间线、伞衣布料 → 天空视图表 →
+/// 每帧：拿头和手的位姿 → 手的抓握推动时间线、伞衣布料 → 天空视图表 →
 /// 每个 drawable 画云层 + 天空海面 + 飞机 / 伞 / 背带 / 表带 + 高度表 + 提示文字。
 final class ImmersiveRenderer: @unchecked Sendable {
     private static let log = Logger(subsystem: "com.feiyuchang.freefall", category: "Renderer")
@@ -24,15 +24,13 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private let arSession = ARKitSession()
     private let worldTracking = WorldTrackingProvider()
     private let handTracking = HandTrackingProvider()
-    /// 允许了手部追踪：用真手抓；否则用系统的捏合手势操作
+    /// 有手部追踪：用真手抓；没有（只有模拟器）就自动驾驶
     private let handsEnabled: Bool
     private let watchOnLeft: Bool
     /// 戴手套：真手藏起来（FreefallApp 里 upperLimbVisibility = hidden），画手套和跳伞服袖子
     private let gloves: Bool
     private let inFlight = DispatchSemaphore(value: maxFramesInFlight)
     private let audio: JumpAudio?
-    /// 系统捏合手势：主线程上来，渲染线程每帧取
-    private let pinches = OSAllocatedUnfairLock(initialState: PinchState())
 
     private let session: JumpSession
     private var timeline: JumpTimeline { session.timeline }
@@ -177,8 +175,8 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var lastFPSUpdate: CFTimeInterval = 0
 
     init(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool, toggleSteering: Bool,
-         perfTest: Bool = false,
-         jumpScene: JumpScene) throws {
+         perfTest: Bool = false, skin: SkinChoice = SkinChoice(), skinUnlocks: SkinUnlocks = SkinUnlocks(),
+         practice: Bool = false, autoFlare: Bool = true, jumpScene: JumpScene) throws {
         self.layerRenderer = layerRenderer
         self.handsEnabled = handsEnabled && HandTrackingProvider.isSupported
         self.watchOnLeft = watchOnLeft
@@ -198,17 +196,26 @@ final class ImmersiveRenderer: @unchecked Sendable {
         qualityLevel = max(0, min(UserDefaults.standard.integer(forKey: Self.qualityKey(jumpScene)) - 1,
                                   SceneRenderer.maxAutoQuality))
         scene.setQuality(qualityLevel)
+        scene.skin = skin.uniforms                 // 开始窗口里选的伞、手套和袖子
         panel = TextPanel(device: device)
         helmet = HelmetHUD(device: device)
         audio = DebugOptions.mute ? nil : JumpAudio()
+        // 没有手部追踪（只有模拟器：真机上没允许进不了跳伞，见 HandAccess）就自动驾驶，不然什么都做不了
+        let autopilot = DebugOptions.autopilot || !self.handsEnabled
+        // 练习：从开伞前开始（JumpTimeline.practice）；调试参数 -startAltitude 优先
+        // 风每跳抽一次（JumpScene.windRange：山谷里只顺着谷走，火山顺着烟柱），出舱点跟着它往上风挪
+        let wind = jumpScene.randomWind()
         session = JumpSession(timeline: DebugOptions.startAltitude.map { JumpTimeline(freefallFrom: $0, scene: jumpScene) }
-                                  ?? JumpTimeline(scene: jumpScene),
+                                  ?? (practice ? JumpTimeline.practice(scene: jumpScene, wind: wind)
+                                               : JumpTimeline(scene: jumpScene, wind: wind)),
                               realHands: self.handsEnabled,
-                              autopilot: DebugOptions.autopilot ? Autopilot(deployFeet: DebugOptions.autoDeployFeet) : nil)
+                              autopilot: autopilot ? Autopilot(deployFeet: DebugOptions.autoDeployFeet) : nil)
         session.gloved = gloves
         session.watchOnLeft = watchOnLeft
+        session.skinUnlocks = skinUnlocks
+        session.autoFlare = autoFlare || autopilot
         // 拉环转向按开始窗口里的选项（默认关）；自动驾驶靠拉环转向，一直开
-        session.toggleSteering = toggleSteering || DebugOptions.autopilot
+        session.toggleSteering = toggleSteering || autopilot
 #if DEV_TOOLS
         self.perfTest = perfTest
 #endif
@@ -216,34 +223,17 @@ final class ImmersiveRenderer: @unchecked Sendable {
 
     @MainActor
     static func start(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool, toggleSteering: Bool,
-                      perfTest: Bool = false,
-                      scene: JumpScene) {
+                      perfTest: Bool = false, skin: SkinChoice = SkinChoice(), skinUnlocks: SkinUnlocks = SkinUnlocks(),
+                      practice: Bool = false, autoFlare: Bool = true, scene: JumpScene) {
         let renderer: ImmersiveRenderer
         do {
             renderer = try ImmersiveRenderer(layerRenderer, handsEnabled: handsEnabled, watchOnLeft: watchOnLeft,
-                                             gloves: gloves, toggleSteering: toggleSteering, perfTest: perfTest, jumpScene: scene)
+                                             gloves: gloves, toggleSteering: toggleSteering, perfTest: perfTest,
+                                             skin: skin, skinUnlocks: skinUnlocks, practice: practice,
+                                             autoFlare: autoFlare, jumpScene: scene)
         } catch {
             log.error("无法创建渲染器：\(error.localizedDescription)")
             return
-        }
-        layerRenderer.onSpatialEvent = { [pinches = renderer.pinches] events in
-            // 事件不是 Sendable，先拆成简单的值再进锁
-            let updates = events.map { event in
-                (id: event.id.hashValue, isLeft: event.chirality == .left,
-                 y: event.inputDevicePose?.pose3D.position.y ?? 0, active: event.phase == .active)
-            }
-            pinches.withLock { s in
-                for u in updates {
-                    if u.active {
-                        var touch = s.touches[u.id] ?? PinchState.Touch(isLeft: u.isLeft, startY: u.y)
-                        if s.touches[u.id] == nil { s.began += 1 }
-                        touch.pull = max(0, touch.startY - u.y)
-                        s.touches[u.id] = touch
-                    } else {
-                        s.touches[u.id] = nil
-                    }
-                }
-            }
         }
         Task(executorPreference: RendererTaskExecutor.shared) {
             do {
@@ -376,13 +366,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
         let layout = BodyLayout(anchor: neck + bodyForward * 0.09, yaw: yaw)
         // 等对齐好头部朝向再开始（第一帧之前时间不走）
         if stageFromOrigin != nil {
-            let (began, touches) = pinches.withLock { s -> (Int, [PinchState.Touch]) in
-                let b = s.began
-                s.began = 0
-                return (b, Array(s.touches.values))
-            }
-            session.step(dt: dt * DebugOptions.timeScale, hands: hands, pinchesBegan: began, touches: touches,
-                         layout: layout)
+            session.step(dt: dt * DebugOptions.timeScale, hands: hands, layout: layout)
         }
 
         var uniforms = FrameUniforms()
@@ -576,9 +560,10 @@ final class ImmersiveRenderer: @unchecked Sendable {
         audioParams.engine = (t.leftRampTime == nil ? 1 : Float(25 / (25 + t.planeDistance))) * cabinLevel
         audioParams.alarm = t.alarmLevel
         audioParams.canopy = underCanopy ? 1 : 0
-        // 海浪和海鸥：伞下离地 300 米以内渐渐听到，落地以后最响（只有海边的两关）
+        // 海浪和海鸥：伞下离地 300 米以内渐渐听到，落地以后最响（海边的两关：环礁、海岛。
+        // 海岛是后来替换冰川加的，之前漏了）
         let near = Float(min(max((300 - t.terrainClearance) / 250, 0), 1))
-        let seaside: Float = t.scene == .atoll ? 1 : 0
+        let seaside: Float = t.scene == .atoll || t.scene == .island ? 1 : 0
         audioParams.ambience = (t.phase == .landed || t.phase == .done ? 1 : near) * seaside
         audioParams.turn = Float(min(abs(t.turnRate) / JumpTimeline.maxTurnRate, 1))
         audioParams.rain = Float(t.rainIntensity)

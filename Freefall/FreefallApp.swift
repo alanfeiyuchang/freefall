@@ -8,9 +8,18 @@ struct FreefallApp: App {
     @State private var immersionStyle: ImmersionStyle = .mixed
     @State private var model = AppModel.shared
 
+    init() {
+        // 开始窗口里选的语言（默认跟随系统）：在任何文字取翻译之前装好
+        Localization.apply(AppModel.shared.language)
+    }
+
     var body: some Scene {
         WindowGroup(id: StartView.windowID) {
             StartView()
+                // Text("…") 按环境的 locale 取翻译；id 跟着语言变，整个窗口重建一遍，
+                // 用 String(localized:) 算出来的字（关名、介绍）也按新语言重新算
+                .environment(\.locale, Localization.locale(model.language))
+                .id(model.language)
         }
         .defaultSize(width: 860, height: 720)
 
@@ -18,7 +27,7 @@ struct FreefallApp: App {
             CompositorLayer(configuration: FallLayerConfiguration()) { layerRenderer in
 #if DEV_TOOLS
                 let perfTest = AppModel.shared.perfTest
-                // 性能测试只管这一跳：渲染器拿到开关以后就复位（中途按表冠退出也不会留着）
+                // 性能测试只管这一跳：渲染器拿到开关以后就复位
                 AppModel.shared.perfTest = false
 #else
                 let perfTest = false
@@ -27,7 +36,11 @@ struct FreefallApp: App {
                                         watchOnLeft: AppModel.shared.watchOnLeft, gloves: AppModel.shared.gloves,
                                         toggleSteering: AppModel.shared.toggleSteering,
                                         perfTest: perfTest,
+                                        skin: AppModel.shared.skin, skinUnlocks: AppModel.shared.skinUnlocks,
+                                        practice: AppModel.shared.practice, autoFlare: AppModel.shared.autoFlare,
                                         scene: AppModel.shared.scene)
+                // 练习只管这一跳：渲染器拿到开关以后就复位（中途按表冠退出也不会留着）
+                AppModel.shared.practice = false
             }
         }
         .immersionStyle(selection: $immersionStyle, in: .mixed, .full)

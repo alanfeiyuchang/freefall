@@ -7,6 +7,8 @@
 //
 //   sim    不出图：自动驾驶在不同高度开伞各跳一次，打印结果（太晚开伞要摔、正常开伞要能飞进靶）
 //   hands  不出图：用合成的手走真手的抓握逻辑（抓杆、松手、提前拉、报警后拉伞、拉操纵环转向），打印每一步
+//   skins  不出图：皮肤的解锁规则、存档读写、落地提示里的那几行
+//   SKINS=all：每个镜头按默认 + 七套皮肤各画一张；SKIN=<0~6> 整个跑一套
 //
 // 出图只存左眼（右眼只差 6.4 cm 视差）。perf 的数字是 M 系列 Mac 的，真机（M2 Vision Pro，GPU 10 核）大约要乘 4。
 // 手部追踪和透视只有真机有，这里用合成的关节姿态（syntheticHand）摆手，画肤色的手代替真手。
@@ -22,6 +24,8 @@ let args = CommandLine.arguments
 let outDir = URL(fileURLWithPath: args.count > 2 ? args[2] : "/tmp/freefall-render")
 let mode = args.count > 3 ? args[3] : "shots"
 let filter = args.count > 4 ? args[4] : ""
+/// 镜头名过滤：逗号隔开的几个，名字里含其中任何一个就画
+func matches(_ name: String) -> Bool { filter.isEmpty || filter.split(separator: ",").contains { name.contains($0) } }
 try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
 
 let env = ProcessInfo.processInfo.environment
@@ -40,6 +44,12 @@ let renderer = try SceneRenderer(device: device, library: library, colorFormat: 
                                  depthFormat: .depth32Float, maxViewCount: 2, queue: queue, scene: jumpScene,
                                  gloveDirectory: env["GLOVES_DIR"].map { URL(fileURLWithPath: $0) },
                                  barOnLeft: env["BARLEFT"] != nil)      // BARLEFT=1：表戴在右手时的布局（扶杆在左边）
+/// SKIN=<0~6>：伞、手套和袖子都换成那一关的皮肤（-1 或不设 = 默认）；CANOPYSKIN / GLOVESKIN 只换一样
+let skinChoice: SkinChoice = {
+    func scene(_ key: String) -> JumpScene? { env[key].flatMap(Int.init).flatMap(JumpScene.init(rawValue:)) }
+    return SkinChoice(canopy: scene("CANOPYSKIN") ?? scene("SKIN"), gloves: scene("GLOVESKIN") ?? scene("SKIN"))
+}()
+renderer.skin = skinChoice.uniforms
 if let v = env["EXPOSURE"], let x = Float(v) { renderer.settings.exposure = x }
 if let v = env["SIGMA"], let x = Float(v) { renderer.settings.cloudExtinction = x }
 if let v = env["STEP"], let x = Float(v) { renderer.settings.cloudStep = x }
@@ -171,6 +181,7 @@ func autoSession(from timeline: JumpTimeline = JumpTimeline(scene: jumpScene), d
     // 镜头里默认把 HUD 打开看读数（真机默认关，点表才开）；HUDOFF=1 看关着的样子
     s.hudOn = env["HUDOFF"] == nil
     if env["BARLEFT"] != nil { s.watchOnLeft = false }
+    if env["FLARE"] == "manual" { s.autoFlare = false }      // 手动拉平（自动驾驶离地 9 米两边一起拉到底）
     return s
 }
 
@@ -282,7 +293,12 @@ func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [
     if env["FPS"] != nil { hudStateShot.fps = 90; hudStateShot.gpuMs = 6.4; hudStateShot.qualityLevel = 1 }
     // QUIT=1：提示条换成按住表退出的那一行（进度六成），看排版
     if env["QUIT"] != nil {
-        hudStateShot.hint = String(localized: "继续按住手表，退出这一跳") + "\n■■■■■■□□□□"
+        hudStateShot.hint = String(localized: "退出中") + "\n■■■■■■□□□□"
+        hudStateShot.hintBoot = 1
+    }
+    // HINT="第一行|第二行"：提示条换成这几行（| 换行），看改过的文字排出来什么样
+    if let hint = env["HINT"] {
+        hudStateShot.hint = hint.replacingOccurrences(of: "|", with: "\n")
         hudStateShot.hintBoot = 1
     }
     let hudPanels = env["NOHUD"] != nil ? [] : helmet.update(hudStateShot, head: headMatrix)
@@ -374,6 +390,8 @@ struct Shot {
     var lookAwayFromSun: Float?
     /// 只按靶的方向转（yaw），pitch 照用
     var faceTarget = false
+    /// 朝地面坐标里的这一点转（yaw），pitch 照用
+    var faceGround: SIMD2<Double>?
 }
 
 /// 背对太阳的朝向（度）：太阳在世界坐标里，舞台按航向转
@@ -406,6 +424,15 @@ let gearShots: [Shot] = [
          pitch: -40, fovY: 80, lookAwayFromSun: 28),
     Shot(name: "xc_shadow_60m", session: { at { $0.phase == .canopy && $0.heightAboveGround < 60 } }, yaw: 0,
          pitch: -32, fovY: 60, lookAwayFromSun: 14),
+    // 皮肤：伞下往上看伞衣（逆光、透光），从身后高处看伞的上面
+    Shot(name: "xe_canopy_up", session: { deployed(12) }, yaw: 0, pitch: 64, fovY: 90),
+    // 从前上方往回看（前缘在近处，有上下的图案是正的）：开始窗口皮肤页的缩略图
+    Shot(name: "xh_canopy_front_above", session: { deployed(12) }, yaw: 180, pitch: -27, fovY: 50,
+         eye: SIMD3(0, 8.0, -8.5)),
+    // 低空往下看伞投在地上的影子（透过伞布的光带着伞的颜色）
+    Shot(name: "xi_shadow_down", session: { at { $0.phase == .canopy && $0.heightAboveGround < 9 } }, yaw: 0,
+         pitch: -24, fovY: 90, lookAwayFromSun: 0),
+    Shot(name: "xf_canopy_above", session: { deployed(12) }, yaw: 0, pitch: -30, fovY: 55, eye: SIMD3(0, 8.5, 6.5)),
     Shot(name: "xd_flare_front", session: { at { $0.phase == .canopy && $0.heightAboveGround < 14 } }, yaw: 180,
          pitch: 4, fovY: 60, eye: SIMD3(0, -0.05, -1.3)),
 ]
@@ -429,9 +456,13 @@ let revealShots: [Shot] = [
 
 /// 开始窗口里选关卡片的截图（每关一张，NOHUD=1 跑，裁成竖的）：伞下朝着靶飞，看得到地平线
 let cardShots: [Shot] = [
-    Shot(name: "card", session: { deployed(16) }, yaw: 0, pitch: -16, fovY: 72, faceTarget: true),
+    // 低头 30°：-16° 时上面五分之一是各关一样的灰色云底、靶贴在最下沿被裁掉一半；海岛、天空之城低头 16° 看得到山和城堡，照旧
+    Shot(name: "card", session: { deployed(16) }, yaw: 0, pitch: jumpScene == .island || jumpScene == .sky ? -16 : -30,
+         fovY: 72, faceTarget: true),
     // 火山单独一张：朝靶看拍不到火山锥和烟柱，往旁边转过去
-    Shot(name: "cardv", session: { deployed(16) }, yaw: 88, pitch: 3, fovY: 72),
+    // （开伞点挪到火山锥上方、烟柱旁边以后，朝火山锥和烟柱看）
+    Shot(name: "cardv", session: { deployed(40) }, yaw: 0, pitch: -10, fovY: 72,
+         faceGround: SIMD2<Double>(TerrainField.coneCenter) + SIMD2<Double>(TerrainField.plumeDrift) * 250),
 ]
 
 /// 机舱里（实体化完了以后）：扶杆近景、往机头看、地板、舱壁、座椅、跳板、舱顶
@@ -605,7 +636,18 @@ if mode == "shots" || mode == "all" {
     let width = Int(env["SHOTW"] ?? "") ?? 1280, height = Int(env["SHOTH"] ?? "") ?? 960
     let color = makeArray(.bgra8Unorm_srgb, width: width, height: height, shared: true)
     let depth = makeArray(.depth32Float, width: width, height: height, shared: false)
-    for shot in shots where filter.isEmpty || shot.name.contains(filter) {
+    // SKINS=all（或 SKINS=-1,0,5）：每个镜头按这几套皮肤各画一张，存成 <镜头>_skin<关>.png（-1 = 默认）
+    let skinList: [Int?] = env["SKINS"].map { v in
+        v == "all" ? [-1] + JumpScene.allCases.map(\.rawValue) : v.split(separator: ",").compactMap { Int($0) }
+    } ?? [nil]
+    for shot in shots where matches(shot.name) {
+      for skinIndex in skinList {
+        var fileName = shot.name
+        if let k = skinIndex {
+            let scene = JumpScene(rawValue: k)
+            renderer.skin = SkinChoice(canopy: scene, gloves: scene).uniforms
+            fileName += "_skin\(k)"
+        }
         renderer.resetHistory()
         panelPlacer = PanelPlacer()
         helmet = HelmetHUD(device: device)       // 每个镜头重开：HUD 按时间节流重画，时间一样会留着上一个镜头的读数
@@ -614,6 +656,12 @@ if mode == "shots" || mode == "all" {
         var yaw = shot.yaw, pitch = shot.pitch
         if shot.lookAtTarget { (yaw, pitch) = lookAtTarget(session.timeline) }
         if shot.faceTarget { yaw = lookAtTarget(session.timeline).0 }
+        if let g = shot.faceGround {
+            let t = session.timeline, d = g - t.groundPosition
+            let c = cos(t.heading), s = sin(t.heading)
+            let local = SIMD2(d.x * c - d.y * s, d.x * s + d.y * c)
+            yaw = Float(atan2(-local.x, -local.y) * 180 / .pi)
+        }
         if let offset = shot.lookAwayFromSun { yaw = yawAwayFromSun(session.timeline) + offset }
         if let h = shot.lookAtRain {
             (yaw, pitch) = look(atCloud: JumpTimeline.deckCenter, altitude: h, from: session.timeline)
@@ -624,15 +672,103 @@ if mode == "shots" || mode == "all" {
         }
         let ms = render(session, yaw: yaw, pitch: pitch, hands: h, color: color, depth: depth, fovY: shot.fovY,
                         watchOnLeft: shot.watchOnLeft, eye: shot.eye)
-        saveLeftEye(color, to: outDir.appendingPathComponent("\(shot.name).png"))
+        saveLeftEye(color, to: outDir.appendingPathComponent("\(fileName).png"))
         let t = session.timeline
-        print(String(format: "%@  t=%.1f s  %.0f m（离地 %.0f）  %@  雨 %.2f  %.1f ms  「%@」", shot.name, t.time,
+        print(String(format: "%@  t=%.1f s  %.0f m（离地 %.0f）  %@  雨 %.2f  %.1f ms  「%@」", fileName, t.time,
                      t.altitude, t.heightAboveGround, String(describing: t.phase), t.rainIntensity, ms,
                      session.hint.replacingOccurrences(of: "\n", with: " / ")))
+      }
     }
 }
 
+if mode == "skins" {
+    // 皮肤的解锁规则和持久化：每关 × 每种落地结果，查新解锁的对不对；存进一个单独的 UserDefaults 再读出来（= 重启以后）
+    let all: [JumpTimeline.Outcome] = [.bullseye, .inTarget, .missed, .water, .crashed, .terrain, .trees, .lava,
+                                       .crevasse, .plume, .fell, .ruins]
+    var failures = 0
+    func expect(_ ok: Bool, _ what: String) {
+        if !ok { failures += 1; print("  ✗ \(what)") }
+    }
+    for outcome in all {
+        for scene in JumpScene.allCases {
+            var u = SkinUnlocks()
+            let news = u.record(scene: scene, outcome: outcome)
+            let wantCanopy = outcome == .bullseye || outcome == .inTarget, wantGloves = outcome == .bullseye
+            expect(news.contains(.canopy(scene)) == wantCanopy, "\(outcome) @ \(scene) 伞")
+            expect(news.contains(.gloves(scene)) == wantGloves, "\(outcome) @ \(scene) 手套")
+            expect(news.count == (wantCanopy ? 1 : 0) + (wantGloves ? 1 : 0), "\(outcome) @ \(scene) 只解锁这一关")
+            expect(u.canopies.subtracting([scene]).isEmpty && u.gloves.subtracting([scene]).isEmpty, "\(outcome) @ \(scene) 别的关没动")
+            // 再跳一次同样的结果：不再算「新解锁」
+            expect(u.record(scene: scene, outcome: outcome).isEmpty, "\(outcome) @ \(scene) 重复不算新")
+        }
+        print(String(format: "%-10@ → 伞 %@  手套 %@", String(describing: outcome) as NSString,
+                     Skins.earned(by: outcome).canopy ? "解锁" : "—", Skins.earned(by: outcome).gloves ? "解锁" : "—"))
+    }
+    // 进靶以后再落靶心：只多出手套
+    var u = SkinUnlocks()
+    _ = u.record(scene: .snow, outcome: .inTarget)
+    expect(u.record(scene: .snow, outcome: .bullseye) == [.gloves(.snow)], "先进靶再靶心：只多手套")
+    // 持久化：存进单独的 suite，新建一个从里面读（就是重启后 AppModel 做的事）
+    let suite = "freefall.render-check.skins"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    _ = u.record(scene: .atoll, outcome: .bullseye)
+    _ = u.record(scene: .sky, outcome: .inTarget)
+    u.save(to: defaults)
+    SkinChoice(canopy: .sky, gloves: .atoll).save(to: defaults)
+    let reloaded = SkinUnlocks(defaults: UserDefaults(suiteName: suite)!)
+    expect(reloaded == u, "重新读出来的解锁状态一样")
+    let choice = SkinChoice(defaults: UserDefaults(suiteName: suite)!, unlocks: reloaded)
+    expect(choice == SkinChoice(canopy: .sky, gloves: .atoll), "重新读出来的选择一样")
+    // 选了没解锁的（存档被改过）：退回默认
+    SkinChoice(canopy: .volcano, gloves: .sky).save(to: defaults)
+    expect(SkinChoice(defaults: defaults, unlocks: reloaded) == SkinChoice(), "没解锁的选择退回默认")
+    defaults.removePersistentDomain(forName: suite)
+    print("解锁：伞 \(u.canopies.map(\.key).sorted())  手套 \(u.gloves.map(\.key).sorted())")
+    // 落地提示里的那几行（开跳时什么都没解锁）。HUD 的提示条最多画三行：结果 + 皮肤 + 「点手表结束」不能超过三行
+    for outcome: JumpTimeline.Outcome in [.bullseye, .inTarget, .missed, .crashed] {
+        let s = JumpSession(timeline: JumpTimeline(scene: .atoll), realHands: true, autopilot: nil)
+        let lines = s.skinLines(for: outcome)
+        print("  \(outcome)：", lines)
+        expect(1 + lines.count + 1 <= 3, "\(outcome) 落地提示超过三行")
+    }
+    // 真的跳几次（进靶、错过、落水 / 掉出岛、摔），落地以后直接数提示的行数（HUD 的提示条最多画三行）
+    for scene in [JumpScene.atoll, .sky] {
+        for feet in [3000.0, 2000, 1000, 200] {
+            let s = autoSession(from: JumpTimeline(scene: scene), deployFeet: feet)
+            run(s) { $0.outcome != nil }
+            let n = s.hint.split(separator: "\n").count
+            print("  \(scene.key) \(Int(feet)) ft → \(s.timeline.outcome.map { String(describing: $0) } ?? "?")：提示 \(n) 行")
+            expect(n <= 3, "\(scene.key) \(Int(feet)) ft 落地提示 \(n) 行")
+        }
+    }
+    print(failures == 0 ? "全部通过" : "\(failures) 条不对")
+}
+
 if mode == "sim" || mode == "all" {
+    // 练习（从开伞前开始）：起点要和正常跳的同一高度一致（同一个地方、同样在下落），3,000 ft 开伞照样进靶
+    do {
+        let normal = autoSession()
+        run(normal) { $0.phase == .freefall && $0.heightAboveGround <= JumpTimeline.practiceAGL }
+        let p = JumpTimeline.practice(scene: jumpScene)
+        let s = autoSession(from: p)
+        print(String(format: "练习起点：离地 %.0f m、地面 (%.0f, %.0f)、下落 %.0f m/s、亮度 %.2f；正常跳同一高度时 (%.0f, %.0f)、%.0f m/s",
+                     p.heightAboveGround, p.groundPosition.x, p.groundPosition.y, p.verticalSpeed, p.brightness,
+                     normal.timeline.groundPosition.x, normal.timeline.groundPosition.y, normal.timeline.verticalSpeed))
+        run(s) { $0.landedTime != nil }
+        print(String(format: "练习 3000 ft 开伞 → %@  离靶心 %.1f m（%.0f 秒）", String(describing: s.timeline.outcome!),
+                     s.timeline.landingDistance, s.timeline.time - (p.practiceStartTime ?? 0)))
+    }
+    // 手动拉平：拉了是软着陆；忘了拉是重着陆（不给靶心，不算失败）
+    for skip in [false, true] {
+        let s = autoSession()
+        s.autoFlare = false
+        s.autopilot?.skipFlare = skip
+        run(s) { $0.landedTime != nil }
+        print(String(format: "手动拉平%@ → %@  落地 %.1f m/s  重着陆 %@  「%@」", skip ? "（忘了拉）" : "",
+                     String(describing: s.timeline.outcome!), s.timeline.landingSpeed, s.timeline.hardLanding ? "是" : "否",
+                     s.jumpResult?.summary ?? ""))
+    }
     // 不同高度开伞：太晚要摔；正常开伞自动驾驶要能飞进靶（自动驾驶飞得进，人才有机会）
     print("开伞高度 → 结果：")
     for feet in [3500.0, 3000, 2500, 2000, 1500, 1000, 600, 300, -1] {
@@ -664,6 +800,58 @@ if mode == "sim" || mode == "all" {
                      feet < 0 ? "  不开伞" : String(format: "%5.0f ft", feet), openHAG, toTarget,
                      String(describing: t.outcome!), t.landingDistance, t.landingSpeed, t.time))
     }
+}
+
+if mode == "wind" {
+    // 每关的风（JumpScene.windRange）取范围的边角：方向两头和中间、风速最小最大、上谷下谷，
+    // 自动驾驶 3,000 ft 按时开伞都要能进靶（逆风太大飞不到、火山被吹进烟柱，都会在这里露出来）
+    var failures = 0
+    for scene in JumpScene.allCases {
+        let r = scene.windRange
+        var cases: [(String, SIMD2<Double>)] = [("固定", scene.designWind)]
+        for rev in r.bothWays ? [false, true] : [false] {
+            for u in [0.0, 0.25, 0.5, 0.75, 1] {
+                for v in [0.0, 0.5, 1] {
+                    cases.append((String(format: "%@方向%.2f 风速%.0f", rev ? "反 " : "", u, v), scene.wind(direction: u, speed: v, reversed: rev)))
+                }
+            }
+        }
+        var line: [String] = []
+        for (name, w) in cases {
+            let s = autoSession(from: JumpTimeline(scene: scene, wind: w))
+            var openAt = SIMD2<Double>(0, 0)
+            run(s) { t in
+                if t.phase == .opening, t.sinceDeploy ?? 1 < 0.02 { openAt = t.groundPosition }
+                return t.landedTime != nil || t.outcome != nil
+            }
+            let t = s.timeline
+            let head = -simd_dot(w, scene.approach)
+            let ok = t.outcome == .inTarget || t.outcome == .bullseye
+            if !ok { failures += 1 }
+            line.append(String(format: "  %@ %-18@ 风 %.1f m/s（逆风分量 %+.1f）开伞离靶 %4.0f m → %@ %.1f m",
+                               ok ? "  " : "✗", name, length(w), head, length(scene.target - openAt),
+                               String(describing: t.outcome ?? .missed), t.landingDistance))
+        }
+        if let trace = env["WINDTRACE"], trace == scene.key {
+            // 伞下每 4 秒的状态：用最后一种风再跳一遍
+            let w = cases[Int(env["WINDCASE"] ?? "1") ?? 1].1
+            let d = autoSession(from: JumpTimeline(scene: scene, wind: w))
+            run(d) { $0.phase == .canopy }
+            while d.timeline.landedTime == nil, !d.timeline.isOver {
+                let tl = d.timeline
+                if Int((tl.time * 90).rounded()) % 360 == 0 {
+                    let v = tl.scene.target - tl.groundPosition
+                    print(String(format: "    t=%5.1f 离地 %5.0f  离靶 %5.0f  地速 %4.1f  刹车 %.2f/%.2f  航向 %6.0f°  地面 (%.0f, %.0f)",
+                                 tl.time, tl.heightAboveGround, length(v), length(tl.velocity + w), tl.brakeLeft, tl.brakeRight,
+                                 tl.flightHeading * 180 / .pi, tl.groundPosition.x, tl.groundPosition.y))
+                }
+                d.step(dt: 1.0 / 90, hands: [], layout: layout)
+            }
+        }
+        print("\(scene.key)：")
+        line.forEach { print($0) }
+    }
+    print(failures == 0 ? "全部进靶" : "\(failures) 次没进靶")
 }
 
 if mode == "hands" || mode == "all" {
@@ -796,15 +984,19 @@ if mode == "hands" || mode == "all" {
     step(0.6) { [] }
     print("  0.6 秒后：\(s.timeline.isOver ? "结束了，回开始窗口" : "还没结束")；成绩 \(s.jumpResult.map { $0.summary } ?? "没有（不算）")")
 
-    // 没有手部追踪：两只手一起捏住不动两秒退出
-    let p = JumpSession(timeline: JumpTimeline(freefallFrom: 3000, scene: jumpScene), realHands: false, autopilot: nil)
-    p.setEyeHeight(eyeHeight)
-    let still = [PinchState.Touch(isLeft: true, startY: 1), PinchState.Touch(isLeft: false, startY: 1)]
-    var held = 0.0
-    while held < 1.0 { p.step(dt: 1.0 / 90, hands: [], touches: still, layout: layout); held += 1.0 / 90 }
-    print("  捏合：两只手捏住 1 秒 →「\(p.hudHint.replacingOccurrences(of: "\n", with: " / "))」退出 \(p.timeline.quitting)")
-    while held < 2.1 { p.step(dt: 1.0 / 90, hands: [], touches: still, layout: layout); held += 1.0 / 90 }
-    print("  捏合：两只手捏住 2.1 秒 → 退出 \(p.timeline.quitting)")
+    // 落地以后点一下表：直接结束（不点 10 秒后自己结束）
+    let q = autoSession(from: JumpTimeline(scene: jumpScene), deployFeet: 3000)
+    run(q) { $0.phase == .landed }
+    q.autopilot = nil
+    let landedFace = SceneObjects.watchPlacement(canopyWatch, gloved: q.gloved).0
+    for _ in 0..<30 { q.step(dt: 1.0 / 90, hands: [canopyWatch, pointing(at: landedFace + SIMD3(0, 0.12, 0))], layout: layout) }
+    let before = q.hint.replacingOccurrences(of: "\n", with: " / ")
+    for _ in 0..<30 { q.step(dt: 1.0 / 90, hands: [canopyWatch, pointing(at: landedFace)], layout: layout) }
+    let tapped = q.timeline.fadeTime != nil
+    var waited = 0.0
+    while !q.timeline.isOver, waited < 9 { q.step(dt: 1.0 / 90, hands: [canopyWatch], layout: layout); waited += 1.0 / 90 }
+    print("  落地「\(before)」→ 点表：\(tapped ? "开始变暗" : "没反应")，\(q.timeline.isOver ? "结束了" : "还没结束")（落地后 \(String(format: "%.1f", q.timeline.time - (q.timeline.landedTime ?? 0))) 秒；不点要 \(Int(JumpTimeline.landedHold)) 秒多）")
+    if !(tapped && q.timeline.isOver) { print("  ✗ 落地后点表没有结束这一跳") }
 }
 
 if mode == "seq" || mode == "all" {
@@ -916,7 +1108,7 @@ if mode == "perf" || mode == "all" {
     let color = makeArray(.bgra8Unorm_srgb, width: width, height: height, shared: false)
     let depth = makeArray(.depth32Float, width: width, height: height, shared: false)
     print("性能（两只眼 \(width)×\(height)，云层比例 \(renderer.settings.cloudScale)，步长倍数 \(renderer.settings.cloudStep)）：")
-    for shot in shots where filter.isEmpty || shot.name.contains(filter) {
+    for shot in shots where matches(shot.name) {
         panelPlacer = PanelPlacer()
         let session = shot.session()
         let h = hands(shot.hands, session)
@@ -953,7 +1145,7 @@ if mode == "perf" || mode == "all" {
     var hudStateTest = HelmetHUD.State()
     hudStateTest.boot = 1
     hudStateTest.hintBoot = 1
-    hudStateTest.hint = "开伞！\n用另一只手抓住小臂上的红色拉环，往外拉"
+    hudStateTest.hint = "开伞！拉右小臂红环"
     hudStateTest.altitudeFeet = 3300
     hudStateTest.alarm = 1
     hudStateTest.targetBearingDeg = 20

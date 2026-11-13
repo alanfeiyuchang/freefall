@@ -108,7 +108,7 @@ struct SceneObjects {
         }
         let layout = input.layout
         let anchor = layout.anchor
-        o.meshVertices.reserveCapacity(24_000)
+        o.meshVertices.reserveCapacity(40_000)       // 开伞后实际约 3.2 万个（伞衣、滑块、装备、袖子、表）：一次留够，不用每帧扩容再拷一遍
 
         // 没有背带（低头会挡视线）。出了舱门身体才在阳光下投影子
         if timeline.phase != .cabin {

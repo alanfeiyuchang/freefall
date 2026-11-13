@@ -86,6 +86,19 @@ kernel void generateBaseNoise(texture3d<float, access::write> out [[texture(0)]]
     out.write(float4(perlinWorley, fbm0, fbm1, fbm2), gid);
 }
 
+/// 海浪用的差分贴图（见 waveSlope）：形状噪声的 r 和 x、z 方向下一个纹素的差（平铺，绕回来）。
+/// 存 16 位浮点：差在 ±1 以内，误差万分之几，比原来两次 8 位采样相减的精度还高
+kernel void generateWaveGradient(texture3d<float, access::read> base [[texture(0)]],
+                                 texture3d<float, access::write> out [[texture(1)]],
+                                 uint3 gid [[thread_position_in_grid]]) {
+    uint n = out.get_width();
+    if (any(gid >= uint3(n))) return;
+    float h = base.read(gid).r;
+    float hx = base.read(uint3((gid.x + 1u) % n, gid.y, gid.z)).r;
+    float hz = base.read(uint3(gid.x, gid.y, (gid.z + 1u) % n)).r;
+    out.write(float4(hx - h, hz - h, 0.0f, 0.0f), gid);
+}
+
 kernel void generateDetailNoise(texture3d<float, access::write> out [[texture(0)]],
                                 uint3 gid [[thread_position_in_grid]]) {
     uint n = out.get_width();
@@ -101,41 +114,76 @@ kernel void generateDetailNoise(texture3d<float, access::write> out [[texture(0)
 }
 
 /// 天气图：一张平铺 64 km 的图，原点（起跳点）在图中心。
+/// 每关的云各有各的性格（以前七关是同一张天气图：同一根云塔、头顶同一片云）。
+/// 雨云层（deckMask）、起跳点附近少云这两样决定穿云的时机，各关一样不动；变的是噪声的种子、云塔的位置和大小、
+/// 小积云 / 大积云 / 高塔的多少。环礁、天空之城是原来那张（天空之城脚下的云海是按它调的）
+struct WeatherStyle {
+    uint seed;           // 加在噪声种子上：云团、积云的位置全换一套
+    float2 tower;        // 那座浓积云塔的中心（云坐标，米）；半径按 towerSize 缩放
+    float towerSize;
+    float smallBias;     // 小积云多少（加在 cluster 的门槛上，正 = 更多）
+    float mediumBias;    // 大积云多少
+    float tallChance;    // 大积云长成高塔的比例
+    float topScale;      // 云顶整体高低
+};
+
+static inline WeatherStyle weatherStyle(int scene) {
+    switch (scene) {
+    case SCENE_GRASSLAND:   // 晴天的淡积云：一朵朵小而匀，塔在右前方，矮一些
+        return { 101u, float2(1700.0f, -2300.0f), 0.8f, 0.04f, -0.08f, 0.03f, 0.85f };
+    case SCENE_ALPINE:      // 山谷上空午后的积云：大团的多、长高的多，塔在正前方远处的山脊上
+        return { 211u, float2(300.0f, -3600.0f), 1.15f, -0.04f, 0.10f, 0.12f, 1.1f };
+    case SCENE_SNOW:        // 高原雪山：稀疏、低矮的碎云，没有塔
+        return { 307u, float2(0.0f, 1.0e6f), 0.0f, -0.12f, -0.14f, 0.0f, 0.75f };
+    case SCENE_ISLAND:      // 热带海岛：积云长得高，好几座塔，主塔在右边
+        // 塔还在左前方、小一号（周围的云换了一套）：塔挪到右前方、左后方或者不要，高空看海的镜头云的步进都要贵 0.4~0.9 ms
+        // （左前方那座不透明的塔挡住了后面的一大片云），这一关的海面本来就最重
+        return { 433u, float2(-1300.0f, -1900.0f), 0.9f, -0.04f, -0.04f, 0.12f, 1.05f };
+    case SCENE_VOLCANO:     // 火山：天空让给烟柱，云少、偏低，塔在左后方远处
+        return { 503u, float2(-2600.0f, 600.0f), 0.85f, -0.22f, -0.2f, 0.04f, 0.9f };
+    default:                // 环礁、天空之城：原来那张
+        return { 0u, float2(-1300.0f, -1900.0f), 1.0f, 0.0f, 0.0f, 0.07f, 1.0f };
+    }
+}
+
 kernel void generateWeather(texture2d<float, access::write> out [[texture(0)]],
+                            constant int &sceneId [[buffer(0)]],
                             uint2 gid [[thread_position_in_grid]]) {
     uint2 size = uint2(out.get_width(), out.get_height());
     if (any(gid >= size)) return;
     float2 uv = (float2(gid) + 0.5f) / float2(size);
     float2 xz = (uv - 0.5f) * WEATHER_TILE;
+    WeatherStyle st = weatherStyle(sceneId);
 
     // 云团的疏密（十几公里一片）
-    float cluster = perlinFbm(float3(uv * 4.0f, 0.5f), 4, 4, 31u);
+    float cluster = perlinFbm(float3(uv * 4.0f, 0.5f), 4, 4, 31u + st.seed);
     // 小积云（一朵 1~2 km，顶 2~3 km）和大积云（一朵 3~4 km，顶 3~4.5 km，少数长成 6~8 km 的高塔）。
     // 每朵的云顶是半球形的高度场（中心最高），云体内部覆盖率差不多一样（0.75 上下，不到 1）：
     // 表面的花椰菜起伏交给形状噪声去啃。覆盖率给到 1 的话噪声就没地方下嘴，会变成光滑的塑料柱。
-    float2 cs = worley2Cell(uv * 40.0f, 40, 41u);
-    float2 cm = worley2Cell(uv * 16.0f, 16, 43u);
+    float2 cs = worley2Cell(uv * 40.0f, 40, 41u + st.seed);
+    float2 cm = worley2Cell(uv * 16.0f, 16, 43u + st.seed);
     float rs = saturate(cs.x * 1.6f), rm = saturate(cm.x * 1.35f);
     float smallDome = sqrt(1.0f - rs * rs);
     float mediumDome = sqrt(1.0f - rm * rm);
-    float smallOn = smoothstep(0.30f, 0.62f, cluster) * step(0.2f, cs.y);
-    float mediumOn = smoothstep(0.52f, 0.78f, cluster);
+    float smallOn = smoothstep(0.30f - st.smallBias, 0.62f - st.smallBias, cluster) * step(0.2f, cs.y);
+    float mediumOn = smoothstep(0.52f - st.mediumBias, 0.78f - st.mediumBias, cluster);
     float coverage = max(smoothstep(0.0f, 0.35f, smallDome) * smallOn * 0.72f,
                          smoothstep(0.0f, 0.35f, mediumDome) * mediumOn * 0.78f);
-    float tall = step(0.93f, cm.y) * smoothstep(0.58f, 0.78f, cluster);
+    float tall = step(1.0f - st.tallChance, cm.y) * smoothstep(0.58f, 0.78f, cluster);
     float top = max((0.07f + 0.12f * cs.y) * smallDome * smallOn,
-                    (0.17f + 0.2f * cm.y + 0.3f * tall) * mediumDome * mediumOn);
+                    (0.17f + 0.2f * cm.y + 0.3f * tall) * mediumDome * mediumOn) * st.topScale;
     float base = 0.13f + 0.05f * cluster;
     float columnar = 0.0f;   // 只有下面特意摆的那座大塔是柱状的；天然长高的还是圆顶，不然远看像墓碑
 
     // 起跳点附近 4 km 内少一点云，往下看得到海
     coverage *= mix(1.0f, 0.35f, exp(-dot(xz, xz) / (4000.0f * 4000.0f)));
 
-    // 左前方一座大积云塔（浓积云）：下落的前半段你会从它旁边经过
-    float dTower = length(xz - float2(-1300.0f, -1900.0f));
-    float tower = smoothstep(1900.0f, 800.0f, dTower);
+    // 一座大积云塔（浓积云）：下落的前半段你会从它旁边经过（环礁在左前方；各关的位置、大小见 weatherStyle，雪山没有）
+    float ts = max(st.towerSize, 1e-3f);
+    float dTower = length(xz - st.tower) / ts;
+    float tower = smoothstep(1900.0f, 800.0f, dTower) * step(1e-3f, st.towerSize);
     coverage = max(coverage, tower * 0.8f);
-    top = max(top, sqrt(saturate(1.0f - (dTower / 2100.0f) * (dTower / 2100.0f))) * 0.88f);
+    top = max(top, sqrt(saturate(1.0f - (dTower / 2100.0f) * (dTower / 2100.0f))) * 0.88f * min(ts, 1.0f) * step(1e-3f, st.towerSize));
     columnar = max(columnar, tower);
 
     // 左边一层会下雨的碎积云：大约 3,200 → 2,400 米，沿航线拉长（见 Clouds.h 的 DECK_*），下落时会穿过它；
@@ -377,7 +425,7 @@ fragment CloudOut cloudFreshFragment(VOut in [[stage_in]],
     maps.topMax = topMax;
     maps.offset = F.world.y;
     maps.landShift = F.ground.yw;
-    maps.scene = int(F.world.x + 0.5f);
+    maps.scene = pickScene(int(F.world.x + 0.5f));
     maps.time = F.camera.y;
     maps.terrainDistance = 1e9f;
     if (F.exposure.y > 0.5f) {
@@ -512,7 +560,10 @@ static inline float3 sunLight(float3 rd, float3 sunDir, float3 Tsun) {
 /// 海浪的坡度：拿云的形状噪声（Perlin-Worley）当高度场，三个尺度（一格 160 / 40 / 10 米），第三维当时间让它慢慢变。
 /// 之前用十几个正弦波叠，低空看太阳反光会出规则的网格纹；噪声没有周期性，就不会。
 /// 小于 16 个像素的尺度不画，坡度方差加进 Beckmann 的统计粗糙度——不然远处会闪（VR 里很明显）。
-static inline float2 waveSlope(float2 xz, float time, float footprint, texture3d<float> noise,
+/// grad：形状噪声沿 x、沿 z 和旁边一个纹素的差（generateWaveGradient 启动时算好）。线性插值是线性的，
+/// 取一次差分贴图 = 原来在这一点和 x、z 各偏一个纹素的三处各取一次再相减；每个尺度从三次三维采样减到一次
+/// （海面的每个像素都要算：环礁、海岛、火山的海，河和湖）
+static inline float2 waveSlope(float2 xz, float time, float footprint, texture3d<float> grad,
                                thread float &residualVariance) {
     const float scales[3] = { 160.0f, 40.0f, 10.0f };
     const float amplitude[3] = { 0.06f, 0.07f, 0.08f };
@@ -525,10 +576,7 @@ static inline float2 waveSlope(float2 xz, float time, float footprint, texture3d
         residualVariance += a * a * 0.5f * (1.0f - fade * fade);
         if (fade > 0.0f) {
             float3 uvw = float3(xz.x / scales[i], time * (0.015f + 0.01f * float(i)), xz.y / scales[i]);
-            float h = noise.sample(linearRepeat, uvw, level(0)).r;
-            float hx = noise.sample(linearRepeat, uvw + float3(e, 0.0f, 0.0f), level(0)).r;
-            float hz = noise.sample(linearRepeat, uvw + float3(0.0f, 0.0f, e), level(0)).r;
-            slope += float2(hx - h, hz - h) * (a * fade / (e * 6.0f));
+            slope += grad.sample(linearRepeat, uvw, level(0)).rg * (a * fade / (e * 6.0f));
         }
     }
     return slope;
@@ -636,6 +684,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
                                 texture2d<float> cloudShadow [[texture(4)]],
                                 texture2d<float> atollMap [[texture(5)]],
                                 texture3d<float> waveNoise [[texture(6)]],
+                                texture3d<float> waveGrad [[texture(7)]],
                                 texture2d<float> canopyShadowMap [[texture(14)]],
                                 texture2d<float> bodyShadowMap [[texture(15)]]) {
     float2 screen = screenPosition(in.position.xy, in.viewIndex, F.camera.w > 0.5f, rateMap);
@@ -666,12 +715,9 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
         float2 xz = r.origin.xz + rd.xz * t;
         // 一个像素在海面上盖多大（米）：斜着看拉长
         float footprint = t * 0.0011f / max(-rd.y, 0.05f);
-        float residual;
         // 地面坐标 = 云坐标 + F.ground.yw（机舱里地面不跟飞机走，见 JumpTimeline.landShift）
         float2 g = xz + F.ground.xz + F.ground.yw;
-        float2 slope = waveSlope(g, F.camera.y, footprint, waveNoise, residual);
         float3 sphereN = float3(xz.x / EARTH_R, 1.0f, xz.y / EARTH_R);
-        float3 N = normalize(sphereN + float3(-slope.x, 0.0f, -slope.y));
         float od = cloudShadow.sample(linearRepeat, (xz + F.ground.xz) / WEATHER_TILE + 0.5f, level(0)).r;
         // 着陆区几百米内不落云影（阳光从云缝里照下来）：云相对地面的位置取决于你在舱里等了多久，靶不能碰巧在阴影里
         if (!skyCity) od *= smoothstep(300.0f, 650.0f, length(g - TARGET_CENTER));
@@ -709,7 +755,14 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
             const float3 absorption = float3(0.45f, 0.065f, 0.035f);   // 每米
             waterAlbedo += float3(0.55f, 0.6f, 0.55f) * exp(-2.0f * absorption * depth);
         }
-        float3 surface = oceanShade(N, rd, sunDir, dot(sunVis, float3(0.3333f)), 0.006f + residual, waterAlbedo, A, skySeaLUT);
+        // 水面：浪的坡度和反光。整个像素都是沙洲 / 椰林的（落地以后往下看，几乎整屏）用不上，不算
+        float3 surface = 0.0f;
+        if (land < 1.0f) {
+            float residual;
+            float2 slope = waveSlope(g, F.camera.y, footprint, waveGrad, residual);
+            float3 N = normalize(sphereN + float3(-slope.x, 0.0f, -slope.y));
+            surface = oceanShade(N, rd, sunDir, dot(sunVis, float3(0.3333f)), 0.006f + residual, waterAlbedo, A, skySeaLUT);
+        }
         if (land + surf > 0.0f) {
             // 沙洲和白浪：漫反射（沙滩、椰林、浪花）
             // 沙滩近看有细纹（风吹出来的沙纹），水边一圈湿沙颜色深
@@ -766,9 +819,10 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
             float3 landAlbedo = mix(sand, forest, saturate(vegetation * 1.3f));
             // 靶：铺在沙上的一大块布，同心圆红白相间，中间黄色的靶心
             float r = length(g - TARGET_CENTER);
-            float ring = fract(r / 4.0f);
+            // 每 4 米一圈：红、白各半圈。按到最近一条圈边的有符号距离做抗锯齿（白的里面为正）——
+            // 之前是 smoothstep(0.5 ± aa, fract)，只有红→白那条边是软的，白→红（fract 从 1 绕回 0）是硬边，一圈圈锯齿
             float aa = max(fwidth(r) / 4.0f, 1e-4f);
-            float stripe = smoothstep(0.5f - aa, 0.5f + aa, ring);
+            float stripe = smoothstep(-aa, aa, 0.25f - abs(fract(r / 4.0f - 0.25f) - 0.5f));
             float3 targetColor = mix(TARGET_RED, TARGET_WHITE, stripe) * (1.0f + 0.07f * grain);
             targetColor = mix(TARGET_YELLOW, targetColor, smoothstep(TARGET_BULLSEYE - aa * 4.0f, TARGET_BULLSEYE + aa * 4.0f, r));
             float onTarget = smoothstep(TARGET_RADIUS + aa * 4.0f, TARGET_RADIUS - aa * 4.0f, r) * sandbar;
