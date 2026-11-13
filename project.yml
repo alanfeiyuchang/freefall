@@ -17,6 +17,10 @@ settings:
     SWIFT_VERSION: "6.0"
     MARKETING_VERSION: "0.1"
     CURRENT_PROJECT_VERSION: "1"
+    # release 分支（上架版）：不定义 DEV_TOOLS。被 `#if DEV_TOOLS` 包住的开发功能——HUD 上的帧率 / GPU 毫秒 / 画质档位、
+    # 开始窗口的「性能测试」和上次的测试结果、整套 benchmark、GPU 统计日志——都不编进去。
+    # master（开发）在这里加 `SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) DEV_TOOLS`，Release 装头显也能测性能。
+    # 差别清单见 docs/appstore/release-vs-master.md
 
 targets:
   Freefall:
@@ -24,6 +28,9 @@ targets:
     platform: visionOS
     sources:
       - path: Freefall
+        # 性能测试的局域网地址（只在本机、不进仓库）：上架版没有 PerfLink，这个文件就算在也不打进包
+        excludes:
+          - Resources/perf-host.txt
     settings:
       base:
         PRODUCT_NAME: Freefall
@@ -32,7 +39,8 @@ targets:
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UIApplicationPreferredDefaultSceneSessionRole: UIWindowSceneSessionRoleApplication
         INFOPLIST_KEY_NSWorldSensingUsageDescription: 用来跟踪你头部的位置和朝向。
-        INFOPLIST_KEY_NSLocalNetworkUsageDescription: 性能测试时把测量结果发回开发用的 Mac。
+        # 出口合规：只用系统自带的加密（其实连网络都不用），上传 build 时不用再答加密问卷
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         INFOPLIST_KEY_NSHandsTrackingUsageDescription: 用来让你用手抓扶杆、拉开伞拉手和操纵环，并把高度表戴在你的手腕上。
         # 手套的法线贴图、材质贴图按原始数值读，不让 Xcode 把 PNG 改写成 iOS 专用格式
         COMPRESS_PNG_FILES: NO

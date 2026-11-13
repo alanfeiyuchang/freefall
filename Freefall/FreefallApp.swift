@@ -16,13 +16,18 @@ struct FreefallApp: App {
 
         ImmersiveSpace(id: StartView.spaceID) {
             CompositorLayer(configuration: FallLayerConfiguration()) { layerRenderer in
+#if DEV_TOOLS
+                let perfTest = AppModel.shared.perfTest
+                // 性能测试只管这一跳：渲染器拿到开关以后就复位（中途按表冠退出也不会留着）
+                AppModel.shared.perfTest = false
+#else
+                let perfTest = false
+#endif
                 ImmersiveRenderer.start(layerRenderer, handsEnabled: AppModel.shared.handsAllowed,
                                         watchOnLeft: AppModel.shared.watchOnLeft, gloves: AppModel.shared.gloves,
                                         toggleSteering: AppModel.shared.toggleSteering,
-                                        perfTest: AppModel.shared.perfTest,
+                                        perfTest: perfTest,
                                         scene: AppModel.shared.scene)
-                // 性能测试只管这一跳：渲染器拿到开关以后就复位（中途按表冠退出也不会留着）
-                AppModel.shared.perfTest = false
             }
         }
         .immersionStyle(selection: $immersionStyle, in: .mixed, .full)

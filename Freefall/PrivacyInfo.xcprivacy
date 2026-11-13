@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Freefall 不收集任何数据。
+
+	  上架版（release 分支）没有任何联网代码：没有 URLSession、没有 Network 框架、没有第三方 SDK、
+	  没有统计和广告。下面描述「数据离开设备」的几项都是空的，是有意为之。
+
+	  头部位姿（世界感知）和手的关节（手部追踪）从 ARKit 逐帧读出来，只用来摆机舱、伞、手套和
+	  手腕上的高度表，从不写盘、从不离开设备，所以不算「收集的数据类型」。
+
+	  下面两项是 Apple 的 Required Reason API 声明，只为 app 实际的用法声明。
+	-->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<!--
+			  UserDefaults：app 自己的设置（选哪一关、高度表戴哪只手、手套、伞下转向）、
+			  每关最近的落点距离、自动画质的档位。只有本 app 读写。
+			-->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+		<dict>
+			<!--
+			  系统开机时间：CACurrentMediaTime()（由 mach_absolute_time() 而来）只用来量 app 内
+			  两件事之间隔了多久（每帧的时间步长、帧率、手丢失多久）。和 Wandless 一样保守地声明。
+			-->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>35F9.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

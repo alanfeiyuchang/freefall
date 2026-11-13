@@ -1,4 +1,3 @@
-import Network
 import SwiftUI
 
 /// 窗口和沉浸空间之间的状态。跳下去时把开始窗口关掉（不然它会飘在天上），落完再打开。
@@ -18,15 +17,10 @@ final class AppModel {
     var gloves: Bool = UserDefaults.standard.object(forKey: "gloves") as? Bool ?? true {
         didSet { UserDefaults.standard.set(gloves, forKey: "gloves") }
     }
-    /// 伞下拉左 / 右操纵环转向（记住上次的选择）。默认关：拉环转向时整个世界绕着你转，可能引起晕动症；
-    /// 关着时只靠转头、转身，伞跟着你转，操纵环只管减速
+#if DEV_TOOLS
     /// 这一跳做性能测试（开伞后自动跑一遍，见 ImmersiveRenderer.runBenchmark）；不记住，每次要手动开
-    var perfTest = false {
-        didSet {
-            // 一打开就连上开发用的 Mac（这时系统会问要不要允许访问本地网络），顺便把上一次存下来的结果发过去
-            if perfTest { PerfLink.shared.send("HELLO\n" + perfReport) }
-        }
-    }
+    /// （上架版：结果只存在本机、显示在开始窗口里，不发到别处——master 上发回开发用 Mac 的那段在这个分支里删掉了）
+    var perfTest = false
     /// 上一次性能测试的结果（也存在 Documents/perf.txt）：显示在开始窗口里
     var perfReport: String = {
         guard let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
@@ -35,6 +29,9 @@ final class AppModel {
         fflush(stdout)
         return text
     }()
+#endif
+    /// 伞下拉左 / 右操纵环转向（记住上次的选择）。默认关：拉环转向时整个世界绕着你转，可能引起晕动症；
+    /// 关着时只靠转头、转身，伞跟着你转，操纵环只管减速
     var toggleSteering: Bool = UserDefaults.standard.object(forKey: "toggleSteering") as? Bool ?? false {
         didSet { UserDefaults.standard.set(toggleSteering, forKey: "toggleSteering") }
     }
@@ -78,34 +75,5 @@ final class AppModel {
         }
         openWindow?(id: StartView.windowID)
         Task { await dismissImmersiveSpace?() }
-    }
-}
-
-/// 性能测试的结果发回开发用的 Mac（头显不让 devicectl 取文件、也不让接管标准输出）：一条 TCP 连接，一行行发文本。
-/// Mac 上 `nc -lk 8765` 收。Mac 的局域网地址写在 `Freefall/Resources/perf-host.txt` 里（一行，不进仓库；
-/// 没有这个文件就什么都不发）。
-final class PerfLink: @unchecked Sendable {
-    static let shared = PerfLink()
-    static let host: String = {
-        guard let url = Bundle.main.url(forResource: "perf-host", withExtension: "txt"),
-              let text = try? String(contentsOf: url, encoding: .utf8) else { return "" }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }()
-    private var connection: NWConnection?
-    private let queue = DispatchQueue(label: "perf-link")
-
-    func send(_ text: String) {
-        guard !Self.host.isEmpty else { return }
-        queue.async {
-            if self.connection == nil || self.connection?.state == .cancelled {
-                let c = NWConnection(host: NWEndpoint.Host(Self.host), port: 8765, using: .tcp)
-                c.stateUpdateHandler = { state in
-                    if case .failed = state { c.cancel() }
-                }
-                c.start(queue: self.queue)
-                self.connection = c
-            }
-            self.connection?.send(content: (text + "\n").data(using: .utf8), completion: .contentProcessed { _ in })
-        }
     }
 }

@@ -173,6 +173,7 @@ struct StartView: View {
                     }
                     .fixedSize()
                 }
+#if DEV_TOOLS
                 // 性能测试：开伞后自动轮流关掉画面的各个部分量耗时（约半分钟，画面会一段一段变），结果存进文件
                 setting("性能测试") {
                     Picker("性能测试", selection: $model.perfTest) {
@@ -181,8 +182,10 @@ struct StartView: View {
                     }
                     .fixedSize()
                 }
+#endif
             }
             .pickerStyle(.segmented)
+#if DEV_TOOLS
             if !model.perfReport.isEmpty {
                 // 上一次性能测试的结果（从 Mac 收不到输出时，可以在这里看 / 截图）
                 ScrollView {
@@ -194,6 +197,7 @@ struct StartView: View {
                 .frame(height: 150)
                 .padding(.horizontal, 24)
             }
+#endif
             Text("建议坐着、戴耳机 · 点一下手腕上的表开关 HUD，按住两秒退出这一跳")
                 .font(.callout)
                 .foregroundStyle(.secondary)

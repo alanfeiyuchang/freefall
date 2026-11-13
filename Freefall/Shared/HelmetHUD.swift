@@ -365,7 +365,8 @@ final class HelmetHUD: @unchecked Sendable {
             let heading = (Int(s.headingDeg.rounded()) % 360 + 360) % 360
             text(ctx, String(format: "HDG %03d°", heading), x: 470, y: 114, size: 34, color: Self.white, mono: true,
                  anchor: 1, height: h)
-            // 左上角：实时帧率、GPU 一帧的耗时、画质档位。掉到 80 帧以下变橙，70 以下变红
+#if DEV_TOOLS
+            // 左上角：实时帧率、GPU 一帧的耗时、画质档位。掉到 80 帧以下变橙，70 以下变红（只在开发版里画）
             if s.fps >= 0 {
                 let c = s.fps >= 80 ? Self.white : s.fps >= 70 ? CGColor(red: 1, green: 0.62, blue: 0.15, alpha: 1)
                                                                 : CGColor(red: 1, green: 0.25, blue: 0.2, alpha: 1)
@@ -373,6 +374,7 @@ final class HelmetHUD: @unchecked Sendable {
                 text(ctx, String(format: "%.1f MS  Q%d", s.gpuMs, s.qualityLevel), x: 44, y: 98, size: 26, color: Self.cyanDim,
                      mono: true, height: h)
             }
+#endif
 
             // 罗盘：刻度、N E S W 跟着航向转，顶上一个固定的指示
             let cx: CGFloat = 290, cy: CGFloat = 310, r: CGFloat = 145

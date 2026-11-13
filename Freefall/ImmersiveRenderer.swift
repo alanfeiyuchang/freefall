@@ -72,6 +72,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var raiseBackoffUntil: CFTimeInterval = 0
     private var lastStatsLog: CFTimeInterval = 0
 
+#if DEV_TOOLS
     // 性能测试（开始窗口里打开）：从出舱到落地，一遍一遍轮流关掉画面的各个部分，每种 1.6 秒，量 GPU 一帧的耗时和帧率
     // （一遍约 20 秒：高空、穿云、出云、伞下各能量到一两遍）。结果一行行打到标准输出（从 Mac 用 devicectl --console
     // 启动应用就能收到），也存进 Documents/perf.txt、显示在开始窗口里。测的时候自动画质停掉。
@@ -100,7 +101,6 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private func benchEmit(_ line: String) {
         print("PERF " + line)
         fflush(stdout)
-        PerfLink.shared.send(line)
         benchText += line + "\n"
     }
 
@@ -168,6 +168,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
         }
         return "性能测试 第 \(benchCycle + 1) 遍 \(benchIndex + 1) / \(Self.benchConfigs.count)\n往下看着地面（画面一段一段变是正常的）"
     }
+#endif
     private static func qualityKey(_ scene: JumpScene) -> String { "qualityLevel.\(scene.rawValue)" }
     /// HUD 上的实时帧率：最近一秒里提交了几帧（每半秒更新一次显示的数）
     private var frameStamps: [CFTimeInterval] = []
@@ -208,7 +209,9 @@ final class ImmersiveRenderer: @unchecked Sendable {
         session.watchOnLeft = watchOnLeft
         // 拉环转向按开始窗口里的选项（默认关）；自动驾驶靠拉环转向，一直开
         session.toggleSteering = toggleSteering || DebugOptions.autopilot
+#if DEV_TOOLS
         self.perfTest = perfTest
+#endif
     }
 
     @MainActor
@@ -221,8 +224,6 @@ final class ImmersiveRenderer: @unchecked Sendable {
                                              gloves: gloves, toggleSteering: toggleSteering, perfTest: perfTest, jumpScene: scene)
         } catch {
             log.error("无法创建渲染器：\(error.localizedDescription)")
-            // 头显上看不到日志：也发回开发用的 Mac（点了 Jump 什么都不出现，多半是这里）
-            PerfLink.shared.send("ERROR 无法创建渲染器：\(error)")
             return
         }
         layerRenderer.onSpatialEvent = { [pinches = renderer.pinches] events in
@@ -402,10 +403,12 @@ final class ImmersiveRenderer: @unchecked Sendable {
         let objects = session.objects(layout: layout, hands: hands, watchOnLeft: watchOnLeft,
                                       gloves: gloves, head: head)
         var hudState = session.hudState
+#if DEV_TOOLS
         if let note = runBenchmark(now: now) {
             hudState.hint = note
             if hudState.hintBoot < 0 { hudState.hintBoot = 1 }
         }
+#endif
         frameStamps.append(now)
         if let first = frameStamps.firstIndex(where: { now - $0 <= 1 }), first > 0 { frameStamps.removeFirst(first) }
         if now - lastFPSUpdate > 0.5, frameStamps.count >= 2, let oldest = frameStamps.first, now - oldest > 0.3 {
@@ -414,9 +417,12 @@ final class ImmersiveRenderer: @unchecked Sendable {
             let recent = gpuTimes.withLock { Array($0.suffix(45)) }
             if !recent.isEmpty { shownGPU = Float(recent.reduce(0, +) / Double(recent.count)) }
         }
+#if DEV_TOOLS
+        // HUD 右侧面板左上角的帧率、GPU 毫秒、画质档位（上架版不显示；帧率照样量，自动画质要用）
         hudState.fps = shownFPS
         hudState.gpuMs = shownGPU
         hudState.qualityLevel = qualityLevel
+#endif
         let hudPanels = helmet.update(hudState, head: stageFromDevice)
         var hudDirty = helmet.dirty
         // 提示都在头盔 HUD 的下沿（HUD 关着时只有舱里开场的提示），老的浮动面板不用了
@@ -595,12 +601,14 @@ final class ImmersiveRenderer: @unchecked Sendable {
         let recent = gpuTimes.withLock { Array($0.suffix(45)) }
         guard recent.count >= 30 else { return }
         let average = recent.reduce(0, +) / Double(recent.count)
+#if DEV_TOOLS
         if now - lastStatsLog > 2 {
             lastStatsLog = now
             Self.log.notice("GPU \(average, format: .fixed(precision: 2)) ms/帧，画质档位 \(self.qualityLevel)")
         }
         // 性能测试进行中不自动换档（它自己在换配置）
         if perfTest, benchIndex >= 0, !benchFinished { return }
+#endif
         let maxLevel = min(SceneRenderer.qualityLevels.count - 1, SceneRenderer.maxAutoQuality)
         // 按实际帧率换档（头显上量过：GPU 这个读数到 14 毫秒上下还是满 90 帧，之前按「超过 7 毫秒就降」，
         // 等于永远压在最低档）。掉到 86 帧以下降一档云；满帧、GPU 还有余量时试着升回去——
@@ -621,7 +629,9 @@ final class ImmersiveRenderer: @unchecked Sendable {
         UserDefaults.standard.set(qualityLevel, forKey: Self.qualityKey(scene.scene))
         scene.setQuality(qualityLevel)
         gpuTimes.withLock { $0.removeAll() }
+#if DEV_TOOLS
         Self.log.notice("画质换到 \(self.qualityLevel) 档（GPU 平均 \(average, format: .fixed(precision: 2)) ms）")
+#endif
     }
 
     private static var isSimulator: Bool {
