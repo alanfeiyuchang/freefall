@@ -176,8 +176,8 @@ final class ImmersiveRenderer: @unchecked Sendable {
     private var lastFPSUpdate: CFTimeInterval = 0
 
     init(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool, toggleSteering: Bool,
-         perfTest: Bool = false,
-         jumpScene: JumpScene) throws {
+         perfTest: Bool = false, skin: SkinChoice = SkinChoice(), skinUnlocks: SkinUnlocks = SkinUnlocks(),
+         practice: Bool = false, autoFlare: Bool = true, jumpScene: JumpScene) throws {
         self.layerRenderer = layerRenderer
         self.handsEnabled = handsEnabled && HandTrackingProvider.isSupported
         self.watchOnLeft = watchOnLeft
@@ -197,15 +197,22 @@ final class ImmersiveRenderer: @unchecked Sendable {
         qualityLevel = max(0, min(UserDefaults.standard.integer(forKey: Self.qualityKey(jumpScene)) - 1,
                                   SceneRenderer.maxAutoQuality))
         scene.setQuality(qualityLevel)
+        scene.skin = skin.uniforms                 // 开始窗口里选的伞、手套和袖子
         panel = TextPanel(device: device)
         helmet = HelmetHUD(device: device)
         audio = DebugOptions.mute ? nil : JumpAudio()
+        // 练习：从开伞前开始（JumpTimeline.practice）；调试参数 -startAltitude 优先
+        // 风每跳抽一次（JumpScene.windRange：山谷里只顺着谷走，火山顺着烟柱），出舱点跟着它往上风挪
+        let wind = jumpScene.randomWind()
         session = JumpSession(timeline: DebugOptions.startAltitude.map { JumpTimeline(freefallFrom: $0, scene: jumpScene) }
-                                  ?? JumpTimeline(scene: jumpScene),
+                                  ?? (practice ? JumpTimeline.practice(scene: jumpScene, wind: wind)
+                                               : JumpTimeline(scene: jumpScene, wind: wind)),
                               realHands: self.handsEnabled,
                               autopilot: DebugOptions.autopilot ? Autopilot(deployFeet: DebugOptions.autoDeployFeet) : nil)
         session.gloved = gloves
         session.watchOnLeft = watchOnLeft
+        session.skinUnlocks = skinUnlocks
+        session.autoFlare = autoFlare || DebugOptions.autopilot
         // 拉环转向按开始窗口里的选项（默认关）；自动驾驶靠拉环转向，一直开
         session.toggleSteering = toggleSteering || DebugOptions.autopilot
         self.perfTest = perfTest
@@ -213,12 +220,14 @@ final class ImmersiveRenderer: @unchecked Sendable {
 
     @MainActor
     static func start(_ layerRenderer: LayerRenderer, handsEnabled: Bool, watchOnLeft: Bool, gloves: Bool, toggleSteering: Bool,
-                      perfTest: Bool = false,
-                      scene: JumpScene) {
+                      perfTest: Bool = false, skin: SkinChoice = SkinChoice(), skinUnlocks: SkinUnlocks = SkinUnlocks(),
+                      practice: Bool = false, autoFlare: Bool = true, scene: JumpScene) {
         let renderer: ImmersiveRenderer
         do {
             renderer = try ImmersiveRenderer(layerRenderer, handsEnabled: handsEnabled, watchOnLeft: watchOnLeft,
-                                             gloves: gloves, toggleSteering: toggleSteering, perfTest: perfTest, jumpScene: scene)
+                                             gloves: gloves, toggleSteering: toggleSteering, perfTest: perfTest,
+                                             skin: skin, skinUnlocks: skinUnlocks, practice: practice,
+                                             autoFlare: autoFlare, jumpScene: scene)
         } catch {
             log.error("无法创建渲染器：\(error.localizedDescription)")
             // 头显上看不到日志：也发回开发用的 Mac（点了 Jump 什么都不出现，多半是这里）

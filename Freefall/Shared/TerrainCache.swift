@@ -29,7 +29,8 @@ final class TerrainCache {
     /// 离屏测试用：一帧里把所有该重画的层都画完（测试每个镜头只画几帧，等不了后台慢慢画）
     var immediate = false
 
-    init(device: MTLDevice, library: MTLLibrary, enabled: Bool) throws {
+    /// bakeFunction：按这一关特化过的烘焙函数（SceneRenderer 带函数常量建的，只含这一关的分支）
+    init(device: MTLDevice, library: MTLLibrary, enabled: Bool, bakeFunction: MTLFunction? = nil) throws {
         self.enabled = enabled
         let side = enabled ? 2048 : 4
         size = side
@@ -52,7 +53,7 @@ final class TerrainCache {
         slices = Array(0..<Self.levels)
         spare = Self.levels
         if enabled {
-            guard let f = library.makeFunction(name: "bakeTerrainCache") else {
+            guard let f = bakeFunction ?? library.makeFunction(name: "bakeTerrainCache") else {
                 throw SceneRenderer.RendererError.missingFunction("bakeTerrainCache")
             }
             pipeline = try device.makeComputePipelineState(function: f)
@@ -79,7 +80,7 @@ final class TerrainCache {
     /// 每帧调一次（地形 pass 之前）。camera：相机在地面坐标里的位置
     func update(_ commandBuffer: MTLCommandBuffer, camera: SIMD2<Double>, scene: JumpScene, frame: FrameUniforms,
                 atmosphere: MTLBuffer, noise: MTLTexture, surfaceMap: MTLTexture, detail: MTLTexture,
-                skySeaLUT: MTLTexture, cloudShadow: MTLTexture, terrainShade: MTLTexture) {
+                skySeaLUT: MTLTexture, cloudShadow: MTLTexture, terrainShade: MTLTexture, waveGradient: MTLTexture) {
         guard enabled, let pipeline else { return }
         let shift = SIMD2<Float>(frame.ground.y, frame.ground.w)
         var frame = frame
@@ -117,6 +118,7 @@ final class TerrainCache {
                 encoder?.setTexture(skySeaLUT, index: 5)
                 encoder?.setTexture(cloudShadow, index: 6)
                 encoder?.setTexture(terrainShade, index: 7)
+                encoder?.setTexture(waveGradient, index: 8)
                 encoder?.setBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
                 encoder?.setBuffer(atmosphere, offset: 0, index: 2)
             }

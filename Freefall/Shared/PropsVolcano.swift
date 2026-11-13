@@ -15,9 +15,19 @@ enum VolcanoProps {
         for s in spots {
             guard b.v.count < 60_000 else { break }
             let r = 0.3 + 1.6 * s.size * s.size * s.size
-            let a = 6.28 * TerrainField.hash(s.seed, 5)
-            b.blob(center: SIMD3(s.p.x, s.h + r * 0.35, s.p.y), radius: SIMD3(r * (1 + 0.4 * cos(a) * cos(a)), r * 0.8, r * (1 + 0.4 * sin(a) * sin(a))),
-                   sides: 6, color: SIMD3(0.035, 0.032, 0.034), material: PropMaterial.plain, phase: a, seed: s.seed)
+            // 每块不一样：压扁的程度、长短轴的方向和比例、埋进灰里多深、颜色（黑、深灰、带一点氧化红的）。
+            // 以前只有一个模子（同样的扁、几乎一样圆、同一个黑），从高处看是一地黑馒头
+            let h1 = TerrainField.hash(s.seed, 5), h2 = TerrainField.hash(s.seed, 11), h3 = TerrainField.hash(s.seed, 17)
+            let a = 3.14 * h1
+            let stretch = 1.0 + 0.45 * h2                       // 0.55 … 1.45：长的一边
+            let flat = 0.62 + 0.28 * h3                         // 0.34 … 0.9：高度比
+            let ra = r * stretch, rb = r / stretch
+            let radius = SIMD3(abs(cos(a)) * ra + abs(sin(a)) * rb, r * flat, abs(sin(a)) * ra + abs(cos(a)) * rb)
+            let sink = 0.15 + 0.25 * (0.5 + 0.5 * h1)           // 埋进去 15% ~ 40% 的高度
+            let tint = 0.5 + 0.5 * h2
+            let color = SIMD3<Float>(0.03 + 0.03 * tint * tint, 0.028 + 0.008 * tint, 0.03) * (0.8 + 0.4 * (0.5 + 0.5 * h3))
+            b.blob(center: SIMD3(s.p.x, s.h + radius.y * (1 - 2 * sink), s.p.y), radius: radius,
+                   sides: 6, color: color, material: PropMaterial.plain, phase: 6.28 * h1, seed: s.seed)
         }
         return SkyCity.Layout(buildings: b.v)
     }
