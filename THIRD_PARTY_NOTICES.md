@@ -1,6 +1,8 @@
 # Third-party notices
 
-Everything not listed here was written for Freefall and is covered by [LICENSE](LICENSE).
+Everything not listed here was written for Freefall and is covered by [LICENSE](LICENSE)
+(PolyForm Noncommercial 1.0.0). The third-party parts below keep their own licenses, which are
+more permissive: the noncommercial restriction does not apply to them.
 
 ## Assets shipped in the app
 
@@ -30,7 +32,7 @@ Copyright © 2025 Apple Inc.; the full license text is in
 ### App icon
 
 Generated locally with [FLUX.2 [klein] 4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B)
-(Apache License 2.0) and composited by hand. Not covered by the MIT license — see LICENSE.
+(Apache License 2.0) and composited by hand. Not licensed for reuse — see LICENSE.
 
 ## Code adapted from, or written after, other projects
 

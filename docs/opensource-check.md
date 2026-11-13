@@ -3,7 +3,10 @@
 对象：GitHub 私有仓库 `alanfeiyuchang/freefall`。公开以后别人能看到的是：远端的 `master`（现在是 `921b9c4`，已合进 PR #1 皮肤那批）、它的全部提交历史、PR #1 的描述和讨论。
 本地另外几个分支（`claude/release-d0a64c`、`claude/skins-92ed46`、5 个 `worktree-wf_*`、`refs/wip/finetune-base`）没推送过，不会公开，除非以后推上去。
 
-结论：**可以公开，没有必须先改写历史的问题。** 要做的是补上许可证和第三方声明（已起草，见文末），以及几件需要你定的事。
+结论：**可以公开，没有必须先改写历史的问题。** 要做的是补上许可证和第三方声明（已起草），以及几件需要你定的事。
+
+> **许可证改成了不可商用的 PolyForm Noncommercial 1.0.0**（2026-11-13 你的决定：Quest 版要自己做成付费软件）。
+> 这样公开出去的是「源码可见」（source-available），按 OSI 的定义不算「开源」，README 和仓库描述里别写 open source。详见第 3 节。
 
 ## 1. git 历史（全部 31 个提交、所有本地分支和远端）
 
@@ -33,7 +36,7 @@
 |---|---|---|---|---|
 | 三段音效 | `Freefall/Resources/Audio/` | CC BY 4.0（Huggy13ear，freesound.org） | 能 | 带署名和改动说明——`CREDITS.txt` 已有，`THIRD_PARTY_NOTICES.md` 里也列了 |
 | 手套模型和贴图 | `Freefall/Resources/Gloves/` | Apple 示例代码许可（MIT 式，© 2025 Apple Inc.） | 能 | 保留版权和许可声明——`LICENSE-Apple-sample.txt` 已经在两个目录里 |
-| App 图标 | `AppIcon.solidimagestack`、`Design/AppIcon/Final/` | 本机 FLUX.2 klein-4B 生成（模型是 Apache 2.0，商用可以） | 能 | 但建议**不放进 MIT 授权范围**（见第 3 节）。注：我是从本机只装了 klein-4B 推断的，你确认一下当时用的是不是 4B（9B 是非商用许可） |
+| App 图标 | `AppIcon.solidimagestack`、`Design/AppIcon/Final/` | 本机 FLUX.2 klein-4B 生成（模型是 Apache 2.0，商用可以） | 能 | 不授权给别人用（见 `LICENSE` 开头）。注：我是从本机只装了 klein-4B 推断的，你确认一下当时用的是不是 4B（9B 是非商用许可） |
 | 关卡卡片、皮肤缩略图、docs 里的预览图 | `Resources/Cards`、`Resources/Skins`、`docs/` | 游戏自己离屏渲染的 | 能 | — |
 | 渲染循环骨架 | `ImmersiveRenderer.swift` | 经 Bubble Dream 来自 MetalSplatter 的 visionOS 示例，MIT（© 2026 Sean Cier，GitHub 上的 LICENSE 原文） | 能 | MIT 要求带上版权和许可声明——之前代码里只有一行注释，**现在补进了 `THIRD_PARTY_NOTICES.md`** |
 | 大气散射 | `Shaders/Atmosphere.h` | 照 sebh/UnrealEngineSkyAtmosphere 写，MIT（© 2020 Epic Games, Inc.） | 能 | 同上，已补 |
@@ -42,13 +45,20 @@
 | pcg3d 哈希 | `Shaders/Noise.h` | Jarzynski & Olano 2020 论文里的算法 | 能 | 已致谢 |
 | 字体 | — | 只用系统字体 | — | — |
 
-没有发现 GPL / 非商用（NC）许可的素材或代码，选 MIT 没有冲突。
+没有发现 GPL / 非商用（NC）许可的素材或代码。这些第三方部分都比 PolyForm Noncommercial 宽松，整个仓库用不可商用许可没有冲突；它们各自保持原许可（别人可以按 MIT / CC BY 单独拿去用，这是它们的作者给的权利，和你无关）。
 
 ## 3. 需要你定的事
 
-1. **许可证**：起草的是 MIT（`LICENSE`，版权人 Feiyu Chang）。另一个常见选择是 Apache-2.0（多一条专利授权，对这个项目意义不大）。不要选 GPL：和 App Store 的使用条款有冲突。
-2. **名字和图标不放进开源授权**：`LICENSE` 末尾已经写了「Freefall 这个名字和 app 图标不在 MIT 范围内，请别用这个名字和图标发布」。
-   这只能防君子；真要防止别人原样上架，靠的是 Apple 审核指南 4.1（抄袭）和 4.3（重复 app），以及你先上架占住名字。
+1. **许可证：PolyForm Noncommercial 1.0.0**（`LICENSE`，版权人 Feiyu Chang）。
+   - 允许别人为非商业目的使用、学习、修改和分享：个人兴趣、学习研究、学校和非营利机构。
+   - **任何商业用途都要另外找你授权**：卖它、卖它的移植版或改版（包括别人做 Quest 版去卖）都不行。
+   - `LICENSE` 最上面是 PolyForm 要求的 `Required Notice:` 版权行，再加三句白话说明，下面是原文——
+     和 polyformproject 官方仓库 1.0.0 版逐字一致（下载后 diff 过）。
+   - 为什么选它而不是 CC BY-NC 4.0：CC 官方不建议把 CC 许可用在软件上；PolyForm 是专门为软件写的，有专利条款，对「商业 / 非商业」的界定也更清楚。
+   - **你自己不受这个许可证限制**：你是版权人，Quest 付费版、App Store 版都照做。许可证只约束别人。
+   - **要注意的一点：外部贡献。** 如果以后有人提 PR、你合进来，那部分代码的版权是对方的，按 PolyForm 授权给你也只是「非商业」，你就不能放进付费的 Quest 版。
+     办法是：不接受外部代码 PR（README 里写明欢迎 issue、不收 PR），或者要求贡献者签一个简单的贡献者许可协议（CLA），把商用权授予你。要不要加由你定。
+2. **名字和图标**：`LICENSE` 开头写明「Freefall」这个名字和应用图标完全不授权。
 3. **要不要把 `docs/appstore/` 一起公开**：里面是上架文案、审核备注、隐私问卷答案，公开没有坏处（不少开源 app 也这么做），但也可以只留在私有分支里。
 4. **打赏**：`.github/FUNDING.yml` 是全部注释掉的草稿，要你填 Venmo 用户名再打开。微信收款码不是网址，建议放到 freefall-support 网站上一个打赏页，这里链过去。
    按上一轮说的：**app 里和商店页面不要放打赏的引导**。
@@ -56,7 +66,7 @@
 ## 4. 公开的步骤（每一步都要你点头）
 
 1. 把 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`.github/FUNDING.yml` 合进 `master`（现在在 release 分支上；release 分支还落后远端 master 一个 PR #1，见下）。
-2. README 开头加两行：许可证（MIT，名字和图标除外）、编译前把 `project.yml` 里的 `DEVELOPMENT_TEAM` 和 Bundle ID 换成自己的。
+2. README 开头加两行：许可证（PolyForm Noncommercial，源码可见、不可商用；名字和图标除外）、编译前把 `project.yml` 里的 `DEVELOPMENT_TEAM` 和 Bundle ID 换成自己的。
 3. 仓库设为公开：`gh repo edit alanfeiyuchang/freefall --visibility public --accept-visibility-change-consequences`。
    公开以后历史就收不回来了；之后想再改私有，fork 和 clone 已经出去了。
 4. 选做：仓库描述、topics（visionos、metal、apple-vision-pro）、关掉不用的 Wiki / Projects。
