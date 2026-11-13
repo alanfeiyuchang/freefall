@@ -601,7 +601,8 @@ if mode == "hazards" {
 }
 
 if mode == "shots" || mode == "all" {
-    let width = 1280, height = 960
+    // SHOTW / SHOTH 改出图尺寸（App Store 的 visionOS 截图是 3840×2160，见 docs/appstore/screenshots.md）
+    let width = Int(env["SHOTW"] ?? "") ?? 1280, height = Int(env["SHOTH"] ?? "") ?? 960
     let color = makeArray(.bgra8Unorm_srgb, width: width, height: height, shared: true)
     let depth = makeArray(.depth32Float, width: width, height: height, shared: false)
     for shot in shots where filter.isEmpty || shot.name.contains(filter) {
