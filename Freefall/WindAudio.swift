@@ -12,7 +12,8 @@ import os
 /// - 自由落体的风：低沉的呼啸（棕噪声）+ 嘶嘶声（带通，速度越快越高）+ 阵风的冲击 + 跳伞服被扯的啪啪声
 /// - 伞下：轻风 + 伞布抖动
 /// - 穿过碎积云层时下雨：沙沙的雨声 + 雨点打在头盔上的「嗒嗒」声（左右随机）
-/// - 近地和落地后：海浪拍礁、海鸥（左右随机）
+/// - 近地和落地后：海浪拍礁、海鸥（左右随机）；草原、高山的鸟叫
+/// - 火山：火山口的低吼、偶尔一声闷响、碎石噼啪（离火山锥越近越响）
 /// - 高度表报警：三声一组（可以开伞），急促连响（低于决断高度）
 /// 一次性的：抓扶杆、绿灯「叮」、拉手撕开、开伞（呼——、布抖、张满时「嘭」）、落地、摔、落水、赢/输
 final class JumpAudio: @unchecked Sendable {
@@ -125,8 +126,12 @@ final class JumpDSP: @unchecked Sendable {
     // 鸟叫：一串短促的「啾啾」，音高往上滑
     private var birdCountdown: Float = 1, birdTime: Float = -1, birdNotes = 0, birdPitch: Float = 3000
     private var birdPan: Float = 0, birdPhase: Float = 0
-    // 火山：很低的隆隆声（低通的棕噪声），偶尔一声闷响
-    private var quake: [Float] = [0, 0], quakeLow: [Float] = [0, 0], boomTime: Float = -1, boomCountdown: Float = 4
+    // 火山：火山口的低吼（带通噪声，中心 70~130 Hz 慢慢游动，音量一阵一阵）+ 偶尔一声闷响 + 稀疏的碎石噼啪
+    private var roarLow: [Float] = [0, 0], roarBand: [Float] = [0, 0], roarOut: [Float] = [0, 0], roarLFO: Float = 0
+    private var churn: Float = 0.7, churnTarget: Float = 0.7, churnCountdown: Float = 0
+    private var boomTime: Float = -1, boomCountdown: Float = 4, boomPhase: Float = 0, boomNoise: Float = 0, boomPan: Float = 0
+    private var crackleEnv: Float = 0, crackleBand: Float = 0, crackleLow: Float = 0, crackleFreq: Float = 1200
+    private var cracklePan: Float = 0
     // 雨
     private var rainHigh: [Float] = [0, 0], rainLast: [Float] = [0, 0]
     private var dropEnv: [Float] = [0, 0, 0, 0, 0, 0], dropPhase: [Float] = [0, 0, 0, 0, 0, 0]
@@ -386,22 +391,58 @@ final class JumpDSP: @unchecked Sendable {
                 }
             }
 
-            // ---- 火山的轰鸣 ----
+            // ---- 火山 ----
+            // 第一版是 80 Hz 以下的棕噪声乘 2.2：比海浪响 11 dB，五分之一的时间顶在限幅器上被压出毛刺（「呲」），
+            // 而头显的喇叭本来就放不出那么低的音，听到的几乎全是失真；闷响里还叠着没滤过的白噪声。
+            // 现在能量放在 60~300 Hz（喇叭放得出来），音量和海浪差不多，不碰限幅器
             if rumbleLevel > 0.01 {
+                // 低吼：带通噪声，中心频率慢慢游动，左右各一路噪声（包着你）
+                roarLFO += dt * 0.07
+                if roarLFO > 1 { roarLFO -= 1 }
+                let center = 100 + 30 * sin(2 * .pi * roarLFO)
+                let f = 2 * sin(Float.pi * center / sampleRate)
+                // 一阵一阵：每 1.5~4 秒换一个目标，1 秒左右滑过去
+                churnCountdown -= dt
+                if churnCountdown <= 0 { churnTarget = 0.45 + 0.55 * unit(); churnCountdown = 1.5 + 2.5 * unit() }
+                churn += (churnTarget - churn) * dt
+                // 带通的两侧还会漏出白噪声的高频（嘶嘶声），出口再过一道 400 Hz 的低通切掉
+                let smooth = 1 - exp(-2 * Float.pi * 400 / sampleRate)
                 for c in 0..<2 {
-                    quake[c] = quake[c] * 0.998 + white() * 0.03
-                    quakeLow[c] += (quake[c] - quakeLow[c]) * 0.01
-                    let s = quakeLow[c] * rumbleLevel * 2.2
+                    let high = white() - roarLow[c] - 1.1 * roarBand[c]
+                    roarBand[c] += f * high
+                    roarLow[c] += f * roarBand[c]
+                    roarOut[c] += (roarBand[c] + roarLow[c] * 0.15 - roarOut[c]) * smooth
+                    let s = roarOut[c] * churn * rumbleLevel * 2.6
                     if c == 0 { outL += s } else { outR += s }
                 }
+                // 闷响：52 Hz 往下滑一点，加一个二次谐波（喇叭听得到的是它）和低通过的噪声，8~16 秒一次
                 boomCountdown -= dt
-                if boomCountdown <= 0 { boomTime = 0; boomCountdown = 5 + 8 * unit() }
+                if boomCountdown <= 0, boomTime < 0 {
+                    boomTime = 0; boomCountdown = 8 + 8 * unit(); boomPan = white() * 0.5
+                }
                 if boomTime >= 0 {
-                    let boom = (sin(2 * .pi * 34 * boomTime) * 0.8 + white() * 0.3) * exp(-boomTime * 1.6)
-                        * min(boomTime / 0.08, 1) * rumbleLevel * 0.35
-                    outL += boom; outR += boom
+                    let freq = 52 * (1 - 0.2 * min(boomTime / 1.5, 1))
+                    boomPhase += 2 * .pi * freq * dt
+                    if boomPhase > 2 * .pi { boomPhase -= 2 * .pi }
+                    boomNoise += (white() - boomNoise) * (1 - exp(-2 * .pi * 180 / sampleRate))
+                    let env = min(boomTime / 0.06, 1) * exp(-boomTime * 2.2)
+                    let boom = (sin(boomPhase) * 0.5 + sin(2 * boomPhase) * 0.35 + boomNoise * 1.2) * env * rumbleLevel * 0.2
+                    outL += boom * (1 - boomPan); outR += boom * (1 + boomPan)
                     boomTime += dt
-                    if boomTime > 3 { boomTime = -1 }
+                    if boomTime > 2.5 { boomTime = -1 }
+                }
+                // 碎石、熔岩的噼啪：很短的带通「咔」，稀疏、随机左右，很轻
+                if crackleEnv < 0.001, unit() < 2.5 * dt * rumbleLevel {
+                    crackleEnv = 0.4 + 0.6 * unit(); crackleFreq = 700 + 1100 * unit(); cracklePan = white() * 0.8
+                }
+                if crackleEnv > 0.001 {
+                    let fc = 2 * sin(Float.pi * crackleFreq / sampleRate)
+                    let high = white() - crackleLow - 0.6 * crackleBand
+                    crackleBand += fc * high
+                    crackleLow += fc * crackleBand
+                    let pop = crackleBand * crackleEnv * rumbleLevel * 0.05
+                    outL += pop * (1 - cracklePan); outR += pop * (1 + cracklePan)
+                    crackleEnv *= exp(-dt / 0.012)
                 }
             }
 
