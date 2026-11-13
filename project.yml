@@ -45,3 +45,14 @@ targets:
         # 手套的法线贴图、材质贴图按原始数值读，不让 Xcode 把 PNG 改写成 iOS 专用格式
         COMPRESS_PNG_FILES: NO
         STRIP_PNG_TEXT: NO
+
+# 共享 scheme：Xcode Cloud 只认共享的 scheme（ci_scripts/ci_post_clone.sh 在云上生成工程）
+schemes:
+  Freefall:
+    build:
+      targets:
+        Freefall: all
+    run:
+      config: Debug
+    archive:
+      config: Release
