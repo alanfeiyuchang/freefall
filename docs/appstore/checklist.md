@@ -3,7 +3,8 @@
 > **2026-11-13 进度**：App Store Connect 里已建好 app「Freefall: Skydive」（Apple ID 6834571083，bundle ID com.feiyuchang.freefall，visionOS）。
 > 已上传 build 1.0 (1)（`tools/appstore/upload.sh`）；十种语言 + 墨西哥西语的名称、副标题、隐私政策网址、描述、关键词、推广文本、支持网址已填；
 > 类别 Games › Simulation + Sports；版权「2026 Feiyu Chang」；9 张 3840×2160 截图（7 张取自头显实录、2 张离屏渲染）；审核备注已填。
-> 还没做：选 build（Apple 还在处理）、App Motion Information、年龄分级、App 隐私问卷、价格与销售范围（去掉中国大陆）、内容版权、审核联系人信息，然后才能提交。
+> 之后又填了：内容版权（含第三方内容）、年龄分级（全部「无」）、App Motion（含高强度运动）、App 隐私（不收集数据，已发布）、价格免费、销售范围 174 个国家或地区（不含中国大陆），并选上了 build 1.0 (1)（加密 = 否）。
+> 还没做：审核联系人信息（姓名、电话、邮箱）、预览视频（已剪好 `build/appstore-upload/freefall-preview.mp4`，等你确认），然后点「Add for Review」提交。
 
 ✅ 已在 release 分支上做好 · ⬜ 还要做 · 🔶 要你决定 / 要你在 App Store Connect 或头显上操作
 
