@@ -24,6 +24,8 @@ enum MeshMaterial: Float {
     /// 裸金属（滚轮、钢索、管子、系留环、铰链）、地板（防滑涂层、拼缝、螺钉、系留环的凹坑、跳板的防滑棱和尾端警示条）、
     /// 黄黑警示条、舷窗玻璃（透出去是天）、红色尼龙编织带的座椅
     case quilt = 13, painted = 14, aluminum = 15, tread = 16, hazard = 17, window = 18, seat = 19
+    /// 换皮肤的两样（颜色在 shader 里按皮肤的图案现算，Skins.h）：伞衣（打光同 fabric）、跳伞服的袖子（打光同 webbing）
+    case canopy = 20, sleeve = 21
 }
 
 /// 和 v 垂直的一个单位向量

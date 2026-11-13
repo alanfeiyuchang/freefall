@@ -280,6 +280,13 @@ static inline float3 stageSunDirection(constant FrameUniforms &F) {
 constant bool revealConstant [[function_constant(10)]];
 constant bool revealActive = is_function_constant_defined(revealConstant) && revealConstant;
 
+// 这一关是哪一关（SCENE_*）：建管线时作为函数常量传进来（SceneRenderer.specialized；一个 SceneRenderer 只画一关）。
+// 地形着色、地形顶点、缓存烘焙、云的步进里到处是「if (scene == …)」：关卡号是常量时编译器把另外六关的分支整个删掉，
+// 着色器小了、占的寄存器少了，同时在跑的线程就多。没给（离屏工具里别的用法）就照旧按 uniform 里的关卡号走
+constant int sceneConstant [[function_constant(11)]];
+constant bool sceneKnown = is_function_constant_defined(sceneConstant);
+static inline int pickScene(int dynamicScene) { return sceneKnown ? sceneConstant : dynamicScene; }
+
 static inline float revealHash(float3 p) {
     p = fract(p * 0.1031f);
     p += dot(p, p.zyx + 31.32f);

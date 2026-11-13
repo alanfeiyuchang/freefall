@@ -349,14 +349,11 @@ final class CanopyCloth: @unchecked Sendable {
     var topCenter: SIMD3<Float> { toStage(positions[2 * Self.columns + Self.columns / 2]) }
 
     /// 网格：上表面、下表面、两侧翼尖封口。前缘不封（冲压翼伞的进气口），能看到气室里面。
-    /// 伞布颜色按气室条纹；position.w = 展向坐标（米）、normal.w = 弦向坐标（米），给 shader 画缝线。
+    /// position.w = 展向坐标（米）、normal.w = 弦向坐标（米），给 shader 画缝线和皮肤的图案。
+    /// 伞布的颜色不放在顶点里：shader 按皮肤（Skins.h 的 canopySkinAlbedo）按 uv 现算，伞的影子图也用同一个函数。
     func buildMesh(into out: inout [MeshVertex]) {
         let c = Self.columns, r = Self.rows
-        let palette: [SIMD3<Float>] = [
-            SIMD3(0.05, 0.10, 0.32), SIMD3(0.85, 0.22, 0.05), SIMD3(0.82, 0.82, 0.80),
-            SIMD3(0.85, 0.22, 0.05), SIMD3(0.82, 0.82, 0.80), SIMD3(0.85, 0.22, 0.05),
-            SIMD3(0.82, 0.82, 0.80), SIMD3(0.85, 0.22, 0.05), SIMD3(0.05, 0.10, 0.32),
-        ]
+        let color = SIMD3<Float>(1, 1, 1)
         var bottom = [SIMD3<Float>](repeating: .zero, count: positions.count)
         for k in 0..<positions.count { bottom[k] = bottomPoint(k) }
         func uv(_ k: Int) -> (Float, Float) {
@@ -366,7 +363,7 @@ final class CanopyCloth: @unchecked Sendable {
         func vertex(_ p: SIMD3<Float>, _ n: SIMD3<Float>, _ k: Int, _ color: SIMD3<Float>) {
             let (u, v) = uv(k)
             out.append(MeshVertex(position: SIMD4(toStage(p), u), normal: SIMD4(turn(n, by: yaw), v),
-                                  color: SIMD4(color, MeshMaterial.fabric.rawValue)))
+                                  color: SIMD4(color, MeshMaterial.canopy.rawValue)))
         }
         // 气室鼓起来：冲压翼伞是一格格充了气的气室，肋把上下两层布拉住，两道肋之间的布被气压顶得鼓出去
         // （上面鼓得多，下面少一点）。布料模拟的粒子只管伞衣整体的形状，这里按「在这一格里的位置」把每个点
@@ -396,7 +393,6 @@ final class CanopyCloth: @unchecked Sendable {
         for j in 0..<(r - 1) {
             for i in 0..<(c - 1) {
                 let cell = min(i / Self.columnsPerCell, Self.cells - 1)
-                let color = palette[cell]
                 let k00 = j * c + i, k10 = k00 + 1, k01 = k00 + c, k11 = k01 + 1
                 for top in [true, false] {
                     let a = puff(k00, cell: cell, top: top), b = puff(k10, cell: cell, top: top)
@@ -408,7 +404,6 @@ final class CanopyCloth: @unchecked Sendable {
         }
         // 翼尖封口
         for i in [0, c - 1] {
-            let color = palette[i == 0 ? 0 : Self.cells - 1]
             for j in 0..<(r - 1) {
                 let a = j * c + i, b = a + c
                 let side = normalize(positions[min(i + 1, c - 1) + j * c] - positions[max(i - 1, 0) + j * c])

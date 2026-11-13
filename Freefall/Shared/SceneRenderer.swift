@@ -65,10 +65,14 @@ final class SceneRenderer: @unchecked Sendable {
 
     let device: MTLDevice
     var settings = Settings()
+    /// 皮肤：伞衣、手套、袖子的颜色和图案（Skins.swift）。开场设一次，每帧原样传给 shader
+    var skin = SkinChoice().uniforms
     /// 这一关（地形、云层高度都按它；换关要新建一个 SceneRenderer）
     let scene: JumpScene
 
     let baseNoise: MTLTexture
+    /// 海浪的坡度用的：形状噪声沿 x、z 的差分（见 Freefall.metal 的 waveSlope）
+    let waveGradient: MTLTexture
     /// 地形细节层用的噪声：值加上预先算好的差分（见 Terrain.h 的 generateTerrainDetail）
     let terrainDetail: MTLTexture
     let detailNoise: MTLTexture
@@ -185,6 +189,8 @@ final class SceneRenderer: @unchecked Sendable {
             let constants = MTLFunctionConstantValues()
             var on = reveal
             constants.setConstantValue(&on, type: .bool, index: 10)
+            var sceneIndex = Int32(scene.rawValue)          // Common.h 的 sceneConstant：只编这一关的分支
+            constants.setConstantValue(&sceneIndex, type: .int, index: 11)
             return try library.makeFunction(name: name, constantValues: constants)
         }
         func function(_ name: String) throws -> MTLFunction { try specialized(name, reveal: false) }
@@ -230,6 +236,7 @@ final class SceneRenderer: @unchecked Sendable {
         // 云的步进还是取第 0 级
         baseNoise = texture(.type3D, .rgba8Unorm, 128, 128, 128, mipmapped: true)
         terrainDetail = texture(.type3D, .rgba16Unorm, 128, 128, 128, mipmapped: true)
+        waveGradient = texture(.type3D, .rg16Float, 128, 128, 128)
         detailNoise = texture(.type3D, .rgba8Unorm, 32, 32, 32)
         weather = texture(.type2D, .rgba8Unorm, 1024, 1024)
         cloudShadow = texture(.type2D, .r16Float, 2048, 2048)
@@ -258,7 +265,8 @@ final class SceneRenderer: @unchecked Sendable {
         resolvePipeline = try renderPipeline("skyVertex", "resolveFragment", colors: [colorFormat],
                                              depth: depthFormat, blend: false)
         playerShadow = try PlayerShadow(device: device, library: library)
-        terrainCache = try TerrainCache(device: device, library: library, enabled: scene.hasTerrain && scene != .sky)
+        terrainCache = try TerrainCache(device: device, library: library, enabled: scene.hasTerrain,
+                                        bakeFunction: scene.hasTerrain ? try function("bakeTerrainCache") : nil)
         terrainPipeline = try renderPipeline("terrainVertex", "terrainFragment", colors: [colorFormat],
                                              depth: depthFormat, blend: false)
         revealPipelines = (
@@ -419,9 +427,14 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setTexture(terrainDetail, index: 0)
         enc.setTexture(baseNoise, index: 1)
         dispatch(enc, try kernel("generateTerrainDetail"), MTLSize(width: 128, height: 128, depth: 128))
+        enc.setTexture(baseNoise, index: 0)
+        enc.setTexture(waveGradient, index: 1)
+        dispatch(enc, try kernel("generateWaveGradient"), MTLSize(width: 128, height: 128, depth: 128))
         enc.setTexture(detailNoise, index: 0)
         dispatch(enc, try kernel("generateDetailNoise"), MTLSize(width: 32, height: 32, depth: 32))
         enc.setTexture(weather, index: 0)
+        var sceneIndex = Int32(scene.rawValue)          // 每关的云不一样（Freefall.metal 的 weatherStyle）
+        enc.setBytes(&sceneIndex, length: MemoryLayout<Int32>.stride, index: 0)
         dispatch(enc, try kernel("generateWeather"), MTLSize(width: 1024, height: 1024, depth: 1))
 
         enc.setTexture(atoll, index: 0)
@@ -610,7 +623,7 @@ final class SceneRenderer: @unchecked Sendable {
         let sun = frame.sunDirection, heading = frame.heading
         let placement = playerShadow.encode(commandBuffer, objects: objects,
                                             sun: SIMD3(sun.x * heading.x - sun.z * heading.y, sun.y,
-                                                       sun.x * heading.y + sun.z * heading.x))
+                                                       sun.x * heading.y + sun.z * heading.x), skin: skin)
         frame.shadowU = placement.u
         frame.shadowV = placement.v
         frame.shadowCenters = placement.centers
@@ -627,7 +640,7 @@ final class SceneRenderer: @unchecked Sendable {
             terrainCache.update(commandBuffer, camera: SIMD2(Double(draw.uniforms.origin.z), Double(draw.uniforms.origin.w)),
                                 scene: scene, frame: frame, atmosphere: atmosphereConstants, noise: baseNoise,
                                 surfaceMap: surfaceMap, detail: terrainDetail, skySeaLUT: skySeaLUT,
-                                cloudShadow: cloudShadow, terrainShade: terrainShade)
+                                cloudShadow: cloudShadow, terrainShade: terrainShade, waveGradient: waveGradient)
             if settings.debugFlags & 8 == 0 {
                 frame.exposure.y = 1
                 terrainDepth = terrainDepthTexture(group: group, like: colorTexture, layers: max(viewCount, 1))
@@ -746,6 +759,15 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setViewports(viewports)
         amplify(enc)
 
+        // 开场实体化那几秒：飞机、装备、手套先画。这几秒的管线带 discard，GPU 的隐藏面剔除不起作用，
+        // 按原来的顺序（地形 → 天空 → 飞机），舱壁后面的地形和天空每个像素都完整算一遍再被舱壁盖掉；
+        // 舱壁先写了深度，后面的地形、天空在深度测试就被挡掉，不着色。不透明的东西先画后画，结果一样
+        // （绳子是半透明叠上去的，还在后面画）。实体化完成以后照旧：没有 discard，隐藏面剔除管这件事
+        let objectsFirst = revealing && settings.debugFlags & 32 == 0
+        if objectsFirst {
+            encodeObjects(enc, objects: objects, views: &views, frame: &frame, revealing: revealing, lines: false)
+        }
+
         // 地形先画（写深度），天空 pass 再按深度只填地形没盖住的像素
         if let terrainDraw {
             encodeTerrain(enc, terrainDraw, views: &views, frame: &frame, rateBuffer: rateBuffer,
@@ -765,6 +787,7 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setFragmentTexture(cloudShadow, index: 4)
         enc.setFragmentTexture(atoll, index: 5)
         enc.setFragmentTexture(baseNoise, index: 6)
+        enc.setFragmentTexture(waveGradient, index: 7)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
         // 瀑布：半透明，叠在浮岛和天空上面（片元的缓冲和贴图沿用上面天空 pass 绑的）
@@ -792,7 +815,7 @@ final class SceneRenderer: @unchecked Sendable {
         }
 
         if settings.debugFlags & 32 == 0 {
-            encodeObjects(enc, objects: objects, views: &views, frame: &frame, revealing: revealing)
+            encodeObjects(enc, objects: objects, views: &views, frame: &frame, revealing: revealing, opaque: !objectsFirst)
         }
 
         // 身边的雾团（在雨丝后面画：雨丝是叠加上去的亮线）
@@ -1023,6 +1046,7 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setFragmentBuffer(terrainCache.uniforms, offset: 0, index: 5)
         enc.setFragmentTexture(terrainCache.color, index: 9)
         enc.setFragmentTexture(terrainCache.info, index: 10)
+        enc.setFragmentTexture(waveGradient, index: 11)
         if draw.count > 0 {
             enc.drawIndexedPrimitives(type: .triangle, indexCount: patchIndexCount, indexType: .uint16,
                                       indexBuffer: patchIndices, indexBufferOffset: 0, instanceCount: draw.count)
@@ -1069,7 +1093,8 @@ final class SceneRenderer: @unchecked Sendable {
 
     /// 飞机、伞衣和伞绳、身上的装备、手腕上的表。都在天空和云之后画，正常做深度测试（真手按这个深度和画面合成）。
     private func encodeObjects(_ enc: MTLRenderCommandEncoder, objects: SceneObjects,
-                               views: inout [ViewUniforms], frame: inout FrameUniforms, revealing: Bool) {
+                               views: inout [ViewUniforms], frame: inout FrameUniforms, revealing: Bool,
+                               opaque: Bool = true, lines drawLines: Bool = true) {
         let viewCount = views.count
         let viewsLength = MemoryLayout<ViewUniforms>.stride * viewCount
         enc.setDepthStencilState(nearerDepth)
@@ -1077,6 +1102,8 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
         enc.setFragmentBuffer(atmosphereConstants, offset: 0, index: 2)
         enc.setFragmentTexture(skyViewLUT, index: 0)      // 金属、塑料反射的天空
+        var skin = skin                                   // 伞衣、袖子的图案和手套的颜色（objectFragment、gloveFragment 都读）
+        enc.setFragmentBytes(&skin, length: MemoryLayout<SkinUniforms>.stride, index: 4)
 
         func uniforms(_ model: simd_float4x4) -> ObjectUniforms {
             ObjectUniforms(model: model, params: SIMD4(objects.jumpLightGreen ? 1 : 0, objects.inCabin, objects.wetness, 0))
@@ -1091,6 +1118,7 @@ final class SceneRenderer: @unchecked Sendable {
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: count)
         }
 
+        if opaque {
         if let plane = objects.planeTransform { draw(planeMesh, count: planeVertexCount, model: plane) }
         if let model = objects.risersTransform { draw(risersMesh, count: risersVertexCount, model: model) }
 
@@ -1140,9 +1168,11 @@ final class SceneRenderer: @unchecked Sendable {
             }
         }
 
+        }
+
         // 绳子最后画（半透明的边，只测深度不写深度）
         let lines = objects.lines.prefix(Self.maxLines)
-        if !lines.isEmpty {
+        if drawLines, !lines.isEmpty {
             let buffer = lineBuffers[lineBufferIndex]
             lineBufferIndex = (lineBufferIndex + 1) % lineBuffers.count
             let pointer = buffer.contents().bindMemory(to: LineSegment.self, capacity: Self.maxLines)

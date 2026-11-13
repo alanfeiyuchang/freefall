@@ -29,6 +29,9 @@ final class HelmetHUD: @unchecked Sendable {
         var headingDeg: Float = 0
         /// 靶相对正前方的方向（度，正 = 偏右）和距离（米）
         var targetBearingDeg: Float?
+        /// 风从哪个方向来（相对飞行方向，度，正 = 右边）和多大（km/h）；没风是 nil
+        var windFromDeg: Float?
+        var windKmh = 0
         var targetDistance: Int?
         var groundSpeedKmh = 0
         var brakes = SIMD2<Float>(0, 0)
@@ -224,11 +227,12 @@ final class HelmetHUD: @unchecked Sendable {
     }
 
     /// 面板的底：很淡的暗色圆角矩形 + 一圈细边（y 向下的坐标）
-    private func plate(_ ctx: CGContext, _ rect: CGRect, h: Int) {
+    /// alpha：暗底有多不透明（落地时字常常压在白色伞布上，加深一些）
+    private func plate(_ ctx: CGContext, _ rect: CGRect, h: Int, alpha: CGFloat = 0.42) {
         let r = CGRect(x: rect.minX, y: CGFloat(h) - rect.maxY, width: rect.width, height: rect.height)
         let path = CGPath(roundedRect: r, cornerWidth: 22, cornerHeight: 22, transform: nil)
         ctx.addPath(path)
-        ctx.setFillColor(CGColor(red: 0.0, green: 0.025, blue: 0.05, alpha: 0.42))
+        ctx.setFillColor(CGColor(red: 0.0, green: 0.025, blue: 0.05, alpha: alpha))
         ctx.fillPath()
         ctx.addPath(path)
         ctx.setStrokeColor(CGColor(red: 0.42, green: 0.88, blue: 1.0, alpha: 0.22))
@@ -414,6 +418,22 @@ final class HelmetHUD: @unchecked Sendable {
                      h: h, color: Self.amber.copy(alpha: 0.7) ?? Self.amber, width: 2)
                 ctx.setLineDash(phase: 0, lengths: [])
                 text(ctx, "LZ", x: cx, y: cy - 12, size: 24, color: Self.amber, anchor: 0.5, tracking: 3, height: h)
+                // 风：罗盘圈里从上风那一侧往圈心指的青色箭头，圈里下方写风速
+                if let from = s.windFromDeg, s.windKmh > 0 {
+                    let wr = CGFloat(from) * .pi / 180
+                    let ox = cx + sin(wr) * (r - 14), oy = cy - cos(wr) * (r - 14)      // 箭尾（上风）
+                    let ix = cx + sin(wr) * (r - 58), iy = cy - cos(wr) * (r - 58)      // 箭头（往下风）
+                    line(ctx, ox, oy, ix, iy, h: h, color: Self.cyan, width: 3)
+                    let dx = ix - ox, dy = iy - oy, len = max(hypot(dx, dy), 1)
+                    let ux = dx / len, uy = dy / len
+                    ctx.setFillColor(Self.cyan)
+                    ctx.move(to: CGPoint(x: ix + ux * 10, y: CGFloat(h) - (iy + uy * 10)))
+                    ctx.addLine(to: CGPoint(x: ix - uy * 8, y: CGFloat(h) - (iy + ux * 8)))
+                    ctx.addLine(to: CGPoint(x: ix + uy * 8, y: CGFloat(h) - (iy - ux * 8)))
+                    ctx.fillPath()
+                    text(ctx, "WIND \(s.windKmh)", x: cx, y: cy + 66, size: 22, color: Self.cyan, anchor: 0.5,
+                         tracking: 2, height: h)
+                }
                 text(ctx, distance >= 1000 ? String(format: "%.1f KM", Float(distance) / 1000) : "\(distance) M",
                      x: cx, y: cy + 32, size: 40, color: Self.white, mono: true, anchor: 0.5, height: h)
             }
@@ -451,15 +471,18 @@ final class HelmetHUD: @unchecked Sendable {
     private func drawHint(_ texture: MTLTexture, _ s: State) {
         withContext(texture) { ctx, w, h in
             let accent = accent(s)
-            let lines = s.hint.split(separator: "\n").map(String.init)
+            var lines = s.hint.split(separator: "\n").map(String.init)
             guard !lines.isEmpty else { return }
-            // 两端一对括号，中间一行字（两行时上下排），背后垫一层暗底
+            // 两端一对括号，中间一行字（两三行时上下排），背后垫一层暗底。
+            // 三行只有落地时会有：结果、这一跳解锁的皮肤、怎么结束
             let promptLeft = s.hint == Self.barPrompt(left: true)        // 扶杆在左边（表戴在右手）：箭头朝左
             let prompt = s.hint == Self.barPrompt(left: false) || promptLeft
             let extra: CGFloat = prompt ? 120 : 0
-            func build(_ size: CGFloat) -> [(CTLine, CGFloat)] {
-                let font = CTFontCreateUIFontForLanguage(.emphasizedSystem, size, nil)!
-                return lines.prefix(2).enumerated().map { i, l in
+            func build(_ size: CGFloat) -> [(CTLine, CGFloat)] { build(lines, size) }
+            func build(_ lines: [String], _ size: CGFloat) -> [(CTLine, CGFloat)] {
+                // 字体按游戏里选的语言（汉字的字形：简中、繁中、日文各不一样）；跟随系统时是 nil
+                let font = CTFontCreateUIFontForLanguage(.emphasizedSystem, size, AppLanguage.code as CFString?)!
+                return lines.prefix(3).enumerated().map { i, l in
                     let attributes: [NSAttributedString.Key: Any] = [
                         NSAttributedString.Key(kCTFontAttributeName as String): font,
                         NSAttributedString.Key(kCTForegroundColorAttributeName as String): i == 0 ? Self.white : Self.cyan,
@@ -468,17 +491,28 @@ final class HelmetHUD: @unchecked Sendable {
                     return (line, CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil)))
                 }
             }
-            // 长的提示（伞下那句操作说明）按面板宽度缩字号，不然两头被裁掉
-            let size: CGFloat = lines.count > 1 ? 42 : 50
-            var built = build(size)
             let room = CGFloat(w) - 150 - extra * 2
+            // 太长的一行（德、法、意文常见）整块等比缩会缩到一半大小：还不满三行时，先在冒号（没有就分号）处把最长的那行折成两行
+            if lines.count < 3 {
+                let widths = build(lines, lines.count > 1 ? 42 : 50).map(\.1)
+                if let i = widths.indices.max(by: { widths[$0] < widths[$1] }), widths[i] * 0.75 > room,
+                   let r = ["：", ": ", " : ", "；", "; "].lazy.compactMap({ lines[i].range(of: $0) }).first {
+                    let head = String(lines[i][..<r.upperBound]).trimmingCharacters(in: .whitespaces)
+                    let tail = String(lines[i][r.upperBound...]).trimmingCharacters(in: .whitespaces)
+                    if !head.isEmpty, !tail.isEmpty { lines.replaceSubrange(i...i, with: [head, tail]) }
+                }
+            }
+            // 长的提示（伞下那句操作说明）按面板宽度缩字号，不然两头被裁掉
+            let size: CGFloat = lines.count > 2 ? 32 : lines.count > 1 ? 42 : 50
+            var built = build(size)
             if let widest = built.map(\.1).max(), widest > room { built = build(size * room / widest) }
             let half = (built.map(\.1).max() ?? 0) / 2 + 40
             let c = CGFloat(w) / 2
             plate(ctx, CGRect(x: c - half - 30 - (promptLeft ? extra : 0), y: 10, width: 2 * half + 60 + extra,
-                              height: CGFloat(h) - 20), h: h)
+                              height: CGFloat(h) - 20), h: h, alpha: s.phase == "LANDED" ? 0.7 : 0.42)
             for (i, (line, width)) in built.enumerated() {
-                let y = lines.count > 1 ? (i == 0 ? 68 : 124) : 94
+                // 三行：基线 46 / 84 / 122（底板在 10…140，第三行的下伸部分也在板里）
+                let y = lines.count > 2 ? 46 + 38 * i : lines.count > 1 ? (i == 0 ? 68 : 124) : 94
                 ctx.textPosition = CGPoint(x: (CGFloat(w) - width) / 2, y: CGFloat(h) - CGFloat(y))
                 CTLineDraw(line, ctx)
             }

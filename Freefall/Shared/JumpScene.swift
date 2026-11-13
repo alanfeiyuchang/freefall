@@ -62,6 +62,103 @@ enum JumpScene: Int, CaseIterable, Sendable, Identifiable {
     /// 靶在地面坐标里的位置
     var target: SIMD2<Double> { SIMD2(380, -620) }
 
+    /// 设计的开伞点在地面坐标里挪多少（米）。默认开伞点在 (0, -102)，靶在右前方 643 米：七关原来是同一道题，
+    /// 危险都离航线很远。靶挪不动（地形都是围着它摆的），挪开伞点，让这一关的危险落在要飞的路上：
+    /// - 草原：开伞点 (300, 150)，靶在正前方 770 米，照直飞的最后 400 米有四成是河和河边的林子——落短了掉河里、挂树上，
+    ///   高度又富余，得管住（俯冲或者左右来回转）
+    /// - 火山：开伞点 (-575, -675)，在火山锥上方、紧挨着烟柱（从出舱到地面这一整竖离烟柱都有 1.3 个半径以上），靶在右手边 960 米：
+    ///   开伞以后得马上往右飞离烟柱，往左偏几十米就进毒烟，开晚了飞不到
+    /// 高山、雪山试过（tools 里按地形搜过一遍）：靶前面整片是开阔的草甸 / 雪坡、谷壁挡不住直线，挪了也没有题，不动。
+    /// 环礁、海岛、天空之城本来就是「落短了掉水里 / 掉出岛外」
+    var openShift: SIMD2<Double> {
+        switch self {
+        case .grassland: SIMD2(300, 252)
+        case .volcano: SIMD2(-575, -573)
+        default: .zero
+        }
+    }
+
+    /// 出舱点在地面坐标里挪多少：设计的开伞点再往上风挪「出舱到手表报警这段被风吹走的距离」，
+    /// 按时报警开伞时正好还在设计的开伞点上（风每跳不一样，出舱点跟着变，像真的跳伞按当天的高空风定出舱点）
+    func exitShift(wind: SIMD2<Double>) -> SIMD2<Double> {
+        openShift - wind * JumpTimeline.freefallDuration(scene: self)
+    }
+
+    /// 从设计的开伞点飞向靶的方向（地面坐标的单位向量）：「逆风」「顺风」都是相对它说的
+    var approach: SIMD2<Double> {
+        let open = SIMD2<Double>(0, -102) + openShift
+        return simd_normalize(target - open)
+    }
+
+    /// 这一关的风可以是什么样（地面坐标，空气往哪边走）：
+    /// center 是风去的方向，spread 是左右最多偏多少（弧度，.pi = 哪个方向都行），bothWays 是 center 和反过来都行；
+    /// speed 风速范围（m/s）；maxHead 是逆风分量的上限（超了按比例把风速压下来，方向不变）——
+    /// 逆风太大时按时开伞也飞不到靶（render-check 的 wind 模式按每关的最坏情况用自动驾驶跳过）
+    struct WindRange {
+        var center: SIMD2<Double>
+        var spread: Double
+        var bothWays = false
+        var speed: ClosedRange<Double>
+        var maxHead: Double
+    }
+
+    /// 每关的风：
+    /// - 环礁：顺着风向袋（靶旁边那根，袋子朝 (0.8, 0.6) 飘）±20°，1~3 m/s。教学关，风小，风向袋也不会指错
+    /// - 草原：开阔的缓丘，哪个方向都行，0.5~4 m/s
+    /// - 草原逆风最多 2.5（4 m/s 逆风按时开伞也飞不到），雪山逆风最多 3（海拔高、谷底往靶那边是上坡）
+    /// - 高山、雪山：U 形谷里两边是两千多米的山墙，横风被挡住，风只顺着山谷走：上谷或下谷，±15°，1~4 m/s
+    /// - 海岛：四面是海，哪个方向都行，海风大一点 2~5 m/s，逆风最多 4
+    /// - 火山：0.5~2 m/s，从横风到斜着的顺风。这一关按时开伞离靶 960 米、一点富余都没有（无风时自动驾驶正好飞到），
+    ///   1 m/s 的逆风就差六七十米，所以不能有逆风；烟柱是固定往进场的反方向倒的（TerrainField.plumeDrift），
+    ///   真按烟柱定风就全是逆风。退一步：风的横向分量和烟柱倒的那一侧一致，顺风的那一点和烟柱对不上（要对上得让烟柱跟着风倒，另说）
+    /// - 天空之城：云海上空，哪个方向都行，0.5~3.5 m/s，逆风最多 3
+    var windRange: WindRange {
+        let valley = SIMD2<Double>(Double(TerrainField.valleyDir.x), Double(TerrainField.valleyDir.y))
+        let deg = Double.pi / 180
+        switch self {
+        case .atoll: return WindRange(center: simd_normalize(SIMD2(0.8, 0.6)), spread: 20 * deg, speed: 1...3, maxHead: 3)
+        case .grassland: return WindRange(center: approach, spread: .pi, speed: 0.5...3.5, maxHead: 2.5)
+        case .alpine: return WindRange(center: valley, spread: 15 * deg, bothWays: true, speed: 1...4, maxHead: 4)
+        case .snow: return WindRange(center: valley, spread: 15 * deg, bothWays: true, speed: 1...4, maxHead: 3)
+        case .island: return WindRange(center: approach, spread: .pi, speed: 2...5, maxHead: 4)
+        case .volcano:
+            // 进场线的左右两个垂直方向里取和烟柱倒向（TerrainField.plumeDrift）同一侧的那个，再往顺风偏 25°：
+            // 范围是「正横风」到「斜着 50° 的顺风」，一点逆风都不带
+            let drift = SIMD2<Double>(Double(TerrainField.plumeDrift.x), Double(TerrainField.plumeDrift.y))
+            var side = SIMD2(-approach.y, approach.x)
+            if simd_dot(side, drift) < 0 { side = -side }
+            let center = simd_normalize(side * cos(25 * deg) + approach * sin(25 * deg))
+            return WindRange(center: center, spread: 25 * deg, speed: 0.5...2, maxHead: 0.05)
+        case .sky: return WindRange(center: approach, spread: .pi, speed: 0.5...3.5, maxHead: 3)
+        }
+    }
+
+    /// 按范围里的 (方向 0…1, 风速 0…1, 上谷还是下谷) 取一个风
+    func wind(direction u: Double, speed v: Double, reversed: Bool = false) -> SIMD2<Double> {
+        let r = windRange
+        let a = (u * 2 - 1) * r.spread
+        var dir = SIMD2(r.center.x * cos(a) - r.center.y * sin(a), r.center.x * sin(a) + r.center.y * cos(a))
+        if r.bothWays, reversed { dir = -dir }
+        var w = dir * (r.speed.lowerBound + (r.speed.upperBound - r.speed.lowerBound) * v)
+        let head = -simd_dot(w, approach)
+        if head > r.maxHead { w *= r.maxHead / head }
+        return w
+    }
+
+    /// 这一跳的风：每次开跳抽一个
+    func randomWind() -> SIMD2<Double> {
+        wind(direction: Double.random(in: 0...1), speed: Double.random(in: 0...1), reversed: Bool.random())
+    }
+
+    /// 固定的风：render-check 的镜头、自动测试和调试用，每次一样（和原来写死的风一样：草原逆风 2.5、海岛左边横风 3.5，别的关没风）
+    var designWind: SIMD2<Double> {
+        switch self {
+        case .grassland: SIMD2(-0.26, 2.49)
+        case .island: SIMD2(2.84, 2.06)
+        default: .zero
+        }
+    }
+
     /// 着陆区（靶）的海拔：高度表按它归零
     var dzElevation: Double {
         switch self {

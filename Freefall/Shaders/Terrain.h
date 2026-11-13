@@ -101,7 +101,7 @@ vertex TerrainVertexOut terrainVertex(uint vid [[vertex_id]],
                                 texture2d<float> heightMap [[texture(0)]],
                                 texture2d<float> fineHeight [[texture(1)]]) {
     TerrainNode n = nodes[iid];
-    int scene = int(T.camera.w);
+    int scene = pickScene(int(T.camera.w));
     float cell = n.origin.z / float(TERRAIN_GRID);
     float2 g = float2(float(vid % (TERRAIN_GRID + 1)), float(vid / (TERRAIN_GRID + 1)));
     // 按到头的距离决定往粗一级的网格靠多少（morph）。这个距离必须和 CPU 选块（TerrainLOD.distance）用同一把尺：
@@ -156,7 +156,7 @@ vertex TerrainDepthOut terrainDepthVertex(uint vid [[vertex_id]],
                                  texture2d<float> heightMap [[texture(0)]],
                                 texture2d<float> fineHeight [[texture(1)]]) {
     TerrainNode n = nodes[iid];
-    int scene = int(T.camera.w);
+    int scene = pickScene(int(T.camera.w));
     float cell = n.origin.z / float(TERRAIN_GRID);
     float2 g = float2(float(vid % (TERRAIN_GRID + 1)), float(vid / (TERRAIN_GRID + 1)));
     float dist = length(float3(n.origin.xy + g * cell - T.origin.zw, T.lod.w));       // 和 terrainVertex 一样
@@ -194,9 +194,9 @@ struct Surface {
 /// pixel：一个像素在地上盖多大（米），环的边在一个像素宽里过渡（之前用屏幕导数 fwidth；烘焙缓存的 kernel 里没有导数）
 static inline float3 targetColor(float2 p, float3 under, float pixel, thread float &onTarget) {
     float r = length(p - LZ_TARGET);
-    float ring = fract(r / 4.0f);
     float aa = max(pixel * 1.2f / 4.0f, 1e-4f);
-    float stripe = smoothstep(0.5f - aa, 0.5f + aa, ring);
+    // 红、白各半圈，两条边都按到边的距离抗锯齿（之前白→红那条，fract 从 1 绕回 0 的地方，是硬边）
+    float stripe = smoothstep(-aa, aa, 0.25f - abs(fract(r / 4.0f - 0.25f) - 0.5f));
     float3 c = mix(TARGET_RED, TARGET_WHITE, stripe);
     c = mix(TARGET_YELLOW, c, smoothstep(3.0f - aa * 4.0f, 3.0f + aa * 4.0f, r));
     onTarget = smoothstep(20.0f + aa * 4.0f, 20.0f - aa * 4.0f, r);
@@ -599,11 +599,37 @@ static TerrainPoint terrainShadePoint(int scene, float2 p, float h, float3 norma
                                       constant FrameUniforms &F, constant AtmosphereConstants &A,
                                       texture2d<float> skySeaLUT, texture2d<float> cloudShadow,
                                       texture2d<float> terrainShade, texture3d<float> noise,
-                                      texture2d<float> surfaceMap, texture3d<float> detail) {
+                                      texture2d<float> surfaceMap, texture3d<float> detail, texture3d<float> waveGrad) {
     TerrainPoint o;
     o.sunFraction = 0.0f;
     o.live = false;
     float3 sunDir = F.sunDirection.xyz;
+    // 开阔的海（火山外面的海、海岛礁外的深海）：颜色只跟浪、太阳、影子有关，下面算的细节噪声、地面类型、
+    // 近处细节、树冠、靶全用不上（水的分支只要浪和影子）。直接算水，结果和走完整条路一样。
+    // 海岛看海的镜头几乎整屏都是这种像素，而水不进光照缓存，每个像素都要现算：之前每个都白算一遍陆地。
+    // 海岛只算礁外 25 米深、离礁边的白浪够远的（浪花 exp(-c²) 小于 1e-10）：那里水色是常数、没有珊瑚和白沫
+    if (!under && (scene == SCENE_VOLCANO || scene == SCENE_ISLAND) && h < (scene == SCENE_VOLCANO ? 0.5f : -25.0f)) {
+        // islandLand = 1 - |q| + 0.07 × 4 层 fbm（|fbm| ≤ 0.9375）：|q| > 1.22 时它一定 < -0.1534，c 一定 < -4.8，
+        // 不用算那 4 层噪声（礁外的开阔海面几乎都是这样）
+        float crestC = -100.0f;
+        if (scene == SCENE_ISLAND && length((valleyCoords(p) - ISLAND_CENTER) / ISLAND_AXES) <= 1.22f) {
+            crestC = (islandLand(p) + 0.115f) / 0.008f;
+        }
+        if (crestC < -4.8f) {
+            o.live = true;
+            float residual;
+            float2 slope = waveSlope(p, F.camera.y, footprint, waveGrad, residual);
+            float3 Nw = normalize(float3(-slope.x, 1.0f, -slope.y));
+            float3 waterAlbedo = scene == SCENE_ISLAND ? float3(0.006f, 0.022f, 0.03f) : float3(0.006f, 0.02f, 0.025f);
+            float shadeSun = terrainShade.sample(linearClamp, p / TERRAIN_MAP_SIZE + 0.5f, level(0)).r;
+            float2 cloudXZ = p - F.ground.yw - sunDir.xz * (h / max(sunDir.y, 0.05f));
+            float od = cloudShadow.sample(linearRepeat, cloudXZ / WEATHER_TILE + 0.5f, level(0)).r;
+            od *= smoothstep(300.0f, 650.0f, length(p - LZ_TARGET));
+            float3 sunVis = shadeSun * mix(0.24f, 1.0f, exp(-od * F.clouds.z * 0.5f)) * playerVis;
+            o.color = oceanShade(Nw, rd, sunDir, dot(sunVis, float3(0.3333f)), 0.006f + residual, waterAlbedo, A, skySeaLUT);
+            return o;
+        }
+    }
     // 格距以下的起伏：几个尺度的细节法线，越陡的地方（岩壁）起伏越大，越远越淡（免得闪）
     float3 N = normalize(normal);
     float3 geometric = N;          // 地面类型按几何法线判断（加了细节起伏的法线会把草地里零星的点判成岩石）
@@ -618,7 +644,6 @@ static TerrainPoint terrainShadePoint(int scene, float2 p, float h, float3 norma
         float fade = saturate(sc / (detailFoot * 7.0f) - 1.0f);
         if ((debugFlags & 256) != 0) fade = 0.0f;
         if (fade <= 0.0f) continue;
-        float e = sc * 0.15f;
         // 坐标先弯一下（几百米一个来回）：噪声贴图每 37 米重复一圈，不弯的话远处的岩壁、火山口壁上是一排排整齐的鱼鳞
         float2 w = p + sc * 0.45f * sin(p.yx * (0.42f / sc) + float2(0.0f, 1.7f));
         float lod = noiseLod(detailFoot, sc);
@@ -648,7 +673,8 @@ static TerrainPoint terrainShadePoint(int scene, float2 p, float h, float3 norma
                      + 3.0f * sin(dot(p, float2(0.0023f, -0.0037f)) + 1.3f * sin(dot(p, float2(0.0071f, 0.0049f))));
             float2 out2 = normalize(N.xz + 1e-4f);
             float k = wall * saturate(2.0f - footprint * 0.25f);
-            bump += float3(out2.x, 0.0f, out2.y) * ((0.15f * cos(ph) + 0.07f * cos(ph * 2.3f + 1.0f)) * k);
+            // 幅度原来 0.15 / 0.07：岩壁、火山口壁上一道道等距的横棱，像灯芯绒；压到三分之一，只剩淡淡的层理
+            bump += float3(out2.x, 0.0f, out2.y) * ((0.05f * cos(ph) + 0.03f * cos(ph * 2.3f + 1.0f)) * k);
         }
     }
     // 雪原：风吹出来的一道道雪纹（顺着风向的波纹），近处才有
@@ -814,7 +840,7 @@ static TerrainPoint terrainShadePoint(int scene, float2 p, float h, float3 norma
         // 河、湖、海：和环礁的海面一样的着色
         float residual;
         bool sea = scene == SCENE_VOLCANO || scene == SCENE_ISLAND;
-        float2 slope = waveSlope(p, F.camera.y, footprint, noise, residual) * (sea ? 1.0f : 0.35f);
+        float2 slope = waveSlope(p, F.camera.y, footprint, waveGrad, residual) * (sea ? 1.0f : 0.35f);
         float3 Nw = normalize(float3(-slope.x, 1.0f, -slope.y));
         float3 waterAlbedo = float3(0.006f, 0.02f, 0.025f);
         float foam = 0.0f;
@@ -952,26 +978,31 @@ static inline bool terrainCacheLookup(float2 p, float detailFoot, float2 camera,
     if (size < 8.0f) return false;
     float2 dc = abs(p - camera);
     float reach = max(dc.x, dc.y);
-    // 装得下这一点的最细的一层：各层的中心离相机最多偏三成半宽，先按最乐观的猜，再往粗的方向验证
-    int L = clamp(int(ceil(log2(max(reach / (0.65f * size * t0), 1.0f)))), 0, CACHE_LEVELS - 1);
-    float edge = 0.0f;
-    bool found = false;
-    for (int k = 0; k < 3 && L < CACHE_LEVELS; k++, L++) {
-        float4 lv = C.levels[L];
-        if (lv.w < 0.0f) return false;
-        float2 m = abs((p - lv.xy) / (lv.z * size) - 0.5f) * 2.0f;
-        float mm = max(m.x, m.y);
-        if (mm < 0.96f) {
-            edge = smoothstep(0.78f, 0.94f, mm);      // 快到这一层的边了：往粗一层过渡，层和层之间没有接缝
-            found = true;
-            break;
-        }
-    }
-    if (!found) return false;
+    // 用哪一层只看这一点离相机多远，是距离的连续函数：第 k 层在「离相机 0.62 × 它的半宽」以内一定装得下
+    // （各层的中心跟着相机走，重画完成前最多偏三成半宽），在到这个距离之前的一小段里往粗一层过渡。
+    // 第一版按每一层贴图自己的边界判断：这一层跟着相机重画完、中心跳到新位置的那一帧，边界整个挪一截，
+    // 原来在边界外面用粗一层的那一圈地面突然换成细的——戴上看是地面的纹理一圈一圈地跳
+    float x = log2(max(reach / (0.62f * 0.5f * size * t0), 1e-4f));
+    float base = max(ceil(x), 0.0f);
+    float contain = base + smoothstep(base - 0.35f, base, x);
     // 纹素和像素差不多大的那一层（远处、掠射角：像素盖得大，取粗的层，等于取 mip）
-    float lf = min(max(float(L) + edge, log2(max(detailFoot / t0, 1.0f))), float(CACHE_LEVELS - 1));
+    float lf = max(contain, log2(max(detailFoot / t0, 1.0f)));
+    if (lf > float(CACHE_LEVELS - 1)) {
+        if (contain > float(CACHE_LEVELS - 1)) return false;        // 出了最外一层
+        lf = float(CACHE_LEVELS - 1);
+    }
     int la = int(lf);
     float fr = lf - float(la);
+    // 保险：万一这一层重画得慢、真的没装下这一点，退到粗一层（正常走不到）
+    for (int k = 0; k < 2; k++) {
+        float4 lv = C.levels[la];
+        if (lv.w < 0.0f) return false;
+        float2 m = abs((p - lv.xy) / (lv.z * size) - 0.5f) * 2.0f;
+        if (max(m.x, m.y) < 0.985f) break;
+        la += 1;
+        fr = 0.0f;
+        if (la >= CACHE_LEVELS) return false;
+    }
     float4 a = C.levels[la];
     if (a.w < 0.0f) return false;
     float2 uva = (p - a.xy) / (a.z * size);
@@ -1011,6 +1042,7 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
                                 constant TerrainCacheUniforms &cache [[buffer(5)]],
                                 texture2d_array<float> cacheColor [[texture(9)]],
                                 texture2d_array<float> cacheInfo [[texture(10)]],
+                                texture3d<float> waveGrad [[texture(11)]],
                                 texture2d<float> canopyShadowMap [[texture(14)]],
                                 texture2d<float> bodyShadowMap [[texture(15)]]) {
 #ifdef PROFILE_TERRAIN_FLAT
@@ -1033,7 +1065,7 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
             return float4(g * g, 1.0f);
         }
     }
-    int scene = int(T.camera.w);
+    int scene = pickScene(int(T.camera.w));
     float3 eye = views[in.viewIndex].cameraPosition.xyz;
     float3 toPoint = in.stagePos - eye;
     float dist = max(length(toPoint), 0.01f);
@@ -1075,7 +1107,9 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
     // 取哪一层按像素在水平面上的投影挑（缓存是铺在水平面上的）：陡壁正对着看时，一个像素在水平方向只盖一小条，
     // 要取更细的层，不然岩壁上的纹理顺着坡被拉糊
     float cacheFoot = max(sqrt(pixelArea), 0.5f * detailFoot);
-    if (nearW < 1.0f && ((debugFlags & 4096) != 0 || under
+    // 海岛礁外的深海：水不进缓存，查了也是白查（离岸一百多米以外，缓存最粗一层的纹素也只有 16 米）
+    bool openSea = scene == SCENE_ISLAND && h < -25.0f && length((valleyCoords(p) - ISLAND_CENTER) / ISLAND_AXES) > 1.22f;
+    if (nearW < 1.0f && ((debugFlags & 4096) != 0 || under || openSea
                          || !terrainCacheLookup(p, cacheFoot, T.origin.zw, F.exposure.x, cache, cacheColor, cacheInfo,
                                                 cached, sunFraction))) {
         nearW = 1.0f;
@@ -1083,7 +1117,7 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
     float3 color = 0.0f;
     if (nearW > 0.0f) {
         color = terrainShadePoint(scene, p, h, in.normal, under, footprint, detailFoot, rd, playerVis, debugFlags, F, A,
-                                  skySeaLUT, cloudShadow, terrainShade, noise, surfaceMap, detail).color;
+                                  skySeaLUT, cloudShadow, terrainShade, noise, surfaceMap, detail, waveGrad).color;
     }
     if (nearW < 1.0f) color = mix(cached * mix(float3(1.0f), playerVis, sunFraction), color, nearW);
 
@@ -1221,7 +1255,14 @@ fragment float4 cityFragment(CityOut in [[stage_in]],
     float3 rd = rotateHeading(toPoint / dist, F.heading.x, F.heading.y);
     float3 sunDir = F.sunDirection.xyz;
     float3 N = normalize(in.normal);
-    if (dot(N, rd) > 0.0f) N = -N;
+    // 两面都画（没有背面剔除）。看的是哪一面按几何面定（屏幕导数的叉积，翻到朝着相机），不按插值法线：
+    // 以前「插值法线背着视线就整个翻面」，封闭的树冠轮廓上插值出来的法线略微背向视线，就翻成背光的黑，一圈黑点、头一动就闪；
+    // 按插值法线设个阈值又会让单面的叶子（棕榈）掠射看时在阈值那里成片明暗跳。定好面以后，略背向视线的只往视线那边掰回来一点
+    float3 Ng = cross(dfdx(in.world), dfdy(in.world));
+    if (dot(Ng, rd) > 0.0f) Ng = -Ng;
+    if (dot(N, Ng) < 0.0f) N = -N;
+    float facing = dot(N, rd);
+    if (facing > -0.02f) N = normalize(N - rd * (facing + 0.02f));
     float3 w = in.world;
     int material = int(in.color.a + 0.5f);
     float footprint = dist * 0.0011f;
@@ -1288,7 +1329,7 @@ fragment float4 cityFragment(CityOut in [[stage_in]],
     float3 Ls = stageSunDirection(F);
     float3 sunVis = canopyShadow(in.stagePos, Ls, F, canopyShadowMap) * bodyShadow(in.stagePos, Ls, F, bodyShadowMap);
     // 和脚下的地形吃同一份云影、山影（算法和 terrainFragment 一样）：不然云影里的林子上立着一排全亮的树
-    int sceneId = int(F.world.x + 0.5f);
+    int sceneId = pickScene(int(F.world.x + 0.5f));
     float ambientOcclusion = 1.0f;
     if (sceneId != SCENE_SKY) {
         float2 cloudXZ = w.xz - F.ground.yw - sunDir.xz * (w.y / max(sunDir.y, 0.05f));
@@ -1388,13 +1429,14 @@ kernel void bakeTerrainCache(texture2d_array<float, access::write> colorOut [[te
                              texture2d<float> skySeaLUT [[texture(5)]],
                              texture2d<float> cloudShadow [[texture(6)]],
                              texture2d<float> terrainShade [[texture(7)]],
+                             texture3d<float> waveGrad [[texture(8)]],
                              constant TerrainCacheBake &B [[buffer(0)]],
                              constant FrameUniforms &F [[buffer(1)]],
                              constant AtmosphereConstants &A [[buffer(2)]],
                              uint2 gid [[thread_position_in_grid]]) {
     uint2 texel = uint2(gid.x, gid.y + uint(B.rows.x));
     if (texel.x >= colorOut.get_width() || texel.y >= colorOut.get_height()) return;
-    int scene = B.rows.y;
+    int scene = pickScene(B.rows.y);
     float t = B.origin.z;
     uint slice = uint(B.origin.w);
     float2 p = B.origin.xy + (float2(texel) + 0.5f) * t;
@@ -1402,10 +1444,22 @@ kernel void bakeTerrainCache(texture2d_array<float, access::write> colorOut [[te
     // 那里网格一格约 11 t 米，顶点着色器按半格差分）。地面类型是按坡度卡阈值分的（林子、草甸、岩石）：
     // 间隔不一样，坡上这些边界的位置就和现算的对不上
     float e = max(t * 5.7f, 1.0f);
-    float h = terrainHeight(scene, p);
-    float3 N = normalize(float3(h - terrainHeight(scene, p + float2(e, 0.0f)), e, h - terrainHeight(scene, p + float2(0.0f, e))));
+    float h, hx, hz;
+    if (scene == SCENE_SKY) {
+        // 和 terrainVertex 一样：三个点都按最近的那座岛的顶面算（岛外 skyHeight 是 SKY_VOID，岛边的差分会变成悬崖：
+        // 天空之城开缓存以后岛边一圈深灰带锯齿的「岩唇」就是这么来的）
+        int island = int(skyNearest(valleyCoords(p)).y);
+        h = skySurface(p, island, false);
+        hx = skySurface(p + float2(e, 0.0f), island, false);
+        hz = skySurface(p + float2(0.0f, e), island, false);
+    } else {
+        h = terrainHeight(scene, p);
+        hx = terrainHeight(scene, p + float2(e, 0.0f));
+        hz = terrainHeight(scene, p + float2(0.0f, e));
+    }
+    float3 N = normalize(float3(h - hx, e, h - hz));
     TerrainPoint pt = terrainShadePoint(scene, p, h, N, false, t, t, float3(0.0f, -1.0f, 0.0f), float3(1.0f), 0, F, A,
-                                        skySeaLUT, cloudShadow, terrainShade, noise, surfaceMap, detail);
+                                        skySeaLUT, cloudShadow, terrainShade, noise, surfaceMap, detail, waveGrad);
     colorOut.write(float4(cacheEncode(pt.color, F.exposure.x), 1.0f), texel, slice);
     infoOut.write(float4(pt.live ? 1.0f : 0.0f, pt.sunFraction, 0.0f, 0.0f), texel, slice);
 }
