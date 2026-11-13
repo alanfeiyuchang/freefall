@@ -43,6 +43,8 @@ enum DebugOptions {
     case "undetermined": .refused(canAskAgain: true)
     default: nil
     }
+    /// -cleanView YES：不画头盔 HUD、提示条和前下方的高度表，只留画面（录预告片用）
+    static let cleanView = UserDefaults.standard.bool(forKey: "cleanView")
 #else
     static let autoEnter = false
     static let mute = false
@@ -57,6 +59,7 @@ enum DebugOptions {
     static let demoBullseye: JumpScene? = nil
     static let demoReplay: JumpScene? = nil
     static let demoHandAccess: HandAccess? = nil
+    static let cleanView = false
 #endif
 
     /// 叠在头部朝向上的旋转（只在模拟器里有用：那里的头不会动）

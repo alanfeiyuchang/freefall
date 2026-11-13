@@ -383,7 +383,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
         uniforms.placeAltimeter(feet: timeline.altitudeFeet, eyeHeight: eyeHeight, watchHand: watchHand,
                                 alarm: timeline.alarmLevel, gloved: gloves,
                                 go: timeline.phase == .cabin && timeline.greenLight)
-        if handsEnabled && watchHand == nil { uniforms.hudUp.w = 0 }
+        if (handsEnabled && watchHand == nil) || DebugOptions.cleanView { uniforms.hudUp.w = 0 }
         let objects = session.objects(layout: layout, hands: hands, watchOnLeft: watchOnLeft,
                                       gloves: gloves, head: head)
         var hudState = session.hudState
@@ -407,7 +407,7 @@ final class ImmersiveRenderer: @unchecked Sendable {
         hudState.gpuMs = shownGPU
         hudState.qualityLevel = qualityLevel
 #endif
-        let hudPanels = helmet.update(hudState, head: stageFromDevice)
+        let hudPanels = DebugOptions.cleanView ? [] : helmet.update(hudState, head: stageFromDevice)
         var hudDirty = helmet.dirty
         // 提示都在头盔 HUD 的下沿（HUD 关着时只有舱里开场的提示），老的浮动面板不用了
         panel.set("")
