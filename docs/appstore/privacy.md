@@ -24,7 +24,7 @@
   - 出处：<https://developer.apple.com/app-store/app-privacy-details/>、
     <https://developer.apple.com/help/app-store-connect/manage-app-information/manage-app-privacy/>
 - **Privacy Policy URL**：必填（Manage app privacy 页写的是 "A privacy policy URL is required for all apps"）。
-  现在还没有，见下面「支持页和隐私页」。
+  已发布：<https://alanfeiyuchang.github.io/freefall-support/privacy.html>。
 - **隐私清单** `Freefall/PrivacyInfo.xcprivacy`（release 分支已加，需要合回 master）：不追踪、不收集；
   声明 `NSPrivacyAccessedAPICategoryUserDefaults` / `CA92.1`（只读写本 app 自己的数据）。
   另外按 Wandless 的做法保守声明了 `NSPrivacyAccessedAPICategorySystemBootTime` / `35F9.1`（量 app 内两件事之间的间隔）：

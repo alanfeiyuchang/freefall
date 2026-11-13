@@ -1,5 +1,9 @@
 # Freefall — support site（草稿）
 
+> **已发布**（2026-11-13）：仓库 <https://github.com/alanfeiyuchang/freefall-support>，
+> 支持页 <https://alanfeiyuchang.github.io/freefall-support/>，隐私页 <https://alanfeiyuchang.github.io/freefall-support/privacy.html>。
+> 发布版里占位已经换成真实的邮箱、署名和日期；以后改页面直接改那个仓库，这里的草稿不再同步。
+
 App Store Connect 要的 Support URL 和 Privacy Policy URL。照 Wandless 的 `wandless-support` 做：
 静态 HTML、一个样式表、不用构建，放进一个单独的仓库用 GitHub Pages 发布。
 
