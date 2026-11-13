@@ -8,7 +8,8 @@ final class AppModel {
     static let shared = AppModel()
 
     var isFalling = false
-    /// 允许了手部追踪：用真手抓扶杆、拉开伞拉手、拉操纵环，高度表戴在手腕上（不允许就用捏合手势，高度表放在前下方）
+    /// 有手部追踪：用真手抓扶杆、拉开伞拉手、拉操纵环，高度表戴在手腕上。真机上没允许进不了跳伞（HandAccess）；
+    /// 只有模拟器是假的，那里自动驾驶，高度表放在前下方
     var handsAllowed = false
     /// 高度表戴在左手腕还是右手腕（记住上次的选择）
     var watchOnLeft: Bool = UserDefaults.standard.object(forKey: "watchOnLeft") as? Bool ?? true {

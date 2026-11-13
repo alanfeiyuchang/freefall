@@ -162,21 +162,51 @@ struct TrackMap: View {
                 ctx.fill(Path(ellipseIn: CGRect(x: p.x - 7, y: p.y - 7, width: 14, height: 14)),
                          with: .color(Color(red: 0.35, green: 0.75, blue: 1)))
             }
-            // 风：右上角一个箭头，指向空气走的方向（全程图才画）
-            if !zoom, simd_length(result.wind) >= 0.5 {
-                let dir = simd_normalize(result.wind)
-                let o = CGPoint(x: size.width - 30, y: 30)
-                let tip = CGPoint(x: o.x + CGFloat(dir.x) * 16, y: o.y + CGFloat(dir.y) * 16)
-                let tail = CGPoint(x: o.x - CGFloat(dir.x) * 16, y: o.y - CGFloat(dir.y) * 16)
-                let side = CGPoint(x: CGFloat(-dir.y) * 6, y: CGFloat(dir.x) * 6)
-                let back = CGPoint(x: tip.x - CGFloat(dir.x) * 9, y: tip.y - CGFloat(dir.y) * 9)
-                var arrow = Path()
-                arrow.move(to: tail); arrow.addLine(to: tip)
-                arrow.move(to: CGPoint(x: back.x + side.x, y: back.y + side.y)); arrow.addLine(to: tip)
-                arrow.addLine(to: CGPoint(x: back.x - side.x, y: back.y - side.y))
-                ctx.stroke(arrow, with: .color(.white.opacity(0.85)), style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                ctx.draw(Text(verbatim: "WIND").font(.caption2).foregroundStyle(.white.opacity(0.7)),
-                         at: CGPoint(x: o.x, y: o.y + 26))
+            // 风：右上角一个小罗盘，画法和头盔 HUD 的罗盘一样（全程图才画）。图是北朝上（地面 -z），所以罗盘不转；
+            // 青色箭头从上风那一侧的圈边指向圈心，风速写在圈下面。N E S W 写在圈外，免得箭头压住字母
+            if !zoom {
+                let cyan = Color(red: 0.37, green: 0.89, blue: 0.95)
+                let r: CGFloat = 24, pad: CGFloat = 17
+                let o = CGPoint(x: size.width - r - pad - 8, y: r + pad + 8)
+                ctx.fill(Path(ellipseIn: CGRect(x: o.x - r - pad, y: o.y - r - pad, width: 2 * (r + pad), height: 2 * (r + pad))),
+                         with: .color(.black.opacity(0.45)))
+                ctx.stroke(Path(ellipseIn: CGRect(x: o.x - r, y: o.y - r, width: 2 * r, height: 2 * r)),
+                           with: .color(cyan.opacity(0.45)), lineWidth: 1)
+                var ticks = Path()
+                for deg in stride(from: 0, to: 360, by: 30) {
+                    let a = CGFloat(deg) * .pi / 180, major = deg % 90 == 0
+                    let r0 = r - (major ? 6 : 3)
+                    ticks.move(to: CGPoint(x: o.x + sin(a) * r0, y: o.y - cos(a) * r0))
+                    ticks.addLine(to: CGPoint(x: o.x + sin(a) * r, y: o.y - cos(a) * r))
+                }
+                ctx.stroke(ticks, with: .color(cyan.opacity(0.8)), lineWidth: 1.2)
+                for (i, label) in ["N", "E", "S", "W"].enumerated() {
+                    let a = CGFloat(i) * .pi / 2
+                    ctx.draw(Text(verbatim: label).font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(i == 0 ? Color.orange : Color.white.opacity(0.85)),
+                             at: CGPoint(x: o.x + sin(a) * (r + 9), y: o.y - cos(a) * (r + 9)))
+                }
+                let kmh = Int((simd_length(result.wind) * 3.6).rounded())
+                if simd_length(result.wind) >= 0.5 {
+                    let from = -simd_normalize(result.wind)                      // 上风那一侧（屏幕坐标和地面 x、z 同向）
+                    let fx = CGFloat(from.x), fy = CGFloat(from.y)
+                    let tail = CGPoint(x: o.x + fx * (r - 3), y: o.y + fy * (r - 3))
+                    let head = CGPoint(x: o.x + fx * (r * 0.25), y: o.y + fy * (r * 0.25))
+                    var shaft = Path()
+                    shaft.move(to: tail); shaft.addLine(to: head)
+                    ctx.stroke(shaft, with: .color(cyan), style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    // 箭头：朝圈心（-from）
+                    let tip = CGPoint(x: head.x - fx * 6, y: head.y - fy * 6)
+                    var arrow = Path()
+                    arrow.move(to: tip)
+                    arrow.addLine(to: CGPoint(x: head.x - fy * 5, y: head.y + fx * 5))
+                    arrow.addLine(to: CGPoint(x: head.x + fy * 5, y: head.y - fx * 5))
+                    arrow.closeSubpath()
+                    ctx.fill(arrow, with: .color(cyan))
+                }
+                ctx.draw(Text(verbatim: kmh > 0 && simd_length(result.wind) >= 0.5 ? "WIND \(kmh) KM/H" : "CALM")
+                            .font(.system(size: 9, weight: .semibold).monospacedDigit()).foregroundStyle(cyan),
+                         at: CGPoint(x: o.x, y: o.y + r + pad + 10))
             }
             // 比例尺
             let barMeters: Float = zoom ? 10 : 100

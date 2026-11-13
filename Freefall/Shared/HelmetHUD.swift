@@ -41,8 +41,6 @@ final class HelmetHUD: @unchecked Sendable {
         var inCabin = false
         var greenLight = false
         var hint = ""
-        /// 开伞拉环在右小臂上（表戴在左手时）；否则在左小臂上
-        var ringOnRight = true
         /// 自由落体路上穿过了几个光环 / 一共几个（0 = 这一跳没有光环）
         var ringsPassed = 0
         var ringsTotal = 0
@@ -70,7 +68,7 @@ final class HelmetHUD: @unchecked Sendable {
     private static let sideYaw: Float = 17, sidePitch: Float = -6, hintPitch: Float = -15, hintPitchWithSides: Float = -17.5
     /// 开场握扶杆的提示（右边画一串往右跳的箭头，指向扶杆）
     static func barPrompt(left: Bool) -> String {
-        left ? String(localized: "伸出左手，握住左边的黄色扶杆") : String(localized: "伸出右手，握住右边的黄色扶杆")
+        left ? String(localized: "握住左边扶杆") : String(localized: "握住右边扶杆")
     }
 
     private var leftTextures: [MTLTexture] = [], rightTextures: [MTLTexture] = [], hintTextures: [MTLTexture] = []
@@ -331,7 +329,7 @@ final class HelmetHUD: @unchecked Sendable {
             ctx.addLine(to: CGPoint(x: tapeX - 30, y: CGFloat(h) - mid + 9))
             ctx.fillPath()
 
-            // 报警：PULL 一闪一闪，下面一行指向两只小臂上的拉环
+            // 报警：PULL 一闪一闪（拉哪只小臂的拉环，下沿提示条里有）
             if s.alarm > 0, s.phase == "FREEFALL" {
                 if blink {
                     ctx.setStrokeColor(a)
@@ -339,7 +337,6 @@ final class HelmetHUD: @unchecked Sendable {
                     ctx.stroke(CGRect(x: 40, y: CGFloat(h) - 474, width: 290, height: 114))
                     text(ctx, "PULL", x: 185, y: 452, size: 70, color: a, anchor: 0.5, tracking: 10, height: h)
                 }
-                text(ctx, s.ringOnRight ? String(localized: "右小臂上的拉环") : String(localized: "左小臂上的拉环"), x: 185, y: 520, size: 32, color: a, anchor: 0.5, height: h)
             } else {
                 text(ctx, "DEPLOY 3,500 FT", x: 40, y: 404, size: 24, color: Self.cyan, tracking: 2, height: h)
                 line(ctx, 40, 420, 330, 420, h: h, color: Self.cyanDim, width: 1)

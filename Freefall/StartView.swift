@@ -11,6 +11,8 @@ struct StartView: View {
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
 
     @Bindable private var model = AppModel.shared
     @State private var selection: Int?
@@ -20,6 +22,11 @@ struct StartView: View {
     @State private var showingSkins = false
     /// 上一跳的航线开着
     @State private var showingReplay = false
+    /// 手部追踪允许了没有：没允许时整个窗口点不了，弹出 HandAccessSheet 引导去允许（游戏只能用真手玩）
+    @State private var handAccess: HandAccess = .unknown
+
+    /// 窗口里的东西点不了：还没查到、或者没允许手部追踪
+    private var handsBlocked: Bool { handAccess != .granted }
 
     private let cardSize = CGSize(width: 264, height: 352)
 
@@ -41,9 +48,23 @@ struct StartView: View {
             }
         }
         .padding(.vertical, 28)
+        .disabled(handsBlocked)
         .ornament(attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
             settingsBar
                 .padding(.top, 18)
+                .disabled(handsBlocked)
+        }
+        // 没允许手部追踪：弹出来、关不掉，允许了才收起
+        .sheet(isPresented: Binding(get: { if case .refused = handAccess { true } else { false } }, set: { _ in })) {
+            HandAccessSheet(canAskAgain: handAccess == .refused(canAskAgain: true), ask: askForHands) {
+                if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+            }
+            .interactiveDismissDisabled()
+        }
+        // 从设置里回来：再查一次（改了也不会通知，只能自己看）
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { handAccess = await HandAccess.query() }
         }
         .sheet(isPresented: $showingSkins) {
             SkinPicker(model: model)
@@ -82,7 +103,10 @@ struct StartView: View {
             if let id, let scene = JumpScene(rawValue: id), scene != model.scene { model.scene = scene }
         }
         .task {
-            guard DebugOptions.autoEnter, !model.isFalling else { return }
+            // 第一次打开：系统自己的授权弹窗直接出来，不用先点什么；已经拒绝过的系统不会再问，就是 HandAccessSheet
+            handAccess = await HandAccess.query()
+            if handAccess == .refused(canAskAgain: true) { handAccess = await HandAccess.request() }
+            guard DebugOptions.autoEnter, !model.isFalling, handAccess == .granted else { return }
             await jump()
         }
     }
@@ -314,17 +338,18 @@ struct StartView: View {
         }
     }
 
+    /// HandAccessSheet 上的「允许访问」：系统还肯问的时候弹系统的授权
+    private func askForHands() {
+        Task { handAccess = await HandAccess.request() }
+    }
+
     private func jump() async {
         model.openWindow = openWindow
         model.dismissImmersiveSpace = dismissImmersiveSpace
-        // 手部追踪：第一次会弹授权。用来抓扶杆、拉伞、拉操纵环，把高度表戴在手腕上。
-        // 不允许也能玩：捏住手指抓扶杆、松开跳，报警后捏一下开伞，捏住往下拉转向
-        if HandTrackingProvider.isSupported {
-            let result = await ARKitSession().requestAuthorization(for: [.handTracking])
-            model.handsAllowed = result[.handTracking] == .allowed
-        } else {
-            model.handsAllowed = false
-        }
+        // 手部追踪：抓扶杆、拉伞、拉操纵环、点表都靠它，没允许进不来（handsBlocked）。
+        // 模拟器没有手部追踪（isSupported 是假），渲染器那边改成自动驾驶
+        guard handAccess == .granted else { return }
+        model.handsAllowed = HandTrackingProvider.isSupported
         model.realHandsHidden = false
         if case .opened = await openImmersiveSpace(id: Self.spaceID) {
             model.isFalling = true
@@ -332,6 +357,81 @@ struct StartView: View {
         } else {
             model.practice = false
         }
+    }
+}
+
+/// 手部追踪的授权。游戏只能用真手玩（没有捏合手势的备用操作），没允许就进不了跳伞
+enum HandAccess: Equatable {
+    /// 还没查
+    case unknown
+    case granted
+    /// canAskAgain：还没问过（或者问了没答），系统还会弹自己的授权；真的拒绝过以后系统不再问，只能去设置里打开
+    case refused(canAskAgain: Bool)
+
+    init(_ status: ARKitSession.AuthorizationStatus?) {
+        switch status {
+        case .allowed: self = .granted
+        case .denied: self = .refused(canAskAgain: false)
+        default: self = .refused(canAskAgain: true)
+        }
+    }
+
+    /// 现在的状态，不弹任何东西。模拟器没有手部追踪，算允许（渲染器那边自动驾驶）
+    static func query() async -> HandAccess {
+        if let demo = DebugOptions.demoHandAccess { return demo }
+        guard HandTrackingProvider.isSupported else { return .granted }
+        return HandAccess(await ARKitSession().queryAuthorization(for: [.handTracking])[.handTracking])
+    }
+
+    /// 问：还没答过就弹系统的授权；拒绝过的直接原样返回拒绝，什么都不弹
+    static func request() async -> HandAccess {
+        if let demo = DebugOptions.demoHandAccess { return demo == .refused(canAskAgain: true) ? .granted : demo }
+        guard HandTrackingProvider.isSupported else { return .granted }
+        return HandAccess(await ARKitSession().requestAuthorization(for: [.handTracking])[.handTracking])
+    }
+}
+
+/// 没允许手部追踪时盖在开始窗口上的弹窗（关不掉）：为什么要、一个按钮。
+/// 系统还肯问就是「允许访问」（弹系统的授权）；拒绝过就是「打开设置」，回来时开始窗口自己再查一次
+struct HandAccessSheet: View {
+    let canAskAgain: Bool
+    let ask: () -> Void
+    let openSettings: () -> Void
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "hand.raised.fill")
+                .font(.system(size: 56))
+                .foregroundStyle(.orange)
+            Text("Freefall 需要手部追踪")
+                .font(.title.weight(.bold))
+            Text("抓扶杆、拉开伞拉环、拉操纵环、点手腕上的表，都要用你自己的手。")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if canAskAgain {
+                Button(action: ask) {
+                    Label("允许访问", systemImage: "lock.open")
+                        .font(.title3.weight(.semibold))
+                        .padding(.vertical, 4)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+            } else {
+                Text("在设置里允许 Freefall 使用手部追踪，再回到这里。")
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(action: openSettings) {
+                    Label("打开设置", systemImage: "gear")
+                        .font(.title3.weight(.semibold))
+                        .padding(.vertical, 4)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+            }
+        }
+        .padding(40)
+        .frame(width: 520)
     }
 }
 

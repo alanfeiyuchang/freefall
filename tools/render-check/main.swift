@@ -293,7 +293,12 @@ func render(_ session: JumpSession, yaw: Float, pitch: Float, hands handPoses: [
     if env["FPS"] != nil { hudStateShot.fps = 90; hudStateShot.gpuMs = 6.4; hudStateShot.qualityLevel = 1 }
     // QUIT=1：提示条换成按住表退出的那一行（进度六成），看排版
     if env["QUIT"] != nil {
-        hudStateShot.hint = String(localized: "继续按住手表，退出这一跳") + "\n■■■■■■□□□□"
+        hudStateShot.hint = String(localized: "退出中") + "\n■■■■■■□□□□"
+        hudStateShot.hintBoot = 1
+    }
+    // HINT="第一行|第二行"：提示条换成这几行（| 换行），看改过的文字排出来什么样
+    if let hint = env["HINT"] {
+        hudStateShot.hint = hint.replacingOccurrences(of: "|", with: "\n")
         hudStateShot.hintBoot = 1
     }
     let hudPanels = env["NOHUD"] != nil ? [] : helmet.update(hudStateShot, head: headMatrix)
@@ -719,9 +724,9 @@ if mode == "skins" {
     expect(SkinChoice(defaults: defaults, unlocks: reloaded) == SkinChoice(), "没解锁的选择退回默认")
     defaults.removePersistentDomain(forName: suite)
     print("解锁：伞 \(u.canopies.map(\.key).sorted())  手套 \(u.gloves.map(\.key).sorted())")
-    // 落地提示里的那几行（开跳时什么都没解锁）。HUD 的提示条最多画三行：结果 + 皮肤 + 「捏一下手指结束」不能超过三行
+    // 落地提示里的那几行（开跳时什么都没解锁）。HUD 的提示条最多画三行：结果 + 皮肤 + 「点手表结束」不能超过三行
     for outcome: JumpTimeline.Outcome in [.bullseye, .inTarget, .missed, .crashed] {
-        let s = JumpSession(timeline: JumpTimeline(scene: .atoll), realHands: false, autopilot: nil)
+        let s = JumpSession(timeline: JumpTimeline(scene: .atoll), realHands: true, autopilot: nil)
         let lines = s.skinLines(for: outcome)
         print("  \(outcome)：", lines)
         expect(1 + lines.count + 1 <= 3, "\(outcome) 落地提示超过三行")
@@ -978,15 +983,19 @@ if mode == "hands" || mode == "all" {
     step(0.6) { [] }
     print("  0.6 秒后：\(s.timeline.isOver ? "结束了，回开始窗口" : "还没结束")；成绩 \(s.jumpResult.map { $0.summary } ?? "没有（不算）")")
 
-    // 没有手部追踪：两只手一起捏住不动两秒退出
-    let p = JumpSession(timeline: JumpTimeline(freefallFrom: 3000, scene: jumpScene), realHands: false, autopilot: nil)
-    p.setEyeHeight(eyeHeight)
-    let still = [PinchState.Touch(isLeft: true, startY: 1), PinchState.Touch(isLeft: false, startY: 1)]
-    var held = 0.0
-    while held < 1.0 { p.step(dt: 1.0 / 90, hands: [], touches: still, layout: layout); held += 1.0 / 90 }
-    print("  捏合：两只手捏住 1 秒 →「\(p.hudHint.replacingOccurrences(of: "\n", with: " / "))」退出 \(p.timeline.quitting)")
-    while held < 2.1 { p.step(dt: 1.0 / 90, hands: [], touches: still, layout: layout); held += 1.0 / 90 }
-    print("  捏合：两只手捏住 2.1 秒 → 退出 \(p.timeline.quitting)")
+    // 落地以后点一下表：直接结束（不点 10 秒后自己结束）
+    let q = autoSession(from: JumpTimeline(scene: jumpScene), deployFeet: 3000)
+    run(q) { $0.phase == .landed }
+    q.autopilot = nil
+    let landedFace = SceneObjects.watchPlacement(canopyWatch, gloved: q.gloved).0
+    for _ in 0..<30 { q.step(dt: 1.0 / 90, hands: [canopyWatch, pointing(at: landedFace + SIMD3(0, 0.12, 0))], layout: layout) }
+    let before = q.hint.replacingOccurrences(of: "\n", with: " / ")
+    for _ in 0..<30 { q.step(dt: 1.0 / 90, hands: [canopyWatch, pointing(at: landedFace)], layout: layout) }
+    let tapped = q.timeline.fadeTime != nil
+    var waited = 0.0
+    while !q.timeline.isOver, waited < 9 { q.step(dt: 1.0 / 90, hands: [canopyWatch], layout: layout); waited += 1.0 / 90 }
+    print("  落地「\(before)」→ 点表：\(tapped ? "开始变暗" : "没反应")，\(q.timeline.isOver ? "结束了" : "还没结束")（落地后 \(String(format: "%.1f", q.timeline.time - (q.timeline.landedTime ?? 0))) 秒；不点要 \(Int(JumpTimeline.landedHold)) 秒多）")
+    if !(tapped && q.timeline.isOver) { print("  ✗ 落地后点表没有结束这一跳") }
 }
 
 if mode == "seq" || mode == "all" {
@@ -1135,7 +1144,7 @@ if mode == "perf" || mode == "all" {
     var hudStateTest = HelmetHUD.State()
     hudStateTest.boot = 1
     hudStateTest.hintBoot = 1
-    hudStateTest.hint = "开伞！\n用另一只手抓住小臂上的红色拉环，往外拉"
+    hudStateTest.hint = "开伞！拉右小臂红环"
     hudStateTest.altitudeFeet = 3300
     hudStateTest.alarm = 1
     hudStateTest.targetBearingDeg = 20

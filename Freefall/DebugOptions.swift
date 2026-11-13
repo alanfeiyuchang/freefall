@@ -15,6 +15,8 @@ import simd
 /// - `-showSkins YES`：开始窗口一打开就弹出皮肤页（`-skinsTab 1` 停在手套和袖子那一组）
 /// - `-demoBullseye <0~6>`：假装刚在这一关落进靶心（开始窗口里显示结果和新解锁的皮肤，会真的解锁）
 /// - `-demoReplay <0~6>`：开始窗口一打开就在 CPU 上用自动驾驶跳这一关一次（`-autoDeploy` 英尺开伞），打开航线页
+/// - `-demoHandAccess denied|undetermined`：假装手部追踪被拒绝了 / 还没问过，看开始窗口上的引导弹窗（模拟器本来没有手部追踪，算允许）
+/// - 模拟器里没有手部追踪，跳下去一律自动驾驶（不用另给 `-autopilot`）
 /// - 解锁状态存在 UserDefaults 的 `unlockedCanopies` / `unlockedGloves`（关的编号数组），
 ///   截图时可以直接给：`-unlockedCanopies '(0,1,4)'`
 enum DebugOptions {
@@ -36,6 +38,11 @@ enum DebugOptions {
         ? JumpScene(rawValue: UserDefaults.standard.integer(forKey: "demoBullseye")) : nil
     static let demoReplay: JumpScene? = UserDefaults.standard.object(forKey: "demoReplay") != nil
         ? JumpScene(rawValue: UserDefaults.standard.integer(forKey: "demoReplay")) : nil
+    static let demoHandAccess: HandAccess? = switch UserDefaults.standard.string(forKey: "demoHandAccess") {
+    case "denied": .refused(canAskAgain: false)
+    case "undetermined": .refused(canAskAgain: true)
+    default: nil
+    }
 #else
     static let autoEnter = false
     static let mute = false
@@ -49,6 +56,7 @@ enum DebugOptions {
     static let skinsTab = 0
     static let demoBullseye: JumpScene? = nil
     static let demoReplay: JumpScene? = nil
+    static let demoHandAccess: HandAccess? = nil
 #endif
 
     /// 叠在头部朝向上的旋转（只在模拟器里有用：那里的头不会动）

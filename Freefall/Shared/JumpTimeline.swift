@@ -310,7 +310,7 @@ struct JumpTimeline {
         nextRing = 0
     }
 
-    /// 落地以后捏一下手指：提前结束
+    /// 落地以后点一下手表：提前结束
     mutating func requestEnd() {
         if phase == .landed, fadeTime == nil { fadeTime = time }
     }
