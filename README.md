@@ -8,7 +8,13 @@ Apple Vision Pro 上的第一人称高空跳伞小游戏：从一万八千英尺
 手套是苹果示例代码里的手套模型（MIT 式许可），换成了跳伞配色，跟着你的真手动；用真手抓扶杆、拉开伞拉手、拉操纵环，
 高度表戴在手腕上（左右手开始窗口里选）；点一下手表，头盔里像钢铁侠那样的 HUD 出现在视野两侧。
 
-![预览](docs/preview-contact.jpg)
+![一跳：抓杆、飞机长出来、出舱、拉伞、飞向靶、落进靶心](docs/media/freefall.gif)
+
+> ☕ **喜欢的话，欢迎[打赏开发者](https://alanfeiyuchang.github.io/freefall-support/donate.html)**（微信支付 / Venmo）——完全自愿，不解锁任何东西。
+
+![头显上录的画面：房间里握住扶杆、自由落体、开伞、伞下飞向环礁、靶心、落地](docs/media/stills.jpg)
+
+<sub>以上都是在 Apple Vision Pro 上实录的画面（环礁关）。</sub>
 
 ## 怎么玩（一跳约 4 分钟）
 
