@@ -8,12 +8,13 @@ OUT=$(cd "$(dirname "$0")/../../.." && pwd)/build/trailer-mix
 TITLE=$OUT/title.png
 MUSIC=$1; MS=$2; NAME=$3
 W=3840; H=2160
-# 段：dev:起:止:倍速  或  sim:文件:起:秒数:倍速
-SEGS="dev:6.4:10.0:1.8 dev:18.5:23.0:1 dev:90.8:93.8:1 sim:s0_atoll_canopy:14:2.4:2 sim:s1_grassland_canopy:30:2.4:2 sim:s2_alpine_canopy:32:2.4:2 sim:s5_volcano_down60:28:2.4:2 sim:s6_sky_canopy:22:2.4:2 dev:203.0:210.5:1 dev:211.5:214.5:1"
+# 段：dev:起:止:倍速（devd = 同时用插值抹掉开场的提示条）  或  sim:文件:起:秒数:倍速
+SEGS="devd:5.7:7.2:1 dev:9.3:10.6:1 dev:18.5:23.0:1 dev:90.8:93.8:1 sim:s0_atoll_canopy:14:2.4:2 sim:s1_grassland_canopy:30:2.4:2 sim:s2_alpine_canopy:32:2.4:2 sim:s5_volcano_down60:28:2.4:2 sim:s6_sky_canopy:22:2.4:2 dev:203.0:210.5:1 dev:211.5:214.5:1"
 inputs=(-i "$V"); fc=""; vc=""; ac=""; n=0; k=1; total=0; windpos=150
 for s in $SEGS; do IFS=: read typ a b c d <<< "$s"
-  if [ $typ = dev ]; then st=$a; en=$b; sp=$c; len=$(python3 -c "print(round(($en-$st)/$sp,3))")
-    fc="${fc}[0:v]trim=$st:$en,setpts=(PTS-STARTPTS)/$sp,fps=30,scale=$W:$H:flags=lanczos,setsar=1[v$n];[0:a]atrim=$st:$en,asetpts=PTS-STARTPTS,atempo=$sp,aresample=48000,afade=t=in:d=0.06,afade=t=out:st=$(python3 -c "print(round($len-0.08,3))"):d=0.08[a$n];"
+  if [ $typ = dev ] || [ $typ = devd ]; then st=$a; en=$b; sp=$c; len=$(python3 -c "print(round(($en-$st)/$sp,3))")
+    dl=""; [ $typ = devd ] && dl="delogo=x=732:y=754:w=582:h=102:enable='lt(t,6.45)',"
+    fc="${fc}[0:v]trim=$st:$en,${dl}setpts=(PTS-STARTPTS)/$sp,fps=30,scale=$W:$H:flags=lanczos,setsar=1[v$n];[0:a]atrim=$st:$en,asetpts=PTS-STARTPTS,atempo=$sp,aresample=48000,afade=t=in:d=0.06,afade=t=out:st=$(python3 -c "print(round($len-0.08,3))"):d=0.08[a$n];"
   else f=$a; st=$b; du=$c; sp=$d; len=$(python3 -c "print(round($du/$sp,3))"); inputs+=(-ss $st -t $du -i "$T/$f.mov")
     fc="${fc}[$k:v]setpts=(PTS-STARTPTS)/$sp,fps=30,scale=$W:$H:flags=lanczos,setsar=1[v$n];[0:a]atrim=$windpos:$(python3 -c "print($windpos+$len)"),asetpts=PTS-STARTPTS,aresample=48000,afade=t=in:d=0.06,afade=t=out:st=$(python3 -c "print(round($len-0.08,3))"):d=0.08[a$n];"
     k=$((k+1)); windpos=$(python3 -c "print($windpos+$len)"); fi
