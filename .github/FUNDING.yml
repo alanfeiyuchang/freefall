@@ -1,8 +1,5 @@
-# GitHub 的「Sponsor」按钮（仓库公开以后显示在仓库主页上）。
-# 草稿：填好再取消注释。custom 最多 4 个链接，必须是 URL。
-# 微信收款码不是网址：把二维码图片放到 freefall-support 网站上（比如 support-site 的 donate.html），这里填那个页面的网址。
-#
-# github: alanfeiyuchang          # 开通 GitHub Sponsors 以后才填
-# custom:
-#   - https://venmo.com/u/<你的 Venmo 用户名>
-#   - https://alanfeiyuchang.github.io/freefall-support/donate.html
+# GitHub 仓库主页的「Sponsor」按钮（仓库公开以后才显示）。
+# 打赏页在 freefall-support 网站上（微信支付、Venmo），只从这里和 README 链过去，游戏里不链（App Store 审核指南 3.1.1）。
+custom:
+  - https://alanfeiyuchang.github.io/freefall-support/donate.html
+  - https://venmo.com/u/alanfeiyuchang

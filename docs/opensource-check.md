@@ -61,7 +61,7 @@
      第三方素材只收 CC0 / CC BY / MIT 这类宽松许可。给想做新场景的人的说明在 `docs/adding-a-scene.md`。
 2. **名字和图标**：`LICENSE` 开头写明「Freefall」这个名字和应用图标完全不授权。
 3. **要不要把 `docs/appstore/` 一起公开**：里面是上架文案、审核备注、隐私问卷答案，公开没有坏处（不少开源 app 也这么做），但也可以只留在私有分支里。
-4. **打赏**：`.github/FUNDING.yml` 是全部注释掉的草稿，要你填 Venmo 用户名再打开。微信收款码不是网址，建议放到 freefall-support 网站上一个打赏页，这里链过去。
+4. **打赏**：打赏页 <https://alanfeiyuchang.github.io/freefall-support/donate.html>（微信支付、Venmo；Zelle 码里带完整手机号，没放）。`.github/FUNDING.yml` 已填好这一页和 Venmo 链接。支持页、隐私页都不链到打赏页（游戏里的链接打开的是这两页）。
    按上一轮说的：**app 里和商店页面不要放打赏的引导**。
 
 ## 4. 公开的步骤（每一步都要你点头）
