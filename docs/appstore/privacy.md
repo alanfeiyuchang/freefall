@@ -42,7 +42,7 @@
 | ~~`NSLocalNetworkUsageDescription`~~ | 性能测试发回开发用 Mac | release 分支已删 |
 
 - `project.yml` 里写的是简体中文原文，十种语言都由 `InfoPlist.xcstrings` 覆盖（编出来的包里每个 `.lproj/InfoPlist.strings` 都有这两条）；系统语言不在十种里时显示英文（`CFBundleDevelopmentRegion` 是 en）。
-- 不允许手部追踪时游戏仍能玩（改用捏合手势），审核员拒绝授权也能走完一跳。
+- **游戏只能用真手玩**（master 98202da 起删掉了捏合手势的备用操作）：没允许手部追踪时，开始窗口盖一个关不掉的引导（「允许访问」或「打开设置」），进不了跳伞。审核员如果拒绝授权，要去设置里打开才能玩——审核备注里写明了。
 
 ## 应用内必须能找到隐私政策（缺口，需要改代码）
 
@@ -71,8 +71,8 @@ App Store Connect 要 Support URL 和 Privacy Policy URL。Wandless 用的是一
 >
 > **Hand tracking.** With your permission, Freefall reads the positions of your hands and fingers through Apple's ARKit so
 > you can grab the bar, pull the handle and the toggles, and wear the altimeter on your wrist. This happens on your Apple
-> Vision Pro, frame by frame, in memory. Hand data is never recorded, stored or transmitted. If you don't allow hand
-> tracking, you can play with pinch gestures instead.
+> Vision Pro, frame by frame, in memory. Hand data is never recorded, stored or transmitted. Freefall is played with
+> your own hands, so it needs hand tracking to play.
 >
 > **Head position.** The game uses the position and direction of your head, provided by visionOS, to place the plane, the
 > canopy and the helmet display around you. It is used only while you play and is never stored or transmitted.
@@ -104,7 +104,7 @@ App Store Connect 要 Support URL 和 Privacy Policy URL。Wandless 用的是一
 > 你在游戏里做的任何事都不会离开你的设备。
 >
 > **手部追踪**：经你允许后，游戏通过 Apple 的 ARKit 读取双手和手指的位置，让你能抓扶杆、拉开伞拉手和操纵环，并把高度表戴在手腕上。
-> 这些都在你的 Apple Vision Pro 上逐帧在内存中完成，手部数据不会被记录、存储或传输。不允许手部追踪时，可以改用捏合手势来玩。
+> 这些都在你的 Apple Vision Pro 上逐帧在内存中完成，手部数据不会被记录、存储或传输。游戏要用你自己的手来玩，所以需要允许手部追踪才能玩。
 >
 > **头部位置**：游戏使用 visionOS 提供的头部位置和朝向，把飞机、降落伞和头盔显示摆在你周围。只在游玩时使用，不会被存储或传输。
 >

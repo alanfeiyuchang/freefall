@@ -53,15 +53,15 @@ App Store Connect 的 visionOS 版本页有 **App Motion Information**（"Contai
 Freefall is a first-person skydiving game. It is fully offline: no account, no network access, no in-app purchases, no ads.
 
 HOW TO PLAY (about 4 minutes per jump)
-1. In the start window, swipe the cards to pick a world (Atoll is the easiest) and tap Jump. Allow hand tracking when asked.
+1. Hand tracking is required: the game is played only with your real hands. On first launch the start window asks for it ("Allow access"); if it was denied, the window shows "Open Settings" — allow hand tracking for Freefall there and come back. Then swipe the cards to pick a world (Atoll is the easiest) and tap Jump.
 2. You start in your own room (mixed immersion). Reach out with one hand and grab the glowing yellow bar to your right (make a fist or pinch). The plane grows around you; this takes about 5 seconds.
 3. When the jump light above the door turns green, let go of the bar. You slide out of the plane and start falling.
 4. The altimeter is on your wrist (left by default). When it alarms at 3,500 ft, use the watch hand to grab the red handle on your other forearm, near the wrist, and pull it outward about 13 cm (5 in). The canopy opens.
 5. Under canopy, turn your head and body to steer; the canopy follows you. Grab the yellow toggles on either side of your head and pull both down to slow down. Fly to the red-and-white circle on the ground and land in it to win.
 6. Tap the watch with your other hand's index finger to show or hide the helmet HUD (altitude, heading, landing spot). Hold the watch for 2 seconds to quit a jump at any time. Pressing the Digital Crown also exits.
 
-WITHOUT HAND TRACKING
-If hand tracking is not allowed, the game uses system pinch gestures instead: pinch and hold = hold the bar, release = jump, pinch after the alarm = open the canopy, pinch with the left/right hand and pull down = pull that toggle.
+AFTER LANDING
+Tap the watch to finish the jump and return to the start window.
 
 SPACE AND COMFORT
 - Please play seated (a swivel chair is ideal). No walking is needed; the play area is within arm's reach.
