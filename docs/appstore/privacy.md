@@ -56,7 +56,7 @@
 ## 支持页和隐私页（缺口，需要你决定）
 
 App Store Connect 要 Support URL 和 Privacy Policy URL。Wandless 用的是一个单独的 GitHub Pages 仓库（`wandless-support`：
-`index.html` 支持页 + `privacy.html` 隐私页，中英两种语言）。Freefall 可以照做一个 `freefall-support`，内容用下面的草稿。
+`index.html` 支持页 + `privacy.html` 隐私页，中英两种语言）。Freefall 的草稿已经做好，在 [support-site/](support-site/)（`index.html` 支持页含致谢、`privacy.html` 隐私页），内容就是下面的草稿。
 建仓库、开 Pages、推送都是对外发布的动作，要你点头再做；里面的联系邮箱由你自己填（文档里一律写 `<联系邮箱>`）。
 
 ## 隐私政策草稿

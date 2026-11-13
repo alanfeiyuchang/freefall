@@ -10,6 +10,7 @@
 | [privacy.md](privacy.md) | 代码核查结论、App 隐私问卷怎么答、隐私清单、两条权限说明、隐私政策草稿（中英） |
 | [review-and-rating.md](review-and-rating.md) | 类别、年龄分级问卷、App Motion Information、审核备注（英文，可直接粘贴） |
 | [screenshots.md](screenshots.md) | 截图和预览视频的规格、拍摄清单、每张配的文案、离屏渲染的候选图 |
+| [support-site/](support-site/) | 支持页 + 隐私页的静态网页草稿（中英），发布到 GitHub Pages 后给 App Store Connect 用 |
 | [checklist.md](checklist.md) | 上架前检查清单：版本号、图标、授权、出口合规、App Store Connect 每一项填什么 |
 
 检查文案长度：

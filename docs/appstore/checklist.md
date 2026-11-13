@@ -58,7 +58,7 @@
 | 年龄分级 | 预计 4+（恐怖选「偶尔」则 9+）；2026-11-16 新增的两题答「否」 | 🔶 |
 | App Motion Information | **Yes, contains high motion** | 🔶 |
 | App 隐私 | Data Not Collected（[privacy.md](privacy.md)） | 🔶 |
-| Privacy Policy URL、Support URL | 还没有，需要建支持页（照 wandless-support 做一个 freefall-support） | ⬜ |
+| Privacy Policy URL、Support URL | 草稿在 [support-site/](support-site/)（支持页 + 隐私页，中英）；换掉占位、建仓库开 GitHub Pages 后填网址 | ⬜ |
 | Marketing URL | 可不填 | — |
 | 版权（Copyright） | `2026 <你的名字或公司名>`（文档里不写你的名字，由你自己填） | 🔶 |
 | 价格、销售范围 | 价格由你定。**取消勾选中国大陆**：在中国大陆上架游戏要国家新闻出版署的游戏版号（ISBN 核发单），没有的话 App 在中国大陆不可用，ASC 会显示 "Missing Game registration number"。Wandless 也是除中国大陆外全部地区 | 🔶 |
