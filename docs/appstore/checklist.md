@@ -12,8 +12,8 @@
 - ✅ Bundle ID `com.feiyuchang.freefall`、Team `5V3HM8L9GT`（`project.yml`，和 Wandless 同一个开发者账号）
 - ⬜ **把皮肤那批改动合进来**：等它们在 master 上提交后，把 master 合进 release 分支，按 release-vs-master.md 末尾的步骤处理冲突、重跑验证。
   上架文案是按合并后的功能写的（皮肤、练习、航线回看、自动 / 手动拉平、游戏内选语言）。
-- ⬜ **App 内的隐私政策链接**（审核指南 5.1.1(i) 要求，见 [privacy.md](privacy.md)）：开始窗口加「隐私政策 · 支持 · 致谢」。合并后再加。
-- ⬜ **App 内的音频署名**（见下面「授权」）：放进同一个「致谢」里。
+- ✅ **App 内的隐私政策链接**（审核指南 5.1.1(i)）：开始窗口设置条最下面一行「隐私政策 · 支持 · 致谢」，十种语言，点了用系统浏览器打开 freefall-support 网站（`StartView.swift` 的 `SiteLinks`）
+- ✅ **App 内的音频署名**：「致谢」链到支持页的 Credits 一节（音效 CC BY 4.0 署名、手套模型来源）
 - 🔶 头显上用 Release 包完整过一遍七关，确认：HUD 上没有帧率；开始窗口里没有「性能测试」；第一次启动只弹手部追踪授权（看世界感知授权弹不弹，见 privacy.md）；从没有弹过本地网络授权。
 - ⬜ Archive：Xcode → Product → Archive（Release），Organizer 里 Distribute → App Store Connect 上传。**上传要你来做或者明确让我做。**
 
@@ -28,13 +28,13 @@
 - **音频**（`Freefall/Resources/Audio/CREDITS.txt`）：三段音效都是 Huggy13ear 在 freesound.org 上的作品，**CC BY 4.0**：
   wind 2（风声循环）、parachute 2（开伞）、nylon flapping 1（伞衣抖动）。CC BY 要求「以合理的方式」署名：作者、作品名、许可证和链接、是否修改过。
   - ✅ 十种语言的描述末尾都加了一行署名（作品名、作者、freesound.org、CC BY 4.0）。
-  - ⬜ 建议**同时在 app 里**放一份（「致谢」页照抄 CREDITS.txt：作品名、作者、原链接、许可证链接、改动说明）。
+  - ✅ app 里的「致谢」链接打开支持页的 Credits 一节，那里有作品名、作者、原链接、许可证链接和改动说明。
     包里现在只有 CREDITS.txt 这个文件，玩家看不到，单靠它不算「合理的方式」。
   - 改动说明（转 AAC、响度归一、首尾交叉淡化成循环、随速度变调滤波）CREDITS.txt 里已经写了，致谢页带上即可。
 - **手套模型**（`Freefall/Resources/Gloves/`，来自 Apple 示例代码「Animating hand models in visionOS」）：
   `LICENSE-Apple-sample.txt` 是 MIT 式许可（© 2025 Apple Inc.），条件是「副本中保留版权声明和许可声明」。
   - ✅ 许可文件已经随包分发（编出来的 `Freefall.app` 里有 `LICENSE-Apple-sample.txt`），满足条件。
-  - ⬜ 建议在 app 内「致谢」里也列一行：Glove model from Apple's "Animating hand models in visionOS" sample code, © 2025 Apple Inc., used under its sample code license。
+  - ✅ 支持页的 Credits 一节列了手套模型的来源和许可。
 - 程序生成的其它内容（飞机、伞、云、地形、合成音效）都是自己写的，没有别的第三方素材。字体用的是系统字体。
 
 ## 出口合规

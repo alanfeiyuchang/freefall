@@ -44,14 +44,13 @@
 - `project.yml` 里写的是简体中文原文，十种语言都由 `InfoPlist.xcstrings` 覆盖（编出来的包里每个 `.lproj/InfoPlist.strings` 都有这两条）；系统语言不在十种里时显示英文（`CFBundleDevelopmentRegion` 是 en）。
 - **游戏只能用真手玩**（master 98202da 起删掉了捏合手势的备用操作）：没允许手部追踪时，开始窗口盖一个关不掉的引导（「允许访问」或「打开设置」），进不了跳伞。审核员如果拒绝授权，要去设置里打开才能玩——审核备注里写明了。
 
-## 应用内必须能找到隐私政策（缺口，需要改代码）
+## 应用内的隐私政策链接（已加）
 
 审核指南 5.1.1(i)："All apps must include a link to their privacy policy in the App Store Connect metadata field
 **and within the app in an easily accessible manner**."（<https://developer.apple.com/app-store/review/guidelines/>，页面标注 2026-10-16 更新）
 
-**现在游戏里没有这个链接。** 建议照 Wandless 的做法：在开始窗口（设置条下面那行「建议坐着、戴耳机……」旁边）放
-「隐私政策 · 支持 · 致谢」三个链接（链接只放在窗口里，不放进沉浸空间）；「致谢」同时解决下面音频 CC BY 署名的问题。
-`StartView.swift` 正好是皮肤那批改动也改了的文件，所以建议**合并 master 之后**再加，免得冲突。
+开始窗口设置条最下面一行是「隐私政策 · 支持 · 致谢」（十种语言），照 Wandless 的做法只放在窗口里、不放进沉浸空间。
+点了交给系统浏览器打开 freefall-support 网站，游戏自己仍然不发网络请求。「致谢」链到支持页的 Credits 一节，同时满足音效 CC BY 署名。
 
 ## 支持页和隐私页（缺口，需要你决定）
 

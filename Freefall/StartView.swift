@@ -327,6 +327,16 @@ struct StartView: View {
             Text("建议坐着、戴耳机 · 点一下手腕上的表开关 HUD，按住两秒退出这一跳")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+            // 隐私政策、支持、致谢：链接只放在开始窗口里，不放进沉浸空间（和 Wandless 一样）。
+            // 审核指南 5.1.1(i) 要求 app 里能找到隐私政策；致谢页上有 CC BY 音效的署名和手套模型的来源
+            HStack(spacing: 10) {
+                Link("隐私政策", destination: SiteLinks.privacy)
+                Text(verbatim: "·").foregroundStyle(.tertiary)
+                Link("支持", destination: SiteLinks.support)
+                Text(verbatim: "·").foregroundStyle(.tertiary)
+                Link("致谢", destination: SiteLinks.credits)
+            }
+            .font(.footnote)
         }
         .padding(.horizontal, 26)
         .padding(.vertical, 14)
@@ -485,4 +495,12 @@ struct SceneCard: View {
         .accessibilityLabel(String(localized: "\(scene.name)：\(scene.blurb)"))
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
+}
+
+/// 支持站（公开仓库 alanfeiyuchang/freefall-support，GitHub Pages），和填给 App Store Connect 的是同两个网址。
+/// 点链接是交给系统浏览器打开：游戏自己仍然不发任何网络请求（隐私清单和隐私政策都这么说）
+enum SiteLinks {
+    static let support = URL(string: "https://alanfeiyuchang.github.io/freefall-support/")!
+    static let privacy = URL(string: "https://alanfeiyuchang.github.io/freefall-support/privacy.html")!
+    static let credits = URL(string: "https://alanfeiyuchang.github.io/freefall-support/#credits")!
 }
