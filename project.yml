@@ -15,7 +15,7 @@ settings:
     DEVELOPMENT_TEAM: 5V3HM8L9GT
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "0.1"
+    MARKETING_VERSION: "1.0"
     CURRENT_PROJECT_VERSION: "1"
     # release 分支（上架版）：不定义 DEV_TOOLS。被 `#if DEV_TOOLS` 包住的开发功能——HUD 上的帧率 / GPU 毫秒 / 画质档位、
     # 开始窗口的「性能测试」和上次的测试结果、整套 benchmark、GPU 统计日志——都不编进去。
