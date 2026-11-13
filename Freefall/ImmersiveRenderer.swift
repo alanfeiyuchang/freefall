@@ -554,9 +554,10 @@ final class ImmersiveRenderer: @unchecked Sendable {
         audioParams.engine = (t.leftRampTime == nil ? 1 : Float(25 / (25 + t.planeDistance))) * cabinLevel
         audioParams.alarm = t.alarmLevel
         audioParams.canopy = underCanopy ? 1 : 0
-        // 海浪和海鸥：伞下离地 300 米以内渐渐听到，落地以后最响（只有海边的两关）
+        // 海浪和海鸥：伞下离地 300 米以内渐渐听到，落地以后最响（海边的两关：环礁、海岛。
+        // 海岛是后来替换冰川加的，之前漏了）
         let near = Float(min(max((300 - t.terrainClearance) / 250, 0), 1))
-        let seaside: Float = t.scene == .atoll ? 1 : 0
+        let seaside: Float = t.scene == .atoll || t.scene == .island ? 1 : 0
         audioParams.ambience = (t.phase == .landed || t.phase == .done ? 1 : near) * seaside
         audioParams.turn = Float(min(abs(t.turnRate) / JumpTimeline.maxTurnRate, 1))
         audioParams.rain = Float(t.rainIntensity)

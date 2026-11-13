@@ -141,7 +141,7 @@ static inline float sceneGroundAlbedo(int scene) {
     case 1: return 0.13f;     // 草原
     case 2: return 0.12f;     // 高山
     case 3: return 0.65f;     // 雪山
-    case 4: return 0.45f;     // 冰川
+    case 4: return 0.13f;     // 海岛：草地、雨林、一圈白沙和礁坪，外面是海（0.45 是这一关以前还是冰川时的值）
     case 5: return 0.07f;     // 火山
     case 6: return 0.5f;      // 天空之城：脚下是云海
     default: return 0.06f;    // 环礁：海面
