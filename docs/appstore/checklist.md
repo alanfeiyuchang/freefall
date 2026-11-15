@@ -8,6 +8,10 @@
 > Xcode Cloud 的 workflow「Release Archive」跟 `claude/release-d0a64c` 分支，用最新正式版 Xcode（当时是 27.2 / 27B52）archive 并自动上传；
 > 克隆后 `ci_scripts/ci_post_clone.sh` 用 XcodeGen 生成工程。版本现在选的是它编的 1.0 (3)。以后要重编：往这个分支推提交，或在 Xcode Cloud 里手动 Start Build。
 > 本机 `tools/appstore/upload.sh` 只在装了正式版 Xcode 时才能用于提交。
+> **2026-11-15**：1.0 (3) 已在 App Store 上架。为了让中国大陆（销售范围之外）的人也能玩，在 TestFlight 建了外部测试组「公开链接」，
+> 放的是同一个 build 1.0 (3)，开了公开链接（不限人数，链接在该组的 Testers 页）；测试说明填了 en-US 和 zh-Hans。
+> 外部测试的第一个 build 要过 TestFlight App Review，反馈邮箱和审核联系人要在 TestFlight › Test Information 里由你填好再提交。
+> build 在 2027-02-11 过期，过期前要往这个组里加新 build，链接才能继续用。
 > 还没做：审核联系人信息（姓名、电话、邮箱）、预览视频（已剪好 `build/appstore-upload/freefall-preview.mp4`，等你确认），然后点「Add for Review」提交。
 
 ✅ 已在 release 分支上做好 · ⬜ 还要做 · 🔶 要你决定 / 要你在 App Store Connect 或头显上操作
