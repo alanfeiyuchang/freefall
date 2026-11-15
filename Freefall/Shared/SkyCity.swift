@@ -15,6 +15,9 @@ enum SkyCity {
 
     struct Layout {
         var buildings: [MeshVertex] = []
+        /// 一公里开外的树：每棵六个顶点、朝镜头立起来的片（PropBuilder.farTree），边缘按覆盖率淡出，
+        /// 所以要在天空之后开着混合画；从远往近排（落地以后平视，后面的先画，前面的边才混得到后面的树）
+        var farTrees: [MeshVertex] = []
         var waterfalls: [MeshVertex] = []
         var obstacles: [Obstacle] = []
     }

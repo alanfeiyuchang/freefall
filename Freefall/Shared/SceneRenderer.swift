@@ -100,6 +100,11 @@ final class SceneRenderer: @unchecked Sendable {
         var waterfallPipeline: MTLRenderPipelineState
         var buildings: MTLBuffer
         var buildingCount: Int
+        /// 一公里开外的树（Layout.farTrees）：同一对着色器，开着混合，在天空之后画
+        var farPipeline: MTLRenderPipelineState
+        var farRevealPipeline: MTLRenderPipelineState
+        var farTrees: MTLBuffer
+        var farTreeCount: Int
         var waterfalls: MTLBuffer
         var waterfallCount: Int
     }
@@ -286,7 +291,7 @@ final class SceneRenderer: @unchecked Sendable {
         depthOnly.inputPrimitiveTopology = .triangle
         terrainDepthPipeline = try device.makeRenderPipelineState(descriptor: depthOnly)
         let layout = SceneProps.layout(for: scene)
-        if !layout.buildings.isEmpty || !layout.waterfalls.isEmpty {
+        if !layout.buildings.isEmpty || !layout.waterfalls.isEmpty || !layout.farTrees.isEmpty {
             // （空的网格也给一个顶点大小的缓冲：长度为 0 的缓冲建不出来）
             let stride = MemoryLayout<MeshVertex>.stride
             let cityDepth = MTLRenderPipelineDescriptor()
@@ -306,6 +311,13 @@ final class SceneRenderer: @unchecked Sendable {
                     : device.makeBuffer(bytes: layout.buildings, length: stride * layout.buildings.count,
                                         options: .storageModeShared)!,
                 buildingCount: layout.buildings.count,
+                farPipeline: try renderPipeline("cityVertex", "cityFragment", colors: [colorFormat], depth: depthFormat, blend: true),
+                farRevealPipeline: try renderPipeline("cityVertex", "cityFragment", colors: [colorFormat], depth: depthFormat,
+                                                      blend: true, reveal: true),
+                farTrees: layout.farTrees.isEmpty ? device.makeBuffer(length: stride, options: .storageModeShared)!
+                    : device.makeBuffer(bytes: layout.farTrees, length: stride * layout.farTrees.count,
+                                        options: .storageModeShared)!,
+                farTreeCount: layout.farTrees.count,
                 waterfalls: layout.waterfalls.isEmpty ? device.makeBuffer(length: stride, options: .storageModeShared)!
                     : device.makeBuffer(bytes: layout.waterfalls, length: stride * layout.waterfalls.count,
                                         options: .storageModeShared)!,
@@ -541,7 +553,8 @@ final class SceneRenderer: @unchecked Sendable {
         let fresh: MTLTexture          // 四分之一大小：这一帧新算的样本
         let freshDepth: MTLTexture
         let history: [MTLTexture]      // 云层分辨率，两张轮流（读上一帧、写这一帧）
-        let depth: MTLTexture
+        /// 每个纹素的云离你多远（公里）；符号是「这条视线被地面截断」的记号（负 = 是）。和 history 一样两张轮流
+        let depths: [MTLTexture]
         var current = 0
         var frameIndex: UInt32 = 0
         var previousViews: [ViewUniforms]?
@@ -567,7 +580,7 @@ final class SceneRenderer: @unchecked Sendable {
             fresh = make(.rgba16Float, fw, fh)
             freshDepth = make(.r16Float, fw, fh)
             history = [make(.rgba16Float, width, height), make(.rgba16Float, width, height)]
-            depth = make(.r16Float, width, height)
+            depths = [make(.r16Float, width, height), make(.r16Float, width, height)]
         }
     }
 
@@ -717,7 +730,7 @@ final class SceneRenderer: @unchecked Sendable {
         }
 
         // 2. 和上一帧的结果合起来，得到完整的云层
-        if let enc = cloudPass(history.history[writeIndex], history.depth, label: "Clouds (resolve)") {
+        if let enc = cloudPass(history.history[writeIndex], history.depths[writeIndex], label: "Clouds (resolve)") {
             enc.setRenderPipelineState(cloudResolvePipeline)
             enc.setFragmentBytes(&views, length: MemoryLayout<ViewUniforms>.stride * viewCount, index: 0)
             enc.setFragmentBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 1)
@@ -728,6 +741,8 @@ final class SceneRenderer: @unchecked Sendable {
             enc.setFragmentTexture(history.fresh, index: 0)
             enc.setFragmentTexture(history.freshDepth, index: 1)
             enc.setFragmentTexture(history.history[readIndex], index: 2)
+            enc.setFragmentTexture(history.depths[readIndex], index: 3)
+            enc.setFragmentTexture(terrainDepth, index: 4)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
@@ -756,6 +771,8 @@ final class SceneRenderer: @unchecked Sendable {
         // 伞和人的剪影：这个 pass 里的地形、海面、物件、装备、绳子都从这两个槽位取
         enc.setFragmentTexture(playerShadow.canopyMap, index: 14)
         enc.setFragmentTexture(playerShadow.bodyMap, index: 15)
+        // 云层每个纹素的距离和「是不是被地面截断」的记号：地形、天空、树叠云时都按它挑纹素（Common.h 的 cloudForPixel）
+        enc.setFragmentTexture(history.depths[writeIndex], index: 12)
         enc.setViewports(viewports)
         amplify(enc)
 
@@ -771,7 +788,7 @@ final class SceneRenderer: @unchecked Sendable {
         // 地形先画（写深度），天空 pass 再按深度只填地形没盖住的像素
         if let terrainDraw {
             encodeTerrain(enc, terrainDraw, views: &views, frame: &frame, rateBuffer: rateBuffer,
-                          cloud: history.history[writeIndex], revealing: revealing)
+                          cloud: history.history[writeIndex], cloudDepth: history.depths[writeIndex], revealing: revealing)
         }
 
         enc.setRenderPipelineState(revealing ? revealPipelines.scene : scenePipeline)
@@ -789,6 +806,21 @@ final class SceneRenderer: @unchecked Sendable {
         enc.setFragmentTexture(baseNoise, index: 6)
         enc.setFragmentTexture(waveGradient, index: 7)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+
+        // 一公里开外的树：边缘要和后面的地面 / 天混在一起，所以排在地形和天空之后（片元的缓冲沿用上面天空 pass 绑的，
+        // 贴图里 5 号被天空换成了环礁图，换回山影图）。照样写深度：后面画的飞机、装备、别的树按深度挡
+        if let city, city.farTreeCount > 0, let terrainDraw, settings.debugFlags & 4 == 0 {
+            var cu = terrainDraw.city
+            enc.setRenderPipelineState(revealing ? city.farRevealPipeline : city.farPipeline)
+            enc.setDepthStencilState(nearerDepth)
+            enc.setFragmentTexture(terrainShade, index: 5)
+            enc.setFragmentTexture(history.depths[writeIndex], index: 12)
+            enc.setVertexBuffer(city.farTrees, offset: 0, index: 0)
+            enc.setVertexBytes(&views, length: MemoryLayout<ViewUniforms>.stride * viewCount, index: 1)
+            enc.setVertexBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 2)
+            enc.setVertexBytes(&cu, length: MemoryLayout<CityUniforms>.stride, index: 3)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: city.farTreeCount)
+        }
 
         // 瀑布：半透明，叠在浮岛和天空上面（片元的缓冲和贴图沿用上面天空 pass 绑的）
         if let city, city.waterfallCount > 0, let terrainDraw, !revealing {
@@ -1002,8 +1034,11 @@ final class SceneRenderer: @unchecked Sendable {
                                           indexBuffer: patchIndices, indexBufferOffset: 0, instanceCount: draw.count)
             }
         }
-        if let city, city.buildingCount > 0, settings.debugFlags & 4 == 0 {
-            // 实体模型（云不能盖到它们前面）
+        // 实体模型（云不能盖到它们前面）：只有天空之城画进这张深度（城堡和塔真的插在云里，要按像素截断）。
+        // 别的关的树和石头不画：云层只有主画面的一半分辨率、每帧还只重算四分之一，树梢贴着天的轮廓截在云层里
+        // 就是四个像素一格的锯齿，放大回来在树的四周晕出一圈、头一动整圈跟着跳。改成树自己在片元里拿云的距离
+        // 和自己的距离比（cityFragment），云在后面就不叠——轮廓按主画面的分辨率来，还省掉这一遍十几万个顶点
+        if let city, city.buildingCount > 0, settings.debugFlags & 4 == 0, scene == .sky {
             var cu = draw.city
             enc.setRenderPipelineState(city.depthPipeline)
             enc.setVertexBuffer(city.buildings, offset: 0, index: 0)
@@ -1018,7 +1053,7 @@ final class SceneRenderer: @unchecked Sendable {
     /// 地形的主 pass：一次实例化画完（着色、空气透视、叠云都在片元里）
     private func encodeTerrain(_ enc: MTLRenderCommandEncoder, _ draw: TerrainDraw, views: inout [ViewUniforms],
                                frame: inout FrameUniforms, rateBuffer: MTLBuffer, cloud: MTLTexture,
-                               revealing: Bool) {
+                               cloudDepth: MTLTexture, revealing: Bool) {
         var tu = draw.uniforms
         let viewsLength = MemoryLayout<ViewUniforms>.stride * views.count
         enc.setRenderPipelineState(revealing ? revealPipelines.terrain : terrainPipeline)
@@ -1062,6 +1097,7 @@ final class SceneRenderer: @unchecked Sendable {
             // 实体模型：片元的缓冲和贴图和地形绑的是同一套
             var cu = draw.city
             enc.setRenderPipelineState(revealing ? city.revealPipeline : city.pipeline)
+            enc.setFragmentTexture(cloudDepth, index: 12)
             enc.setVertexBuffer(city.buildings, offset: 0, index: 0)
             enc.setVertexBytes(&views, length: viewsLength, index: 1)
             enc.setVertexBytes(&frame, length: MemoryLayout<FrameUniforms>.stride, index: 2)

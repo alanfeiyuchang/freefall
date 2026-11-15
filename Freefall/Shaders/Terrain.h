@@ -1043,6 +1043,7 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
                                 texture2d_array<float> cacheColor [[texture(9)]],
                                 texture2d_array<float> cacheInfo [[texture(10)]],
                                 texture3d<float> waveGrad [[texture(11)]],
+                                texture2d_array<float> cloudDepth [[texture(12)]],
                                 texture2d<float> canopyShadowMap [[texture(14)]],
                                 texture2d<float> bodyShadowMap [[texture(15)]]) {
 #ifdef PROFILE_TERRAIN_FLAT
@@ -1052,8 +1053,9 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
     if ((debugFlags & 2) != 0) return float4(0.2f, 0.3f, 0.1f, 1.0f);
     // 被云整个挡住的地形不用算：云层那一遍已经画好了，这个像素的颜色就是云的颜色。
     // 头显上量过：穿云时地形一个像素都看不见，地形着色照样花着二十毫秒
+    // （云层只取一次，后面叠云用的也是这一份；地形和天的分界线上只取被地面截断的纹素，见 Common.h 的 cloudForPixel）
+    float4 cover = cloudForPixel(cloudColor, cloudDepth, in.position.xy * F.clouds.x, in.viewIndex, true);
     if (!revealActive && (debugFlags & 16384) == 0) {
-        float4 cover = cloudColor.sample(pixelLinearClamp, in.position.xy * F.clouds.x, in.viewIndex);
         if (cover.a < 0.012f) {
             float3 c = tonemap(cover.rgb * F.exposure.x) * F.camera.z;
             if (F.heading.z > 0.001f) {
@@ -1134,7 +1136,7 @@ fragment float4 terrainFragment(TerrainOut in [[stage_in]],
     }
 
     // 云层盖上来（云在地形前面的部分，云层 pass 按地形深度截断；雨帘也在云层里）
-    float4 cloud = cloudColor.sample(pixelLinearClamp, in.position.xy * F.clouds.x, in.viewIndex);
+    float4 cloud = cover;
     color = color * cloud.a + cloud.rgb;
 
     color = tonemap(color * F.exposure.x) * F.camera.z;
@@ -1171,6 +1173,8 @@ struct CityUniforms {
 #define CITY_BARK 7
 #define CITY_PLAIN 8
 #define CITY_SNOWY 9
+/// 一公里开外的树：朝着镜头立起来的片（见 cityVertex），着色和 CITY_FOLIAGE 一样，边按像素覆盖率淡出
+#define CITY_FOLIAGE_FAR 10
 
 struct CityOut {
     float4 position [[position]];
@@ -1190,10 +1194,36 @@ vertex CityOut cityVertex(uint vid [[vertex_id]],
                           constant CityUniforms &C [[buffer(3)]]) {
     MeshVertex v = vertices[vid];
     CityOut o;
-    o.stagePos = terrainToStage(v.position.xz + C.origin.xy, v.position.y, F);
+    float3 world = v.position.xyz, normal = v.normal.xyz;
+    if (v.color.a > 9.5f) {
+        // 远处的树（CITY_FOLIAGE_FAR）：六个顶点都存在树根，normal 里存的是（半径，高，第几个角）。在这里按镜头的方向立起来：
+        // 左、右两个角垂直于视线，顶是树尖，朝镜头再伸一个角（从上往下看时那是树冠靠你这边的底沿）。
+        // 这样轮廓永远是「一个圆锥」，不用几何去凑圆，而且哪条边是轮廓是知道的——片元里按到那条边还有几个像素淡出，
+        // 就是解析的抗锯齿（整个渲染器没有 MSAA，四棱锥的硬边在一公里外只有几个像素宽，头一动整片林子都在跳）。
+        // 法线照圆锥给：两边朝外、中间朝你，插值出来是圆的，不再是一面亮一面暗的棱
+        float R = v.normal.x, H = v.normal.y;
+        int corner = int(v.normal.z + 0.5f);
+        float3 cam = views[amp].cameraPosition.xyz;
+        float2 toEye = rotateHeading(cam, F.heading.x, F.heading.y).xz - (world.xz + C.origin.xy);
+        float hd = max(length(toEye), 1e-3f);
+        float2 hc = toEye / hd, rt = float2(-hc.y, hc.x);
+        float2 off = 0.0f, nh = 0.44f * hc;
+        float up = 0.0f;
+        if (corner == 0) { off = -rt * R; nh = 0.44f * hc - 0.9f * rt; }
+        else if (corner == 1) { off = rt * R; nh = 0.44f * hc + 0.9f * rt; }
+        else if (corner == 2) {
+            // 几乎从正上方看：树尖投下来落在树冠的圆里面，这个角改成圆的另一边，轮廓是整个圆（菱形）
+            float above = cam.y + F.camera.x - world.y;
+            if (above * R > hd * H) { off = -hc * R; nh = -0.6f * hc; }
+            else { up = H; }
+        } else { off = hc * R; nh = hc; }
+        world += float3(off.x, up, off.y);
+        normal = float3(nh.x, 0.3f, nh.y);
+    }
+    o.stagePos = terrainToStage(world.xz + C.origin.xy, world.y, F);
     o.position = views[amp].viewProjection * float4(o.stagePos, 1.0f);
-    o.normal = v.normal.xyz;
-    o.world = v.position.xyz;
+    o.normal = normal;
+    o.world = world;
     o.color = v.color;
     o.uv = float2(v.position.w, v.normal.w);
     o.viewIndex = amp;
@@ -1210,17 +1240,16 @@ vertex float4 cityDepthVertex(uint vid [[vertex_id]],
     return views[amp].viewProjection * float4(terrainToStage(v.position.xz + C.origin.xy, v.position.y, F), 1.0f);
 }
 
-/// 地形和建筑共用的收尾：空气透视 → 叠云 → 色调映射 → 转弯时压暗四周 → 抖动
+/// 地形和建筑共用的收尾：空气透视 → 叠云 → 色调映射 → 转弯时压暗四周 → 抖动。
+/// cloud：这个像素要叠的那一份云（rgb 散射光，a 透射率），调用的地方自己取好
 static inline float3 distantFinish(float3 color, float3 rd, float dist, float altitude, float3 eye, float4 position,
                                    uint viewIndex, constant ViewUniforms *views, constant FrameUniforms &F,
-                                   constant rasterization_rate_map_data &rateMap, texture2d<float> skyLUT,
-                                   texture2d_array<float> cloudColor) {
+                                   constant rasterization_rate_map_data &rateMap, texture2d<float> skyLUT, float4 cloud) {
     float eyeAlt = max(eye.y + F.camera.x, 1.0f);
     float camR = ATM_BOTTOM + eyeAlt * 0.001f;
     float3 Tt = segmentTransmittance(eyeAlt * 0.001f, max(altitude, 0.0f) * 0.001f, dist * 0.001f * 2.2f);
     float3 haze = skyViewLookup(skyLUT, normalize(float3(rd.x, 0.003f, rd.z)), F.sunDirection.xyz, camR, false);
     color = color * Tt + haze * (1.0f - Tt);
-    float4 cloud = cloudColor.sample(pixelLinearClamp, position.xy * F.clouds.x, viewIndex);
     color = color * cloud.a + cloud.rgb;
     color = tonemap(color * F.exposure.x) * F.camera.z;
     if (F.heading.z > 0.001f) {
@@ -1241,6 +1270,7 @@ fragment float4 cityFragment(CityOut in [[stage_in]],
                              texture2d_array<float> cloudColor [[texture(3)]],
                              texture2d<float> cloudShadow [[texture(4)]],
                              texture2d<float> terrainShade [[texture(5)]],
+                             texture2d_array<float> cloudDepth [[texture(12)]],
                              texture2d<float> canopyShadowMap [[texture(14)]],
                              texture2d<float> bodyShadowMap [[texture(15)]]) {
     if ((int(F.exposure.z) & 16) != 0) return float4(0.05f, 0.12f, 0.05f, 1.0f);
@@ -1299,10 +1329,15 @@ fragment float4 cityFragment(CityOut in [[stage_in]],
     } else if (material == CITY_GOLD) {
         specular = 1.4f;
         gloss = 90.0f;
-    } else if (material == CITY_FOLIAGE) {
-        // 树冠：一簇簇花和叶子的深浅；光从背面也透过来一点
-        float fade = saturate(1.2f - footprint * 3.0f);
-        albedo *= 1.0f + 0.32f * tNoise(w.xz * 1.6f + w.y * 0.9f) + 0.22f * tNoise(w.xz * 5.1f + w.y * 3.3f) * fade;
+    } else if (material == CITY_FOLIAGE || material == CITY_FOLIAGE_FAR) {
+        // 树冠：一簇簇花和叶子的深浅；光从背面也透过来一点。
+        // 两层深浅都按一个像素盖多大淡出：粗的那层一格 0.6 米，四五百米外一个像素就盖过一格，不淡出的话
+        // 每个像素取到的是随机的一点，树冠里面头一动就闪（细的那层本来就淡了，粗的以前一直留到最远）
+        float fade = saturate(1.2f - footprint * 3.0f), coarse = saturate(1.5f - footprint * 2.0f);
+        float mottle = 0.0f;
+        if (coarse > 0.0f) mottle = 0.32f * tNoise(w.xz * 1.6f + w.y * 0.9f) * coarse;
+        if (fade > 0.0f) mottle += 0.22f * tNoise(w.xz * 5.1f + w.y * 3.3f) * fade;
+        albedo *= 1.0f + mottle;
         wrap = 0.5f;
     } else if (material == CITY_ROCK) {
         // 天然的石头：一块块深浅不匀，凑近了有细的斑点；朝上的面长着灰绿的地衣
@@ -1356,12 +1391,45 @@ fragment float4 cityFragment(CityOut in [[stage_in]],
         // 金属反射一点天光
         color += tintS * cloudySkyFill(A.skyIrradianceSea.rgb) / PI * (specular * 0.25f);
     }
-    float3 c = distantFinish(color, rd, dist, w.y, eye, in.position, in.viewIndex, views, F, rateMap, skyLUT, cloudColor);
+    // 这个像素要叠的云。天空之城：建筑画进了云层截断用的深度，云层里已经只剩建筑前面的那一段，
+    // 轮廓上只取被截断的纹素（Common.h 的 cloudForPixel）。
+    // 别的关的树和石头没画进那张深度，云层在它们身后照常算到地形 / 天上：这里拿云的距离（云层那张图里存着，
+    // 按不透明度加权的平均，公里；符号是「被地面截断」的记号）和自己的距离比，云比树远就不叠。
+    // 落地以后平视，云都在几公里外的天上，以前树梢四周那一圈跟着云层的低分辨率一格一格跳，现在树的轮廓只由主画面的几何决定
+    float2 cloudAt = in.position.xy * F.clouds.x;
+    float4 cloud;
+    if (sceneId == SCENE_SKY) {
+        cloud = cloudForPixel(cloudColor, cloudDepth, cloudAt, in.viewIndex, true);
+    } else {
+        // 插值用的四个纹素都在前面：照常插值，和周围的地面一样平滑。都在后面：不叠。
+        // 有前有后（地平线上、云的边上）：插值会把后面那几个的颜色带进来（树干上横着一道灰线），
+        // 只认这个像素自己所在的那一个纹素，它在前面就取它的颜色，不插值
+        float4 km = abs(cloudDepth.gather(pixelLinearClamp, cloudAt, in.viewIndex));
+        float4 behind = step(dist, km * 1000.0f);
+        float count = behind.x + behind.y + behind.z + behind.w;
+        if (count > 3.5f) {
+            cloud = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        } else if (count > 0.5f) {
+            uint2 texel = min(uint2(cloudAt), uint2(cloudDepth.get_width(), cloudDepth.get_height()) - 1u);
+            float keep = 1.0f - smoothstep(0.85f, 1.15f, abs(cloudDepth.read(texel, in.viewIndex).r) * 1000.0f / dist);
+            cloud = mix(float4(0.0f, 0.0f, 0.0f, 1.0f), cloudColor.read(texel, in.viewIndex), keep);
+        } else {
+            cloud = cloudColor.sample(pixelLinearClamp, cloudAt, in.viewIndex);
+        }
+    }
+    float3 c = distantFinish(color, rd, dist, w.y, eye, in.position, in.viewIndex, views, F, rateMap, skyLUT, cloud);
+    float4 result = float4(c, 1.0f);
     if (revealActive) {
         float a = reveal.x;
-        return float4(c * a + REVEAL_GLOW_COLOR * reveal.y * F.camera.z, saturate(a + reveal.y * 0.5f));
+        result = float4(c * a + REVEAL_GLOW_COLOR * reveal.y * F.camera.z, saturate(a + reveal.y * 0.5f));
     }
-    return float4(c, 1.0f);
+    if (material == CITY_FOLIAGE_FAR) {
+        // 到左右两条轮廓边还有几个像素（uv 是三角形里对着那两条边的重心坐标，除以它一个像素变多少就是像素数），
+        // 不到一个像素的那一圈按比例淡出，和后面的地面 / 天混在一起（这一批树在天空之后画，开着混合，预乘）
+        float2 edge = in.uv / max(fwidth(in.uv), 1e-6f);
+        result *= saturate(min(edge.x, edge.y));
+    }
+    return result;
 }
 
 /// 瀑布：从岛边跌进云海的一条水，越往下散得越开，最后化成水雾。半透明（预乘），叠在地形和天空上面。
@@ -1390,8 +1458,9 @@ fragment float4 waterfallFragment(CityOut in [[stage_in]],
     float3 sunE = mix(A.sunAtCloudBase.rgb, A.sunAtCloudTop.rgb, saturate((altKm - 1.0f) / 8.0f));
     float3 color = float3(0.86f, 0.9f, 0.93f) / PI * (sunE * 0.55f + cloudySkyFill(A.skyIrradianceSea.rgb));
     // 空气透视和叠云要按「这一层盖住的那部分」算：先把颜色走完和地形一样的收尾，再整体乘不透明度
-    float3 c = distantFinish(color, rd, dist, in.world.y, eye, in.position, in.viewIndex, views, F, rateMap, skyLUT, cloudColor);
-    alpha *= cloudColor.sample(pixelLinearClamp, in.position.xy * F.clouds.x, in.viewIndex).a * 0.5f + 0.5f;
+    float4 cloud = cloudColor.sample(pixelLinearClamp, in.position.xy * F.clouds.x, in.viewIndex);
+    float3 c = distantFinish(color, rd, dist, in.world.y, eye, in.position, in.viewIndex, views, F, rateMap, skyLUT, cloud);
+    alpha *= cloud.a * 0.5f + 0.5f;
     return float4(c * alpha, alpha);
 }
 

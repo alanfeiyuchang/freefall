@@ -11,13 +11,18 @@ enum AlpineProps {
         let spots = PropScatter.spots(scene: .alpine, radius: 2600, spacing: 8.5, full: 520) { p, h in
             TerrainField.alpineForest(p, h) > 0.55 && TerrainField.slopeDegrees(.alpine, p) < 42
         }
+        var farBatch = PropBuilder()       // 一公里开外的：朝镜头的片，单独一批
         for s in spots {
-            guard b.v.count < 170_000 else { break }
+            guard b.v.count + farBatch.v.count < 170_000 else { break }
             let far = s.distance > 650
             let distant = s.distance > 1100
             let height = (13 + 11 * s.size) * (distant ? 1.6 : far ? 1.25 : 1)
-            b.conifer(base: SIMD3(s.p.x, s.h - 0.6, s.p.y), height: height, near: !far, seed: s.seed, distant: distant)
+            if distant {
+                farBatch.conifer(base: SIMD3(s.p.x, s.h - 0.6, s.p.y), height: height, near: !far, seed: s.seed, distant: distant)
+            } else {
+                b.conifer(base: SIMD3(s.p.x, s.h - 0.6, s.p.y), height: height, near: !far, seed: s.seed, distant: distant)
+            }
         }
-        return SkyCity.Layout(buildings: b.v)
+        return SkyCity.Layout(buildings: b.v, farTrees: farBatch.farTreesBackToFront)
     }
 }
