@@ -467,7 +467,9 @@ fragment CloudOut cloudFreshFragment(VOut in [[stage_in]],
 
     CloudOut o;
     o.color = float4(h.radiance, h.transmittance);
-    o.depth = h.depth * 0.001f;
+    // 符号：这条视线是不是被地面截断的（地形 / 建筑的深度，或者海面）。叠回主画面时按它挑纹素（Common.h 的 cloudForPixel）
+    bool truncated = maps.terrainDistance < 1e8f || seaHit.x > 0.0f;
+    o.depth = max(h.depth * 0.001f, 1e-4f) * (truncated ? -1.0f : 1.0f);
 #ifdef DEBUG_TERRAIN_DEPTH
     // 调试：地形距离（红 = 近，绿 = 远，蓝 = 没读到地形）
     o.color = maps.terrainDistance < 1e8f ? float4(saturate(1.0f - maps.terrainDistance / 5000.0f),
@@ -486,7 +488,9 @@ fragment CloudOut cloudResolveFragment(VOut in [[stage_in]],
                                        constant rasterization_rate_map_data &prevRateMap [[buffer(5)]],
                                        texture2d_array<float> fresh [[texture(0)]],
                                        texture2d_array<float> freshDepth [[texture(1)]],
-                                       texture2d_array<float> history [[texture(2)]]) {
+                                       texture2d_array<float> history [[texture(2)]],
+                                       texture2d_array<float> historyDepth [[texture(3)]],
+                                       depth2d_array<float> terrainDepth [[texture(4)]]) {
     uint layer = in.viewIndex;
     int2 pixel = int2(floor(in.position.xy));
     int2 pattern = int2(TU.pattern.xy);
@@ -510,7 +514,7 @@ fragment CloudOut cloudResolveFragment(VOut in [[stage_in]],
     float2 screen = screenPosition(physical, layer, F.camera.w > 0.5f, rateMap);
     // 舞台 → 世界（这一帧的位置和航向）→ 上一帧的舞台：你掉了多少、滑了多少、转了多少都算进去
     Ray r = viewRay(screen, views[layer], 0.0f);
-    float3 stagePoint = r.origin + r.direction * (depthKm * 1000.0f);
+    float3 stagePoint = r.origin + r.direction * (abs(depthKm) * 1000.0f);   // 符号是「被地面截断」的记号，不是距离
     float3 world = rotateHeading(stagePoint, cos(TU.now.w), sin(TU.now.w)) + TU.now.xyz;
     float3 p = rotateHeading(world - TU.prev.xyz, cos(TU.prev.w), -sin(TU.prev.w));
     float4 clip = prevViews[layer].viewProjection * float4(p, 1.0f);
@@ -522,24 +526,39 @@ fragment CloudOut cloudResolveFragment(VOut in [[stage_in]],
     float2 size = float2(history.get_width(), history.get_height());
     bool valid = TU.pattern.w > 0.5f && clip.w > 0.0f && all(prevPixel >= 0.5f) && all(prevPixel <= size - 0.5f);
 
+    // 这个纹素自己的视线现在是不是碰到地面（和 cloudFreshFragment 一样的判断：地形 / 建筑的深度，或者海面）。
+    // 被地面截断的和没被截断的是两种纹素（差一整片天的云），历史只能从同一种里取：重投影是双线性的，
+    // 不分的话分界线（地平线、山脊）两边每一帧互相渗一点，再被下一帧接着渗，分界线上就是一条跟着头动忽亮忽暗的带子
+    bool surface = sphereHits(r.origin.y + F.camera.x, r.direction.y, 0.0f).x > 0.0f;
+    if (!surface && F.exposure.y > 0.5f) {
+        uint2 depthSize = uint2(terrainDepth.get_width(), terrainDepth.get_height());
+        surface = terrainDepth.read(min(uint2(physical), depthSize - 1u), layer) > 0.0f;
+    }
+    // 这一块新算的那个样本是不是和它同一种（一块 2×2 里只新算一个，可能正好在分界线另一边）
+    bool blockSame = (depthKm < 0.0f) == surface;
+
     float4 result;
+    float4 h;
+    if (valid) h = cloudForPixel(history, historyDepth, prevPixel, layer, surface, valid);
     if (valid) {
         // 历史夹到周围新样本的范围里（防拖影），范围两头各放宽半个跨度：新样本自己是带噪声的（每个的起步位置不一样），
-        // 九个样本的最小最大值本身就在抖，夹得太紧等于每一帧都把这个抖动重新灌进已经攒平的历史里
+        // 九个样本的最小最大值本身就在抖，夹得太紧等于每一帧都把这个抖动重新灌进已经攒平的历史里。
+        // （这一块的新样本在分界线另一边时不夹：那个范围是另一种纹素的）
         float4 span = (hi - lo) * 0.5f;
-        float4 h = clamp(history.sample(pixelLinearClamp, prevPixel, layer), lo - span, hi + span);
+        if (blockSame) h = clamp(h, lo - span, hi + span);
         // 新算的样本只占两成多（之前四成）：每个样本的起步位置是抖过的，背阴面上明暗跟着起步位置变得厉害，
         // 新样本占得多，每四个像素里刚换的那一个就和另外三个对不上，暗面上是一层细网纹
         result = isFresh ? mix(h, own, 0.22f) : h;
     } else {
-        // 没有历史：这一帧新算的四分之一样本双线性放大
+        // 没有历史：这一帧新算的四分之一样本放大（也只取同一种的）
         float2 freshCoord = (float2(pixel - pattern)) * 0.5f + 0.5f;
-        result = isFresh ? own : fresh.sample(pixelLinearClamp, freshCoord, layer);
+        result = isFresh ? own : cloudForPixel(fresh, freshDepth, freshCoord, layer, surface);
     }
 
     CloudOut o;
     o.color = result;
-    o.depth = depthKm;
+    // 距离用这一块新算的那个（重投影用），符号是这个纹素自己的
+    o.depth = abs(depthKm) * (surface ? -1.0f : 1.0f);
     return o;
 }
 
@@ -685,6 +704,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
                                 texture2d<float> atollMap [[texture(5)]],
                                 texture3d<float> waveNoise [[texture(6)]],
                                 texture3d<float> waveGrad [[texture(7)]],
+                                texture2d_array<float> cloudDepth [[texture(12)]],
                                 texture2d<float> canopyShadowMap [[texture(14)]],
                                 texture2d<float> bodyShadowMap [[texture(15)]]) {
     float2 screen = screenPosition(in.position.xy, in.viewIndex, F.camera.w > 0.5f, rateMap);
@@ -836,8 +856,9 @@ fragment float4 sceneFragment(VOut in [[stage_in]],
     }
 #endif
 
-    // 云层是半分辨率的，双线性放大（预乘过的散射光 + 透射率，放大后照样能直接合成）
-    float4 cloud = cloudColor.sample(pixelLinearClamp, in.position.xy * F.clouds.x, in.viewIndex);
+    // 云层是半分辨率的，双线性放大（预乘过的散射光 + 透射率，放大后照样能直接合成）；
+    // 海面和天的分界线上只取和这个像素同一边的纹素
+    float4 cloud = cloudForPixel(cloudColor, cloudDepth, in.position.xy * F.clouds.x, in.viewIndex, ground);
     color = color * cloud.a + cloud.rgb;
 
     color = tonemap(color * F.exposure.x) * F.camera.z;

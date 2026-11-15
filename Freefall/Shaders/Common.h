@@ -78,6 +78,43 @@ constexpr sampler trilinearRepeat(filter::linear, mip_filter::linear, address::r
 constexpr sampler trilinearClamp(filter::linear, mip_filter::linear, address::clamp_to_edge);
 constexpr sampler pixelLinearClamp(filter::linear, coord::pixel, address::clamp_to_edge);
 
+/// 把云层（主画面一半的分辨率）叠回主画面时取的那一份（rgb 散射光，a 透射率）。
+///
+/// 云层的每个纹素沿自己那条视线步进：视线碰到地面（地形、海面、天空之城的建筑）的，只算到地面为止；没碰到的一直算到天上。
+/// 这两种纹素差得很远（落地以后平视：地平线下面的没有云，上面的是满天的云），而地面和天的分界线在云层里只有
+/// 纹素那么细（每帧还只重算四分之一）。直接双线性放大的话，分界线两边各有两三个像素取到了另一边的纹素：
+/// 地平线、山脊、树梢的轮廓上一圈忽亮忽暗的齿，头稍微一动整圈跟着跳。
+///
+/// 所以云层的深度那张图用符号记下了「这个纹素是不是被地面截断的」（负 = 是，见 cloudFreshFragment），这里：
+/// 四个纹素和这个像素是同一边的（绝大多数像素）→ 照常双线性；有的不是 → 只取同一边里离得最近的那一个。
+/// surface：这个像素自己是不是地面
+/// found：四个纹素里有没有和它同一边的（一个都没有时返回的是普通的双线性结果）
+static inline float4 cloudForPixel(texture2d_array<float> cloudColor, texture2d_array<float> cloudDepth,
+                                   float2 at, uint view, bool surface, thread bool &found) {
+    // gather 的顺序：左下、右下、右上、左上（纹理坐标 y 朝下：(0,1) (1,1) (1,0) (0,0)）
+    float4 km = cloudDepth.gather(pixelLinearClamp, at, view);
+    float4 same = surface ? step(km, float4(0.0f)) : step(float4(0.0f), km);
+    float count = same.x + same.y + same.z + same.w;
+    found = count > 0.5f;
+    if (count > 3.5f || count < 0.5f) return cloudColor.sample(pixelLinearClamp, at, view);
+    float2 f = fract(at - 0.5f);
+    float4 weight = (float4((1.0f - f.x) * f.y, f.x * f.y, f.x * (1.0f - f.y), (1.0f - f.x) * (1.0f - f.y)) + 1e-4f) * same;
+    int2 offset = int2(0, 1);
+    float best = weight.x;
+    if (weight.y > best) { best = weight.y; offset = int2(1, 1); }
+    if (weight.z > best) { best = weight.z; offset = int2(1, 0); }
+    if (weight.w > best) { offset = int2(0, 0); }
+    int2 size = int2(cloudColor.get_width(), cloudColor.get_height());
+    int2 texel = clamp(int2(floor(at - 0.5f)) + offset, int2(0), size - 1);
+    return cloudColor.read(uint2(texel), view);
+}
+
+static inline float4 cloudForPixel(texture2d_array<float> cloudColor, texture2d_array<float> cloudDepth,
+                                   float2 at, uint view, bool surface) {
+    bool found;
+    return cloudForPixel(cloudColor, cloudDepth, at, view, surface, found);
+}
+
 static inline float remap(float v, float lo, float hi, float newLo, float newHi) {
     return newLo + (v - lo) * (newHi - newLo) / (hi - lo);
 }

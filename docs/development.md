@@ -65,6 +65,10 @@ tools/render-check/run.sh <输出目录> maps    # 天气图、环礁图（叠�
 手部追踪和透视只有真机有，这里用合成的关节姿态摆手（握扶杆、抓拉手、抓操纵环、看表），画肤色的「替身手」代替真手。
 
 - 环境变量 `EXPOSURE`、`SIGMA`、`STEP`、`CLOUDSCALE` 可以临时改参数。
+- 量闪烁（`shots` 模式）：`FLICKER=8` 把头在一个像素以内分 8 步斜着挪过去，每步画一张，量每个像素相邻两步之间最大跳多少，
+  存 `<镜头>_flicker.png`（越亮跳得越凶）并打印全图平均和跳变超过 24 的像素占比。抗锯齿好的边一步只变八分之一，
+  硬边和不到一个像素宽的东西一步跳满。配 `FOVY=28`（960 行、28° 大约是头显中心每度 34 个像素的密度）和 `YAW=`、`PITCH=`
+  换视场角和朝向，例：`SCENE=1 NOHUD=1 FOVY=28 YAW=118 PITCH=0 FLICKER=8 tools/render-check/run.sh <目录> shots td_landed`。
 - `METAL_DEFINES="-DPROFILE_SKIP_MARCH"` 关掉云的步进，`"-DPROFILE_FLAT_SCENE"` 关掉天空和海面着色，用来拆开量各个 pass 的耗时。
 
 ## 结构

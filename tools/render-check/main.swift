@@ -666,13 +666,56 @@ if mode == "shots" || mode == "all" {
         if let h = shot.lookAtRain {
             (yaw, pitch) = look(atCloud: JumpTimeline.deckCenter, altitude: h, from: session.timeline)
         }
+        // FOVY=28：换视场角。960 行、28° 大约是头显中心的像素密度（每度 34 个像素），看远处的东西在真机上占几个像素
+        let fov = env["FOVY"].flatMap { Float($0) } ?? shot.fovY
+        if let y = env["YAW"].flatMap({ Float($0) }) { yaw = y }
+        if let p = env["PITCH"].flatMap({ Float($0) }) { pitch = p }
         for _ in 0..<(env["CACHE_AMORTIZED"] == nil ? 11 : 150) {
-            render(session, yaw: yaw, pitch: pitch, hands: h, color: color, depth: depth, fovY: shot.fovY,
+            render(session, yaw: yaw, pitch: pitch, hands: h, color: color, depth: depth, fovY: fov,
                    watchOnLeft: shot.watchOnLeft, eye: shot.eye)
         }
-        let ms = render(session, yaw: yaw, pitch: pitch, hands: h, color: color, depth: depth, fovY: shot.fovY,
+        let ms = render(session, yaw: yaw, pitch: pitch, hands: h, color: color, depth: depth, fovY: fov,
                         watchOnLeft: shot.watchOnLeft, eye: shot.eye)
         saveLeftEye(color, to: outDir.appendingPathComponent("\(fileName).png"))
+        // FLICKER=8：头在一个像素以内分 8 步斜着挪过去（真机上头一直在微动），每步画一张，
+        // 量每个像素相邻两步之间最大跳多少（0~255 的亮度）。抗锯齿好的边一步只变 1/8，硬边和不到一个像素宽的东西一步跳满。
+        // 存 <镜头>_flicker.png（越亮跳得越凶），打印全图平均和跳得超过 24 的像素占比。
+        if let steps = env["FLICKER"].flatMap({ Int($0) }), steps > 1 {
+            let w = color.width, hgt = color.height
+            let pixel = fov / Float(hgt)          // 一个像素张多少度
+            func luma() -> [Float] {
+                var bytes = [UInt8](repeating: 0, count: w * hgt * 4)
+                color.getBytes(&bytes, bytesPerRow: w * 4, bytesPerImage: w * hgt * 4,
+                               from: MTLRegionMake2D(0, 0, w, hgt), mipmapLevel: 0, slice: 0)
+                return (0..<(w * hgt)).map { i in
+                    0.114 * Float(bytes[i * 4]) + 0.587 * Float(bytes[i * 4 + 1]) + 0.299 * Float(bytes[i * 4 + 2])
+                }
+            }
+            var previous = luma()
+            var pop = [Float](repeating: 0, count: w * hgt)
+            for j in 1...steps {
+                let f = Float(j) / Float(steps)
+                // 云是四帧攒出来的：每步多画几帧让它收敛，量的才是几何和着色的闪，不是云的历史
+                for _ in 0..<5 {
+                    render(session, yaw: yaw + f * pixel, pitch: pitch + f * pixel * 0.63, hands: h, color: color, depth: depth,
+                           fovY: fov, watchOnLeft: shot.watchOnLeft, eye: shot.eye)
+                }
+                let now = luma()
+                for i in 0..<(w * hgt) { pop[i] = max(pop[i], abs(now[i] - previous[i])) }
+                previous = now
+            }
+            var heat = [UInt8](repeating: 255, count: w * hgt * 4)
+            var sum: Float = 0, hot = 0
+            for i in 0..<(w * hgt) {
+                sum += pop[i]
+                if pop[i] > 24 { hot += 1 }
+                let v = UInt8(min(pop[i] * 3, 255))
+                heat[i * 4] = v; heat[i * 4 + 1] = v; heat[i * 4 + 2] = v
+            }
+            savePNG(bgra: heat, width: w, height: hgt, to: outDir.appendingPathComponent("\(fileName)_flicker.png"))
+            print(String(format: "  闪烁 %@：平均每步最大跳变 %.3f，跳变 > 24 的像素 %.3f%%", fileName, sum / Float(w * hgt),
+                         100 * Float(hot) / Float(w * hgt)))
+        }
         let t = session.timeline
         print(String(format: "%@  t=%.1f s  %.0f m（离地 %.0f）  %@  雨 %.2f  %.1f ms  「%@」", fileName, t.time,
                      t.altitude, t.heightAboveGround, String(describing: t.phase), t.rainIntensity, ms,

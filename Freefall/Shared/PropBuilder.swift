@@ -22,6 +22,8 @@ enum PropMaterial {
     static let plain: Float = 8
     /// 朝上的面积着雪（石头、树、屋顶都能用）
     static let snowy: Float = 9
+    /// 一公里开外的树：朝镜头立起来的片（PropBuilder.farTree），着色同 foliage
+    static let foliageFar: Float = 10
 }
 
 /// 拼实体模型网格的工具：旋转体、长方体、圆环这几个基本形状。顶点在地面坐标里（x、海拔、z），
@@ -190,15 +192,32 @@ extension PropBuilder {
         }
     }
 
+    /// 一公里开外的一棵树：一个圆锥，但不用几何去凑——六个顶点都放在树根，顶点着色器（Terrain.h 的 cityVertex）
+    /// 按镜头的方向把它立成两个三角形（左、右、树尖；左、右、朝镜头的底沿）。normal 里存（半径，高，第几个角），
+    /// uv 是对着左右两条轮廓边的重心坐标（片元里拿它算离轮廓还有几个像素，淡出 = 抗锯齿）。
+    /// 比四棱锥少一半顶点，轮廓是圆的，边不闪。要放进 Layout.farTrees（单独一批、开着混合画）
+    mutating func farTree(base: SIMD3<Float>, radius: Float, height: Float, color: SIMD3<Float>) {
+        func corner(_ index: Float, _ uv: SIMD2<Float>, _ shade: Float) {
+            vertex(base, SIMD3(radius, height, index), uv, color * shade, PropMaterial.foliageFar)
+        }
+        corner(0, SIMD2(1, 0), 0.6); corner(1, SIMD2(0, 1), 0.6); corner(2, SIMD2(0, 0), 1.15)
+        corner(0, SIMD2(1, 0), 0.6); corner(1, SIMD2(0, 1), 0.6); corner(3, SIMD2(0, 0), 0.6)
+    }
+
+    /// 一批 farTree 从远往近排（撒点是从近往远的，每棵六个顶点，整棵整棵倒过来）
+    var farTreesBackToFront: [MeshVertex] {
+        stride(from: v.count - 6, through: 0, by: -6).flatMap { v[$0..<($0 + 6)] }
+    }
+
     /// 针叶树（云杉）：几层越往上越小的棱锥。near：近处的多一层、带树干
-    /// distant：一公里开外的，只剩一个四棱锥（12 个顶点）
+    /// distant：一公里开外的，一个朝镜头的圆锥片（farTree，6 个顶点；要用单独的 PropBuilder 收着）
     mutating func conifer(base: SIMD3<Float>, height: Float, near: Bool, seed: Int32, distant: Bool = false) {
         let tint = 0.8 + 0.5 * Self.h01(seed, 3)
         let green = SIMD3<Float>(0.020, 0.046, 0.022) * tint
         let r = height * (0.17 + 0.05 * Self.h01(seed, 5))
         let phase = 6.28 * Self.h01(seed, 9)
         if distant {
-            cone(base: base + SIMD3(0, height * 0.06, 0), radius: r * 1.05, height: height * 0.94, sides: 4, color: green * 1.05, material: PropMaterial.foliage, phase: phase)
+            farTree(base: base + SIMD3(0, height * 0.06, 0), radius: r * 1.05, height: height * 0.94, color: green * 1.05)
         } else if near {
             cone(base: base, radius: height * 0.022, height: height * 0.5, sides: 4, color: SIMD3(0.07, 0.05, 0.035), material: PropMaterial.bark)
             cone(base: base + SIMD3(0, height * 0.14, 0), radius: r, height: height * 0.45, sides: 6, color: green, material: PropMaterial.foliage, phase: phase)
@@ -217,8 +236,8 @@ extension PropBuilder {
         let rx = height * (0.30 + 0.10 * Self.h01(seed, 5)), ry = height * (0.30 + 0.06 * Self.h01(seed, 6))
         let phase = 6.28 * Self.h01(seed, 9)
         if distant {
-            // 一公里开外：一个矮胖的五棱锥当树冠（15 个顶点）
-            cone(base: base + SIMD3(0, height * 0.3, 0), radius: rx * 1.1, height: height * 0.7, sides: 5, color: c * 1.05, material: PropMaterial.foliage, phase: phase)
+            // 一公里开外：一个矮胖的圆锥当树冠（farTree，6 个顶点）
+            farTree(base: base + SIMD3(0, height * 0.3, 0), radius: rx * 1.1, height: height * 0.7, color: c * 1.05)
         } else if near {
             cone(base: base, radius: height * 0.035, height: height * 0.62, sides: 4, color: SIMD3(0.075, 0.058, 0.04), material: PropMaterial.bark)
             blob(center: base + SIMD3(0, height * 0.66, 0), radius: SIMD3(rx, ry, rx), sides: 7, color: c, material: PropMaterial.foliage, phase: phase, seed: seed)
