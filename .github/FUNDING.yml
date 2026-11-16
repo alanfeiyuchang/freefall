@@ -1,0 +1,5 @@
+# GitHub 仓库主页的「Sponsor」按钮（仓库公开以后才显示）。
+# 打赏页在 freefall-support 网站上（微信支付、Venmo），只从这里和 README 链过去，游戏里不链（App Store 审核指南 3.1.1）。
+custom:
+  - https://alanfeiyuchang.github.io/freefall-support/donate.html
+  - https://venmo.com/u/alanfeiyuchang
