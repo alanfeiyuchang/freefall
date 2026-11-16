@@ -78,3 +78,7 @@ tools/install-device.sh --launch   # 编 Release 装到 Vision Pro 上并启动
 ## 支持这个项目
 
 Freefall 是一个人做的独立游戏。喜欢的话，**[☕ 打赏开发者](https://alanfeiyuchang.github.io/freefall-support/donate.html)**（微信支付 / Venmo）——完全自愿，不解锁游戏里的任何东西。
+
+## 许可证
+
+源码按 [PolyForm Noncommercial 1.0.0](LICENSE) 公开：可以在非商业用途下使用、学习和修改。第三方素材和代码保持各自的许可，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

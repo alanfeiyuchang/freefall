@@ -85,3 +85,7 @@ The detailed docs are written in Chinese.
 ## Support the project
 
 Freefall is made by one indie developer. If you enjoy it, **[☕ tip the developer](https://alanfeiyuchang.github.io/freefall-support/donate.html)** (WeChat Pay / Venmo) — completely optional, and it doesn't unlock anything in the game.
+
+## License
+
+Source-available under [PolyForm Noncommercial 1.0.0](LICENSE): free to use, study and modify for noncommercial purposes. Third-party assets and code keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
