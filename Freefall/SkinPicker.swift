@@ -23,12 +23,6 @@ struct SkinPicker: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
-                Picker("皮肤", selection: $kind) {
-                    Text("降落伞").tag(Kind.canopy)
-                    Text("手套和袖子").tag(Kind.gloves)
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
                 carousel
                 details
                 Text("落进降落点，解锁那一关的降落伞；落进正中的黄色靶心，再解锁那一关的手套和袖子。")
@@ -41,6 +35,18 @@ struct SkinPicker: View {
             .padding(.bottom, 28)
             .navigationTitle("皮肤")
             .toolbar {
+                // 两组的切换放在顶栏正中，不和转盘挨着：转盘两边的卡在头显上是真的转出窗口平面的（有前后），
+                // 以前切换条就贴在它上面 10 点的地方、只有 45 点高，看着它捏有时候点不中
+                ToolbarItem(placement: .principal) {
+                    Picker("皮肤", selection: $kind) {
+                        Text("降落伞").tag(Kind.canopy)
+                        Text("手套和袖子").tag(Kind.gloves)
+                    }
+                    .pickerStyle(.segmented)
+                    .controlSize(.large)
+                    .frame(width: 420)
+                    .frame(maxWidth: .infinity)
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { dismiss() }
                 }
@@ -73,6 +79,8 @@ struct SkinPicker: View {
                             .opacity(1 - 0.3 * abs(tilt(index)))
                             .id(i)
                             .onTapGesture { withAnimation(.snappy) { focused = i } }
+                            // 转到侧面的卡（离中间一张半以上）看不见了，但还立在那里、朝你这边伸出十来厘米：不让它接视线
+                            .allowsHitTesting(abs(tilt(index)) < 1.5)
                     }
                 }
                 .scrollTargetLayout()

@@ -11,13 +11,18 @@ enum GrasslandProps {
         let spots = PropScatter.spots(scene: .grassland, radius: 2600, spacing: 9, full: 480) { p, _ in
             TerrainField.grasslandForest(p) > 0.55
         }
+        var farBatch = PropBuilder()       // 一公里开外的：朝镜头的片，单独一批
         for s in spots {
-            guard b.v.count < 170_000 else { break }
+            guard b.v.count + farBatch.v.count < 170_000 else { break }
             let far = s.distance > 600
             let distant = s.distance > 1100
             let height = (10 + 8 * s.size) * (distant ? 1.5 : far ? 1.2 : 1)
-            b.broadleaf(base: SIMD3(s.p.x, s.h - 0.4, s.p.y), height: height, near: !far, seed: s.seed, green: SIMD3(0.034, 0.072, 0.022), distant: distant)
+            if distant {
+                farBatch.broadleaf(base: SIMD3(s.p.x, s.h - 0.4, s.p.y), height: height, near: !far, seed: s.seed, green: SIMD3(0.034, 0.072, 0.022), distant: distant)
+            } else {
+                b.broadleaf(base: SIMD3(s.p.x, s.h - 0.4, s.p.y), height: height, near: !far, seed: s.seed, green: SIMD3(0.034, 0.072, 0.022), distant: distant)
+            }
         }
-        return SkyCity.Layout(buildings: b.v)
+        return SkyCity.Layout(buildings: b.v, farTrees: farBatch.farTreesBackToFront)
     }
 }

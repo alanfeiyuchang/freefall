@@ -15,7 +15,15 @@ struct StartView: View {
     @Environment(\.openURL) private var openURL
 
     @Bindable private var model = AppModel.shared
-    @State private var selection: Int?
+    /// 转盘要停在哪一关（关的编号）。一开始就是上次跳的那一关：窗口第一次排版时转盘直接停在那里，
+    /// 不等 onAppear 再滚过去
+    @State private var selection: Int? = AppModel.shared.scene.id
+    /// 转盘实际停在哪一关（从滚动偏移算的；nil = 还没报上来）。正常和 selection 是同一关。
+    /// 头显上跳完回来，转盘有时候停在别的卡上，而 selection 还是刚跳的那一关：看到的是一关、跳的是另一关。
+    /// 所以窗口打开后按它核对一次（见 carousel），跳的时候也以它为准（见 jump）
+    @State private var shown: Int?
+    /// 转盘停着没在滚
+    @State private var carouselIdle = true
     /// 正在问「拉环转向可能会晕，确定打开吗」
     @State private var confirmingSteering = false
     /// 皮肤选择页开着
@@ -119,7 +127,7 @@ struct StartView: View {
                 .font(.largeTitle.weight(.heavy))
                 .tracking(12)
             HStack(spacing: 28) {
-                record("本关最近", model.bestDistance[selection ?? model.scene.rawValue].map(Self.meters) ?? "—")
+                record("本关最近", model.bestDistance[currentScene.rawValue].map(Self.meters) ?? "—")
                 record("全部最近", model.overallBest.map { "\(Self.meters($0.distance)) · \($0.scene.name)" } ?? "—")
             }
             if let result = model.lastResult {
@@ -174,6 +182,8 @@ struct StartView: View {
 
     private var carousel: some View {
         GeometryReader { geo in
+            let step = cardSize.width + 28
+            ScrollViewReader { proxy in
             ScrollView(.horizontal) {
                 LazyHStack(spacing: 28) {
                     ForEach(JumpScene.allCases) { scene in
@@ -195,9 +205,32 @@ struct StartView: View {
             }
             .scrollTargetBehavior(.viewAligned)
             .scrollPosition(id: $selection, anchor: .center)
+            // 滚动偏移 + 左边的留白 = 中间那张卡的左边，除以一张卡占的宽度就是停在第几张
+            .onScrollGeometryChange(for: Int.self) { g in
+                Int(((g.contentOffset.x + g.contentInsets.leading) / step).rounded())
+            } action: { _, index in
+                shown = JumpScene.allCases[max(0, min(index, JumpScene.allCases.count - 1))].id
+            }
+            // 停下来时以看到的那一张为准
+            .onScrollPhaseChange { _, phase in
+                carouselIdle = phase == .idle
+                if phase == .idle, let shown, selection != shown { selection = shown }
+            }
             .safeAreaPadding(.horizontal, max((geo.size.width - cardSize.width) / 2, 0))
             .scrollIndicators(.hidden)
             .scrollClipDisabled()
+            // 窗口刚打开（跳完回来也是新开的窗口）、或者窗口改了大小：转盘没停在该停的那一关就滚过去
+            .task(id: geo.size.width) {
+                for wait in [150, 600] {
+                    try? await Task.sleep(for: .milliseconds(wait))
+                    guard !Task.isCancelled, carouselIdle, geo.size.width > 0 else { continue }
+                    if shown != model.scene.id {
+                        selection = model.scene.id
+                        proxy.scrollTo(model.scene.id, anchor: .center)
+                    }
+                }
+            }
+            }
         }
         .frame(height: cardSize.height + 20)
     }
@@ -227,8 +260,8 @@ struct StartView: View {
         .disabled(model.isFalling)
     }
 
-    /// 卡片转到的这一关
-    private var currentScene: JumpScene { JumpScene(rawValue: selection ?? model.scene.rawValue) ?? model.scene }
+    /// 卡片转到的这一关：转盘实际停着的那一张
+    private var currentScene: JumpScene { JumpScene(rawValue: shown ?? selection ?? model.scene.rawValue) ?? model.scene }
 
     /// 练习：跳过机舱和七十秒的自由落体，从离着陆区 5,000 英尺开始（这一关平安落地过一次以后才能点）
     private var practiceButton: some View {
@@ -349,6 +382,11 @@ struct StartView: View {
         // 手部追踪：抓扶杆、拉伞、拉操纵环、点表都靠它，没允许进不来（handsBlocked）。
         // 模拟器没有手部追踪（isSupported 是假），渲染器那边改成自动驾驶
         guard handAccess == .granted else { return }
+        // 跳的是转盘上看到的那一关
+        if currentScene != model.scene {
+            selection = currentScene.id
+            model.scene = currentScene
+        }
         model.handsAllowed = HandTrackingProvider.isSupported
         model.realHandsHidden = false
         if case .opened = await openImmersiveSpace(id: Self.spaceID) {
